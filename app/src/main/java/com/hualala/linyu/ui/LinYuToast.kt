@@ -66,11 +66,23 @@ fun LinYuToast(
                         contentDescription = null,
                         modifier = Modifier.size(32.dp)
                     )
-                    Text(
+                    // ⚠️ 不能直接用普通 Text：它没有 maxLines，长文本（比如
+                    // 「已绑定寝室：龙川北苑-3号楼南-3层-320」）会**换行**，
+                    // 气泡变成一个方块，弹出来的位置也跟着跳。
+                    //
+                    // TailEllipsisText 是单行的（maxLines = 1, softWrap = false）：
+                    // 先逐级缩字号，实在放不下才省略**开头**。
+                    // 这里要的正是省略开头——寝室名有辨识度的是结尾的「-3层-320」，
+                    // 从尾巴截就只剩「已绑定寝室：龙川北苑…」，等于什么都没说。
+                    //
+                    // weight(fill = false) 给它一个**有上限的宽度约束**，
+                    // 否则 BoxWithConstraints 量到的是 Int.MAX_VALUE，永远判定"放得下"。
+                    TailEllipsisText(
                         text = message ?: "",
                         color = Color.White,
                         fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
                 }
             }

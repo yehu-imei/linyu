@@ -126,6 +126,31 @@ suspend fun QzxyService.consumeOrderResultSafe(
     auth: Map<String, String>
 ): BaseResponse<CloseOrderResult> = parse(consumeOrderResult(snCode, orderNo, auth).awaitString(), CloseOrderResult::class.java)
 
+/**
+ * 同上，但要**原始响应体**。
+ *
+ * ## 为什么留这条口子
+ *
+ * 这个接口的响应结构以前一直没抓到过（`API-qzxy.md` 里只有汇总表和 Retrofit 签名，
+ * 没有响应样例），当时的解析模型是拿隔壁接口套的、纯猜。
+ * 09-18 真机跑通后已经拿到真实结构（见下方 `ConsumeOrderResult`），
+ * 但**解析仍然走原始串**，理由有两条：
+ *
+ * 1. **字段名可能因学校而异**。目前只有一个学校（金华职业技术大学）的样本，
+ *    而服务端在别的接口上确实有过按学校改字段名的先例（见 `CloseOrderResult` 的注释）。
+ *    按名字找金额比死认一个字段名耐操。
+ * 2. **出问题时日志里得有官方原话**。用户报「结算金额不对」，让他导出日志，
+ *    原始响应直接摆在那儿，不用再让他去抓包。
+ *
+ * `parse()` 会把 JSON 吃干抹净只吐 `BaseResponse<T>`，原始串在那一层就丢了，
+ * 所以要拿原话就必须从这儿绕过去。
+ */
+suspend fun QzxyService.consumeOrderResultRaw(
+    snCode: String,
+    orderNo: String,
+    auth: Map<String, String>
+): String = consumeOrderResult(snCode, orderNo, auth).awaitString()
+
 suspend fun QzxyService.queryUsingSafe(
     xfModel: Int = 0,
     snCode: String,

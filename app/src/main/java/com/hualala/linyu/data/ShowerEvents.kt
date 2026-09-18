@@ -24,7 +24,11 @@ object ShowerEvents {
         val snCode: String,
         val deviceName: String,
         val elapsedSec: Int,
-        val money: Double,
+        /**
+         * 本次消费金额。**null = 没拿到**（结算超时，两条路都失败），
+         * 和 `0.0`（账单在、确实没花钱）不是一回事——消费方别把 null 当成「无消费」。
+         */
+        val money: Double?,
         /** 设备自己超时关的（而不是被外部关闭） */
         val autoClosed: Boolean
     )

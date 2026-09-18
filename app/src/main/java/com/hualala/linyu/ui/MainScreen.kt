@@ -46,6 +46,7 @@ import androidx.compose.ui.res.painterResource
 import com.hualala.linyu.QrScanActivity
 import com.hualala.linyu.R
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.model.NearbyDevice
 import com.hualala.linyu.ui.theme.AppColors
 import com.hualala.linyu.utils.BackgroundManager
@@ -246,7 +247,9 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                         if (viewModel.hasBoundRoom) {
                             item {
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                    Text("🏠 已筛选：${PrefsHelper.boundRoom}",
+                                    // 存的就是寝室键，但老版本存过 `320房` / 完整设备名，
+                                    // 过一遍 roomKey 让两种历史值都显示成同一个样子
+                                    Text("🏠 已筛选：${DeviceInfo.roomKey(PrefsHelper.boundRoom) ?: PrefsHelper.boundRoom}",
                                         color = AppColors.Accent, fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium)
                                     Spacer(Modifier.width(8.dp))
@@ -459,8 +462,13 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                             Text("结算中...", color = AppColors.TextSecondary)
                         }
                     } else {
-                        Text("本次消费：¥%.2f".format(viewModel.autoCloseConsumed),
-                            fontWeight = FontWeight.Bold, color = AppColors.Accent)
+                        // 金额可能是 null（结算没拿到）——那是「还不知道」，
+                        // 不能显示成 ¥0.00，否则用户以为没花钱
+                        Text(
+                            viewModel.autoCloseConsumed?.let { "本次消费：¥%.2f".format(it) }
+                                ?: "消费金额稍后可在账单中查看",
+                            fontWeight = FontWeight.Bold, color = AppColors.Accent
+                        )
                     }
                 }
             },

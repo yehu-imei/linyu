@@ -14,6 +14,7 @@ import com.hualala.linyu.data.BalanceEstimator
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.model.CachedBill
 import com.hualala.linyu.model.CachedDevice
+import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.utils.PrefsHelper
 import com.hualala.linyu.utils.ScanPermission
 
@@ -97,12 +98,27 @@ object WidgetRenderer {
         val desc = deviceDesc()
 
         return if (ShowerController.isRunning(snCode)) {
+            // ⚠️ **正在用水时不受寝室筛选影响**，无条件照实显示。
+            //
+            // 用水中的卡片是用户**唯一的停止入口**。要是绑了别的寝室就把它藏成
+            // 「请先选择设备」，水还在流、卡片上却按不动——只能去 App 里停。
+            // 筛选是用来「少看到几台设备」的，不能拿来把正在跑的东西藏掉。
             WidgetState.Running(
                 deviceName = name,
                 deviceDesc = desc,
                 preDeduct = ShowerController.activeOrderFor(snCode)?.preDeduct ?: 0.0,
                 startedAtMs = ShowerController.startedAt(snCode)
             )
+        } else if (!DeviceInfo.inSameRoom(PrefsHelper.boundRoom, PrefsHelper.lastDeviceName)) {
+            // 空闲时：这台设备在别的寝室 → 当作还没选设备。
+            //
+            // 复用 NoDevice 是有意的：它的按钮**本来就不开阀**（2x4 翻到附近设备页、
+            // 2x2 打开 App），正是这里要的行为。
+            //
+            // ⚠️ 这只挡住「显示」。真正开阀的是 LinYuWidgetProvider.handleAction，
+            // 它自己直接读 lastDeviceSnCode、不走这里——那边必须加同一道判断，
+            // 否则会出现「桌面显示未选设备、点下去却把别寝室的阀开了」。
+            WidgetState.NoDevice
         } else {
             WidgetState.Idle(
                 name, desc, snCode,
@@ -181,8 +197,10 @@ object WidgetRenderer {
                 // 2x4 有自己的「附近设备」页，就地翻过去；2x2 没有页面，只能开 App。
                 // 以前这里 action 是空串，按钮等于摆设——点了什么都不会发生。
                 val wide = size == WidgetSize.WIDE
+                // 文案不能写「还没有用过设备」：绑定寝室后上次用的设备被清掉时也会落到
+                // 这个状态，而用户明明用过设备，只是它不在这个寝室里。
                 bindHeader(
-                    views, "还没有用过设备",
+                    views, "请先选择设备",
                     if (wide) "点按钮选附近设备" else "点此打开淋浴",
                     running = false, showDot = false
                 )
@@ -500,7 +518,18 @@ object WidgetRenderer {
      */
     private fun bindNearby(context: Context, views: RemoteViews, appWidgetId: Int) {
         val blocker = nearbyBlocker(context)
-        val list = readCache(PrefsHelper.widgetNearbyJson, Array<CachedDevice>::class.java)
+        val cached = readCache(PrefsHelper.widgetNearbyJson, Array<CachedDevice>::class.java)
+        // 按当前绑定过滤，**再**取前两条给那两行。
+        //
+        // 顺序不能反：快照存的是全量扫描结果，要是先 take(2) 再过滤，本寝室的设备
+        // 排在第 3 台之后就会一行都不剩，桌面显示「未发现热水器」——而它就在那儿。
+        //
+        // 也不用 [CachedDevice.name]（格式化过的显示名）来筛，用 [CachedDevice.rawName]：
+        // 显示名里有「洗手台→房」这类凭空造的字，和首页用的原始名对不上。
+        // 老快照没有 rawName 字段，回退到 name。
+        val list = cached.filter {
+            DeviceInfo.inSameRoom(PrefsHelper.boundRoom, it.rawName ?: it.name ?: "")
+        }.take(2)
         val showList = blocker == null && list.isNotEmpty()
 
         views.setTextViewText(R.id.widget_near_synced, syncedAgoText())

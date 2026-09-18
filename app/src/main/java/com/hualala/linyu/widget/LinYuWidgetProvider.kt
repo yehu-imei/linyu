@@ -12,6 +12,7 @@ import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
 import com.hualala.linyu.data.ShowerController
+import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.service.ShowerWatchService
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.Notifier
@@ -189,6 +190,22 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         val snCode = PrefsHelper.lastDeviceSnCode
         if (snCode.isNullOrEmpty() || !PrefsHelper.isLoggedIn) {
             WidgetBridge.clearBusy()
+            return
+        }
+
+        // ⚠️ 寝室闸门。`readState()` 里也有一道，但那一处只管**显示**——
+        // 开阀真正走的是这里，而这里读的是 Prefs 里的 lastDeviceSnCode，不经过渲染。
+        // 少了这道判断，就会出现「桌面显示『请先选择设备』，点下去却把别寝室的阀开了」：
+        // 用户看不到自己在开哪台，钱却已经花了。
+        //
+        // ⚠️ **只拦开阀**。停止和刷新必须放行——正在用水时卡片可能显示的是别的状态，
+        // 但水还在流，用户得有办法关掉它。把停止也拦住等于让人关不了水。
+        if (action == ACTION_START &&
+            !DeviceInfo.inSameRoom(PrefsHelper.boundRoom, PrefsHelper.lastDeviceName)
+        ) {
+            AppLogger.w("Widget 开阀被寝室筛选拦下：${PrefsHelper.lastDeviceName}")
+            WidgetBridge.clearBusy()
+            WidgetBridge.renderAll(context)
             return
         }
 

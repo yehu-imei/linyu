@@ -213,15 +213,39 @@ object Notifier {
         notify(context, id, n)
     }
 
-    /** 结果条正文：用时 + 消费金额 */
-    private fun resultBody(elapsedSec: Int, money: Double): String {
+    /**
+     * 结果条正文。
+     *
+     * ⚠️ `money == null`（两条路都没拿到金额）和 `money == 0`（账单在、金额确实是 0）
+     * **必须分开说**。以前一律显示「无消费」，于是「没查到」被说成了「没花钱」——
+     * 用户明明用了热水，通知却告诉他无消费。
+     */
+    private fun resultBody(elapsedSec: Int, money: Double?): String {
         val timeText = formatDuration(elapsedSec)
-        val moneyText = if (money > 0) "¥%.2f".format(money) else "无消费"
-        return "用时 $timeText · 消费 $moneyText"
+        return when {
+            money == null -> "用时 $timeText · 结算中"
+            money > 0 -> "用时 $timeText · 消费 ¥%.2f".format(money)
+            else -> "用时 $timeText · 无消费"
+        }
+    }
+
+    /**
+     * 「正在结算…」——关阀已经确认，账单金额还没回来。
+     *
+     * ⚠️ 用和结束通知**同一个 id**（[ID_FINISHED] / [ID_AUTO_CLOSED]），
+     * 所以拿到金额后 `showFinished` / `showAutoClosed` 会把这一条**原地更新**掉——
+     * 用户看到的是同一条通知从「结算中」变成「消费 ¥x.xx」，而不是先蹦一条再蹦一条。
+     *
+     * 不发横幅（`alert = false`）：结算只是个过渡态，没必要响两遍。
+     */
+    fun showSettling(context: Context, id: Int, title: String, elapsedSec: Int) {
+        if (!PrefsHelper.notifyEnabled) return
+        postEvent(context, id, alert = false, title = title,
+            body = "用时 ${formatDuration(elapsedSec)} · 结算中…")
     }
 
     /** 手动停止。点通知去账单页——刚消费完，多半想看这笔账 */
-    fun showFinished(context: Context, deviceName: String, elapsedSec: Int, money: Double) {
+    fun showFinished(context: Context, deviceName: String, elapsedSec: Int, money: Double?) {
         if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyFinished) return
         postEvent(context, ID_FINISHED, alert = false,
             title = "使用结束 · ${shortName(deviceName)}",
@@ -230,7 +254,7 @@ object Notifier {
     }
 
     /** 设备超时自动关停。同样去账单页 */
-    fun showAutoClosed(context: Context, deviceName: String, elapsedSec: Int, money: Double) {
+    fun showAutoClosed(context: Context, deviceName: String, elapsedSec: Int, money: Double?) {
         if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyAutoClose) return
         postEvent(context, ID_AUTO_CLOSED, alert = true,
             title = "设备已自动关停 · ${shortName(deviceName)}",

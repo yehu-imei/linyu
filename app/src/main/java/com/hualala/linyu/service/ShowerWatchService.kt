@@ -170,9 +170,12 @@ class ShowerWatchService : Service() {
 
         // 结算要轮询账单（最多约 7 秒），放在清理之后——金额晚一点到没关系，
         // 状态先对上是第一位的
+        // 同上：先挂「结算中」，拿到金额后原地更新成自动关停通知
+        Notifier.showSettling(this, Notifier.ID_AUTO_CLOSED, "设备已自动关停 · $deviceName", elapsed)
+
         val money = try {
-            ShowerController.settleAmount(orderNo, startedAt, snCode) ?: 0.0
-        } catch (_: Exception) { 0.0 }
+            ShowerController.settleAmount(orderNo, startedAt, snCode)
+        } catch (_: Exception) { null }
 
         Notifier.showAutoClosed(this, deviceName, elapsed, money)
         AppLogger.i("ShowerWatch 检测到结束 $snCode 用时 ${elapsed}s 消费 $money")
@@ -210,7 +213,12 @@ class ShowerWatchService : Service() {
         val startedAt = PrefsHelper.getStartedAt(snCode)
         val elapsed = elapsedSec(startedAt)
         val deviceName = PrefsHelper.lastDeviceName.ifEmpty { "热水器" }
-        val orderNo = ShowerController.activeOrderFor(snCode)?.orderNo ?: ""
+
+        // ⚠️ orderNo 必须在**关阀之前**敲定，所以它在 `markFinished` 之前读——
+        // 本地清理会把活跃订单删掉，之后就再也读不到（`queryUsing` 也问不出来了，
+        // 因为订单已经没了）。而开阀后 orderNo 是异步轮询补上的，
+        // 「开完水马上停」时本地存的还是空串，那就白丢了结算用的那个直答接口。
+        val orderNo = ShowerController.resolveOrderNo(snCode)
 
         // ── 第一阶段：立刻响应 ──
         //
@@ -247,9 +255,14 @@ class ShowerWatchService : Service() {
         WidgetBridge.clearBusy()
         LinYuWidget.refreshAll(this)
 
+        // 关阀已经确认，账单还在路上——先挂一条「结算中」。
+        // 它和结束通知**用的是同一个 id**，所以下面 showFinished 是**原地更新**，
+        // 用户看到的是同一条通知从「结算中」变成「消费 ¥x.xx」，不会蹦出两条。
+        Notifier.showSettling(this, Notifier.ID_FINISHED, "使用结束 · $deviceName", elapsed)
+
         val money = try {
-            ShowerController.settleAmount(orderNo, startedAt, snCode) ?: 0.0
-        } catch (_: Exception) { 0.0 }
+            ShowerController.settleAmount(orderNo, startedAt, snCode)
+        } catch (_: Exception) { null }
 
         Notifier.showFinished(this, deviceName, elapsed, money)
         AppLogger.i("ShowerWatch 用户结束 $snCode 用时 ${elapsed}s 消费 $money")

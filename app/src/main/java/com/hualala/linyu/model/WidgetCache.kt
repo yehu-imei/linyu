@@ -19,11 +19,22 @@ package com.hualala.linyu.model
  */
 data class CachedDevice(
     val emoji: String? = null,
+    /** 界面上显示的名字（**格式化过**的） */
     val name: String? = null,
     val desc: String? = null,
     val rssi: Int = 0,
     /** MAC 地址：小组件的「选用」要把这个带回 App 才能绑设备 */
-    val mac: String? = null
+    val mac: String? = null,
+    /**
+     * **原始**设备名，只用来做寝室筛选。
+     *
+     * 为什么单独存一份：[name] 是 `formatDeviceName` 格式化过的显示名，里面带
+     * 「洗手台→房」这种**凭空造字**的处理。拿它当筛选依据，关键词在真实设备名里
+     * 根本不存在，过滤必然落空。首页筛的是原始名，小组件也必须筛原始名，两边才一致。
+     *
+     * 老版本写的快照里没有这个字段 → 取出来是 null → 调用方回退到 [name]，不崩。
+     */
+    val rawName: String? = null
 )
 
 /** 账单的一条（小组件用）。字段可空的原因同上 */

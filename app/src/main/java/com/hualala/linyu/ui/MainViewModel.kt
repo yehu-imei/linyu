@@ -99,7 +99,8 @@ class MainViewModel : ViewModel() {
     var showAutoCloseDialog by mutableStateOf(false)
     var autoCloseDeviceName by mutableStateOf("")
     var autoCloseElapsed by mutableStateOf(0)
-    var autoCloseConsumed by mutableStateOf(0.0)
+    /** 自动关停那笔的金额。**null = 没拿到**，和 0.0（确实没花钱）不是一回事 */
+    var autoCloseConsumed by mutableStateOf<Double?>(null)
     var autoCloseLoading by mutableStateOf(false)
 
     var kickedOut by mutableStateOf(false)
@@ -480,9 +481,20 @@ class MainViewModel : ViewModel() {
      * **空结果也要写**：小组件靠 `widgetNearbyTime` 区分「扫过但附近没有」和「压根没扫过」，
      * 前者显示「未发现热水器」（和 App 首页一致），后者才提示回 App 扫一次。
      * 之前空结果直接 return，两种情况在桌面上长得一模一样。
+     *
+     * ⚠️ **不在这里按寝室过滤，也不在这里 `take(2)`**，两个都是坑：
+     *
+     * - 过滤搬到这里 = 快照被绑定的瞬间冻住。用户改绑寝室后，桌面上要等到**下次扫描**
+     *   才跟着变，中间这段时间显示的是上一个寝室的设备。
+     *   过滤放在小组件渲染时做，改绑定立刻生效。
+     * - `take(2)` 放在这里 = **在过滤之前截断**。小组件只能显示 2 行，要是扫到的前两台
+     *   恰好都是别的寝室，而本寝室的在第 3 台之后，过滤完就是空的——桌面显示
+     *   「未发现热水器」，可用户寝室里明明有设备。
+     *
+     * 所以这里存**全量**（BLE 扫描一般就几台，几百字节），筛选和截断都留给渲染时。
      */
     private fun cacheNearbyForWidget() {
-        val list = nearbyDevices.take(2).map { d ->
+        val list = nearbyDevices.map { d ->
             CachedDevice(
                 emoji = d.typeEmoji,
                 name = d.displayName,
@@ -490,7 +502,9 @@ class MainViewModel : ViewModel() {
                 desc = d.deviceInfo?.typeLabel
                     ?: if (d.name.startsWith("洗手台")) "洗手台热水器" else "卫生间热水器",
                 rssi = d.rssi,
-                mac = d.mac
+                mac = d.mac,
+                // 原始名，寝室筛选用。注意和 name 不是一回事
+                rawName = d.deviceInfo?.deviceName ?: d.name
             )
         }
         PrefsHelper.widgetNearbyJson = gson.toJson(list)
@@ -640,14 +654,14 @@ class MainViewModel : ViewModel() {
         if (!e.autoClosed) {
             // 用户自己结束的（通知栏「结束用水」按钮 / 小组件停止）：
             // 直接退出使用页就行，不用再弹一个确认框
-            finishShower(e.snCode, e.money.takeIf { it > 0 })
+            finishShower(e.snCode, e.money?.takeIf { it > 0 })
             return
         }
 
         // 设备自己超时关的：弹确认框把结果告诉用户
         autoCloseDeviceName = e.deviceName
         autoCloseElapsed = e.elapsedSec
-        autoCloseConsumed = e.money
+        autoCloseConsumed = e.money   // 可空：null 时弹窗会说「未能获取」而不是 ¥0.00
         autoCloseLoading = false
         showAutoCloseDialog = true
     }
@@ -715,8 +729,12 @@ class MainViewModel : ViewModel() {
         appContext?.let { Notifier.showStopping(it, lastDeviceName.ifEmpty { "热水器" }) }
         sessionScope().launch {
             try {
+                // ⚠️ orderNo 必须在**关阀之前**敲定：关阀成功后订单就没了，
+                // `queryUsing` 再也问不出来。而开阀后 orderNo 是异步轮询补上的，
+                // 「开完水马上停」时本地可能还是空串——那就白丢了结算用的那个直答接口。
+                val settledNo = ShowerController.resolveOrderNo(snCode).ifEmpty { oNo }
                 // 关阀 + 确认 + 清本地状态都在 ShowerController 里，小组件的「停止使用」走同一份逻辑
-                val outcome = ShowerController.closeValve(snCode, oNo)
+                val outcome = ShowerController.closeValve(snCode, settledNo)
                 checkKick(outcome.kickHint)
 
                 if (outcome is CloseOutcome.Failed) {
@@ -729,9 +747,19 @@ class MainViewModel : ViewModel() {
                 finishShower(snCode, null)
                 // 界面已退出（不阻塞），后台异步等账单结算后弹金额
                 sessionScope().launch {
-                    val amount = ShowerController.settleAmount(oNo, startTime, snCode)
+                    // 和小组件/通知栏那两个入口一样：先挂「结算中」，拿到金额原地更新
+                    val elapsed0 = if (startTime > 0)
+                        ((System.currentTimeMillis() - startTime) / 1000).toInt() else 0
+                    appContext?.let {
+                        Notifier.showSettling(
+                            it, Notifier.ID_FINISHED,
+                            "使用结束 · ${lastDeviceName.ifEmpty { "热水器" }}", elapsed0
+                        )
+                    }
+                    val amount = ShowerController.settleAmount(settledNo, startTime, snCode)
                     toastMessage = when {
-                        amount == null -> "热水器已关闭"
+                        // null = 两条路都没拿到金额，是「还不知道」而不是「没花钱」
+                        amount == null -> "已停止，消费金额稍后可在账单中查看"
                         amount > 0 -> "已停止，本次消费 ¥%.2f".format(amount)
                         else -> "热水器已关闭，本次无消费"
                     }
@@ -747,7 +775,7 @@ class MainViewModel : ViewModel() {
                             ctx,
                             lastDeviceName.ifEmpty { "热水器" },
                             elapsed,
-                            amount ?: 0.0
+                            amount      // 可空：null 会显示成「结算中」而不是「无消费」
                         )
                         ShowerWatchService.stop(ctx)
                     }
@@ -843,29 +871,47 @@ class MainViewModel : ViewModel() {
     /** 当前是否有绑定寝室 */
     val hasBoundRoom: Boolean get() = PrefsHelper.boundRoom.isNotBlank()
 
-    /** 从附近设备名提取位置关键词：去掉 "热水器-"/"热水表-"/"洗手台N-" 前缀 */
-    fun extractLocationFromDevice(name: String): String {
-        var n = name
-        n = n.replaceFirst(Regex("^洗手台\\d*"), "").trim('-').trim()
-        n = n.replaceFirst(Regex("^热水[器表]"), "").trim('-').trim()
-        return n.trim()
-    }
+    /**
+     * 这台设备在不在绑定的寝室内。
+     *
+     * `boundRoom` 里存的是**完整的设备名**（选择附近时存的是被选中的那台的原名），
+     * 所以两边都要先过一遍 [DeviceInfo.roomKey] 取关键词，再**等值**比较——
+     * 规则和原因都在那里写着，别在这儿另写一套。
+     */
+    fun matchesBoundRoom(deviceName: String): Boolean =
+        DeviceInfo.inSameRoom(PrefsHelper.boundRoom, deviceName)
 
-    // 归一化后的寝室关键词缓存，避免每次过滤都重复做字符串替换
-    private var cachedRoomKey: String? = null
-    private var cachedNormKey: String = ""
-
-    /** 判断设备名是否匹配绑定的寝室（忽略大小写、空格、连字符） */
-    fun matchesBoundRoom(deviceName: String): Boolean {
-        val key = PrefsHelper.boundRoom.trim()
-        if (key.isEmpty()) return true
-        if (cachedRoomKey != key) {
-            cachedRoomKey = key
-            cachedNormKey = key.lowercase().replace(" ", "").replace("-", "")
+    /**
+     * 绑定/换绑寝室之后收尾：**清掉寝室外的「上次使用设备」**，并让桌面跟上来。
+     *
+     * 为什么是「清掉」而不是「只是不显示」：`lastDeviceSnCode` 是小组件主按钮的
+     * **开阀依据**。留着它就等于留着一条「点一下就开别寝室的水」的路——
+     * 虽然小组件那边也加了一道闸门，但两处都拦不如根本不留下这台设备。
+     *
+     * ⚠️ **正在用水的设备不清**：那条记录对应着一个活跃订单，清掉会让水还在流、
+     * 卡片却没了停止入口。用水中的卡片本来就不参与筛选（见 WidgetRenderer.readState），
+     * 所以留着它是安全的。等这单结束，用户再重新选设备或改绑定。
+     */
+    fun onBoundRoomChanged() {
+        val name = PrefsHelper.lastDeviceName
+        val sn = PrefsHelper.lastDeviceSnCode
+        if (name.isEmpty() || sn.isEmpty()) { refreshWidgets(); return }
+        if (DeviceInfo.inSameRoom(PrefsHelper.boundRoom, name)) { refreshWidgets(); return }
+        if (ShowerController.isRunning(sn)) {
+            AppLogger.w("绑定寝室后没清上次设备：$name 正在用水，保留停止入口")
+            refreshWidgets()
+            return
         }
-        if (cachedNormKey.isEmpty()) return true
-        val n = deviceName.lowercase().replace(" ", "").replace("-", "")
-        return n.contains(cachedNormKey)
+        PrefsHelper.lastDeviceSnCode = ""
+        PrefsHelper.lastDeviceName = ""
+        PrefsHelper.lastDeviceMac = ""
+        PrefsHelper.lastDeviceEmoji = "🚿"
+        lastDeviceSnCode = ""
+        lastDeviceName = ""
+        lastDeviceMac = ""
+        lastDeviceEmoji = "🚿"
+        AppLogger.i("绑定寝室后清掉了寝室外的上次设备：$name")
+        refreshWidgets()
     }
 
     // ── 挤号 ──

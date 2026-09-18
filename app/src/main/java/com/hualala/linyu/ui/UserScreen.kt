@@ -422,7 +422,6 @@ private fun CollapsibleHeader(
 
 @Composable
 private fun BoundRoomCard(viewModel: MainViewModel?) {
-    var boundRoomInput by remember { mutableStateOf(PrefsHelper.boundRoom) }
     var boundRoom by remember { mutableStateOf(PrefsHelper.boundRoom) }
     var showRoomPicker by remember { mutableStateOf(false) }
 
@@ -433,13 +432,19 @@ private fun BoundRoomCard(viewModel: MainViewModel?) {
             Spacer(Modifier.height(8.dp))
             if (boundRoom.isNotEmpty()) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("🏠 $boundRoom", fontWeight = FontWeight.Medium,
+                    // 存的就是寝室键本身（`龙川北苑-3号楼南-3层-320`），直接显示。
+                    // 外面再套一次 roomKey 是为了**兼容老版本存下来的值**——
+                    // 那些可能是 `320房`，甚至是完整设备名。
+                    Text("🏠 ${DeviceInfo.roomKey(boundRoom) ?: boundRoom}",
+                        fontWeight = FontWeight.Medium,
                         color = AppColors.TextPrimary, maxLines = 1,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Spacer(Modifier.width(8.dp))
                     TextButton(onClick = {
-                        boundRoom = ""; boundRoomInput = ""
+                        boundRoom = ""
                         PrefsHelper.boundRoom = ""
+                        // 取消绑定后桌面要立刻恢复成「上次使用的设备」，不能等下次刷新
+                        viewModel?.onBoundRoomChanged()
                     }) {
                         Text("取消绑定", color = AppColors.Danger, fontSize = 12.sp)
                     }
@@ -448,45 +453,34 @@ private fun BoundRoomCard(viewModel: MainViewModel?) {
                 Text("未绑定寝室，设备列表将显示全部设备",
                     color = AppColors.TextSecondary, fontSize = 12.sp)
             }
-            Spacer(Modifier.height(10.dp))
-            OutlinedTextField(
-                value = boundRoomInput,
-                onValueChange = { boundRoomInput = it },
-                label = {
-                    Text("输入关键词（如：3号楼南/320）",
-                        fontSize = 13.sp, color = AppColors.TextSecondary)
-                },
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(onClick = {
-                    if (boundRoomInput.trim().isNotEmpty()) {
-                        val v = boundRoomInput.trim()
-                        boundRoom = v; PrefsHelper.boundRoom = v
-                        viewModel?.toastMessage = "已绑定寝室：$v"
-                    }
-                }, shape = RoundedCornerShape(12.dp), modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.Accent)) {
-                    Text("保存")
-                }
-                OutlinedButton(onClick = { showRoomPicker = true },
-                    shape = RoundedCornerShape(12.dp), modifier = Modifier.weight(1f)) {
-                    Text("选择附近")
-                }
+            Spacer(Modifier.height(12.dp))
+            // 只有「选择附近」一条路，**没有手工输入框**。
+            //
+            // 手工输入存进去的是一个没和设备名核对过的字符串，筛不出来的时候
+            // 用户分不清是"输错了"还是"这层真没设备"——静默失败。
+            // 选择附近列出来的每条都是扫描到的真实寝室，存下来的值必然能匹配上。
+            OutlinedButton(onClick = { showRoomPicker = true },
+                shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                Text("选择附近")
             }
         }
     }
 
     if (showRoomPicker) {
-        // 只取房间那一截（「龙川北苑 3号楼南 320房」→「320房」）。
-        // 列表本来就窄，全称会被省略号截成「龙川北苑 3号楼…」，几栋楼看起来一模一样。
-        // 同一间房的热水器和洗手台是两个设备，但房间是同一个——去重后只出现一次。
-        val devices = viewModel?.nearbyDevices?.mapNotNull {
-            DeviceInfo.roomLabel(it.deviceInfo?.deviceName ?: it.name)
-        }?.distinct() ?: emptyList()
+        // 一间寝室一条，列出的是**寝室键**本身（`龙川北苑-3号楼南-3层-320`）。
+        //
+        // ⚠️ 不显示、也不保存「某一台设备的完整名」。那样的话同一间寝室会出现两种
+        // 结果——只扫到热水表时是 `热水表-…-320房`，只扫到洗手台时是
+        // `洗手台54-…-320洗手台`，显示不一致、"绑定"下来的东西也不一致。
+        // 键是从设备名掐头去尾得来的，和扫到哪一台无关。
+        //
+        // 去重也就顺理成章：同一间寝室的两台设备算出来的键本来就相等。
+        val devices: List<String> = run {
+            val seen = mutableSetOf<String>()
+            viewModel?.nearbyDevices?.mapNotNull { d ->
+                DeviceInfo.roomKey(d.deviceInfo?.deviceName ?: d.name)?.takeIf { seen.add(it) }
+            } ?: emptyList()
+        }
         AlertDialog(
             onDismissRequest = { showRoomPicker = false },
             title = { Text("选择设备位置", fontWeight = FontWeight.Bold) },
@@ -500,19 +494,25 @@ private fun BoundRoomCard(viewModel: MainViewModel?) {
                         modifier = Modifier.fillMaxWidth().heightIn(max = 210.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        items(devices) { loc ->
+                        items(devices) { key ->
                             TextButton(
                                 onClick = {
-                                    boundRoom = loc
-                                    boundRoomInput = loc
-                                    PrefsHelper.boundRoom = loc
+                                    boundRoom = key
+                                    PrefsHelper.boundRoom = key
                                     showRoomPicker = false
-                                    viewModel?.toastMessage = "已绑定寝室：$loc"
+                                    viewModel?.onBoundRoomChanged()
+                                    viewModel?.toastMessage = "已绑定寝室：$key"
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text(loc, color = AppColors.TextPrimary, maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                                // 头部省略、单行不换行：先缩字号，实在放不下才省略开头。
+                                // 尾部是「3层-320」这一段，正是辨认寝室需要的信息
+                                TailEllipsisText(
+                                    text = key,
+                                    color = AppColors.TextPrimary,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
                             }
                         }
                     }
