@@ -201,7 +201,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         // ⚠️ **只拦开阀**。停止和刷新必须放行——正在用水时卡片可能显示的是别的状态，
         // 但水还在流，用户得有办法关掉它。把停止也拦住等于让人关不了水。
         if (action == ACTION_START &&
-            !DeviceInfo.inSameRoom(PrefsHelper.boundRoom, PrefsHelper.lastDeviceName)
+            !DeviceInfo.inSameRoom(PrefsHelper.boundRoom, ShowerController.roomFilterName())
         ) {
             AppLogger.w("Widget 开阀被寝室筛选拦下：${PrefsHelper.lastDeviceName}")
             WidgetBridge.clearBusy()

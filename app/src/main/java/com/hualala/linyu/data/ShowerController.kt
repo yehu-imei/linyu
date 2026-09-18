@@ -780,10 +780,20 @@ object ShowerController {
         PrefsHelper.saveActiveOrders(list)
     }
 
+    /**
+     * 当前设备的**寝室筛选用名**：优先原始设备名，老数据回退到显示名。
+     *
+     * 寝室键是从原始名取的，不能拿显示名去比（显示名被 `formatDeviceName` 去掉了楼层）。
+     * 见 [PrefsHelper.lastDeviceRawName] 的说明。
+     */
+    fun roomFilterName(): String =
+        PrefsHelper.lastDeviceRawName.ifEmpty { PrefsHelper.lastDeviceName }
+
     /** 记录「上次使用的设备」。小组件调用时 device 为 null（信息本来就在 Prefs 里），跳过即可 */
     private fun rememberDevice(device: DeviceInfo?) {
         if (device == null) return
         PrefsHelper.lastDeviceName = device.displayName
+        PrefsHelper.lastDeviceRawName = device.deviceName
         PrefsHelper.lastDeviceMac = device.macAddress
         PrefsHelper.lastDeviceSnCode = device.snCode
         PrefsHelper.lastDeviceEmoji = device.typeEmoji

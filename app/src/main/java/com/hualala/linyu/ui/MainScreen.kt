@@ -135,7 +135,9 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     // 按寝室筛选设备：用 remember 缓存，仅当设备列表或绑定寝室变化时才重新过滤
     val filteredDevices = remember(
         viewModel.nearbyDevices.toList(),
-        PrefsHelper.boundRoom
+        // ⚠️ 用 ViewModel 里的状态，不是 PrefsHelper.boundRoom。
+        // 读 pref 不会触发重组，取消绑定后列表不会立刻更新（要等下一次扫描）。
+        viewModel.boundRoom
     ) {
         viewModel.nearbyDevices.filter {
             val n = it.deviceInfo?.deviceName ?: it.name
@@ -249,12 +251,12 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                     // 存的就是寝室键，但老版本存过 `320房` / 完整设备名，
                                     // 过一遍 roomKey 让两种历史值都显示成同一个样子
-                                    Text("🏠 已筛选：${DeviceInfo.roomKey(PrefsHelper.boundRoom) ?: PrefsHelper.boundRoom}",
+                                    Text("🏠 已筛选：${DeviceInfo.roomKey(viewModel.boundRoom) ?: viewModel.boundRoom}",
                                         color = AppColors.Accent, fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium)
                                     Spacer(Modifier.width(8.dp))
                                     TextButton(onClick = {
-                                        PrefsHelper.boundRoom = ""
+                                        viewModel.applyBoundRoom("")
                                         viewModel.toastMessage = "已取消寝室筛选"
                                     }, contentPadding = PaddingValues(0.dp)) {
                                         Text("取消筛选", fontSize = 12.sp, color = AppColors.TextSecondary)

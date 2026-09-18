@@ -109,7 +109,7 @@ object WidgetRenderer {
                 preDeduct = ShowerController.activeOrderFor(snCode)?.preDeduct ?: 0.0,
                 startedAtMs = ShowerController.startedAt(snCode)
             )
-        } else if (!DeviceInfo.inSameRoom(PrefsHelper.boundRoom, PrefsHelper.lastDeviceName)) {
+        } else if (!DeviceInfo.inSameRoom(PrefsHelper.boundRoom, ShowerController.roomFilterName())) {
             // 空闲时：这台设备在别的寝室 → 当作还没选设备。
             //
             // 复用 NoDevice 是有意的：它的按钮**本来就不开阀**（2x4 翻到附近设备页、

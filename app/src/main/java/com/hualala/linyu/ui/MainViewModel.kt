@@ -230,6 +230,7 @@ class MainViewModel : ViewModel() {
         lastDeviceMac = PrefsHelper.lastDeviceMac
         lastDeviceSnCode = PrefsHelper.lastDeviceSnCode
         lastDeviceEmoji = PrefsHelper.lastDeviceEmoji
+        boundRoom = PrefsHelper.boundRoom
 
         // 恢复所有活跃订单
         val saved = PrefsHelper.getActiveOrders()
@@ -274,6 +275,7 @@ class MainViewModel : ViewModel() {
                     PrefsHelper.lastDeviceSnCode = info.snCode
                     PrefsHelper.lastDeviceMac = info.macAddress
                     PrefsHelper.lastDeviceName = info.displayName
+                    PrefsHelper.lastDeviceRawName = info.deviceName   // 寝室筛选用，见 PrefsHelper
                     PrefsHelper.lastDeviceEmoji = info.typeEmoji
                     // 弹出设备详情
                     selectedDevice = info; showDeviceDetail = true
@@ -574,6 +576,7 @@ class MainViewModel : ViewModel() {
         lastDeviceName = device.displayName; lastDeviceMac = device.macAddress; lastDeviceSnCode = snCode; lastDeviceEmoji = device.typeEmoji
         PrefsHelper.lastDeviceName = device.displayName; PrefsHelper.lastDeviceMac = device.macAddress
         PrefsHelper.lastDeviceSnCode = snCode; PrefsHelper.lastDeviceEmoji = device.typeEmoji
+        PrefsHelper.lastDeviceRawName = device.deviceName   // 寝室筛选用，见 PrefsHelper
 
         // 交给前台服务持续监控：超时自动关停、被外部关闭，都要能立刻发现。
         // 这两件事以前挂在下头的 timerJob 上，退出洗澡页就被 cancel 了。
@@ -868,8 +871,29 @@ class MainViewModel : ViewModel() {
 
     // ── 寝室绑定 / 设备筛选 ──
 
+    /**
+     * 绑定的寝室键。
+     *
+     * ⚠️ 必须是 Compose 状态，**不能直接读 `PrefsHelper.boundRoom`**。
+     * SharedPreferences 是普通属性，改它不会触发重组——首页设备列表的过滤结果
+     * 是用 `remember(..., boundRoom)` 缓存的，读 pref 的话取消绑定后列表要等
+     * 下一次扫描（或别的什么把界面顶一下）才会更新，表现就是「点了取消没反应」。
+     *
+     * 改绑定一律走 [applyBoundRoom]，别绕过它直接写 PrefsHelper。
+     */
+    var boundRoom by mutableStateOf(PrefsHelper.boundRoom)
+        private set
+
+    /** 绑定/取消绑定寝室。写 Prefs + 更新状态 + 收尾（清寝室外的上次设备、刷新桌面） */
+    fun applyBoundRoom(value: String) {
+        val v = value.trim()
+        PrefsHelper.boundRoom = v
+        boundRoom = v
+        onBoundRoomChanged()
+    }
+
     /** 当前是否有绑定寝室 */
-    val hasBoundRoom: Boolean get() = PrefsHelper.boundRoom.isNotBlank()
+    val hasBoundRoom: Boolean get() = boundRoom.isNotBlank()
 
     /**
      * 这台设备在不在绑定的寝室内。
@@ -896,7 +920,13 @@ class MainViewModel : ViewModel() {
         val name = PrefsHelper.lastDeviceName
         val sn = PrefsHelper.lastDeviceSnCode
         if (name.isEmpty() || sn.isEmpty()) { refreshWidgets(); return }
-        if (DeviceInfo.inSameRoom(PrefsHelper.boundRoom, name)) { refreshWidgets(); return }
+        // ⚠️ 判断用**原始设备名**（roomFilterName），不是 name。
+        // name 是格式化过的显示名，楼层被 formatDeviceName 去掉了，拿它算出来的
+        // 寝室键和绑定值对不上——会把一个**本来就在寝室里**的设备误清掉。
+        if (DeviceInfo.inSameRoom(PrefsHelper.boundRoom, ShowerController.roomFilterName())) {
+            refreshWidgets()
+            return
+        }
         if (ShowerController.isRunning(sn)) {
             AppLogger.w("绑定寝室后没清上次设备：$name 正在用水，保留停止入口")
             refreshWidgets()
@@ -904,6 +934,7 @@ class MainViewModel : ViewModel() {
         }
         PrefsHelper.lastDeviceSnCode = ""
         PrefsHelper.lastDeviceName = ""
+        PrefsHelper.lastDeviceRawName = ""
         PrefsHelper.lastDeviceMac = ""
         PrefsHelper.lastDeviceEmoji = "🚿"
         lastDeviceSnCode = ""

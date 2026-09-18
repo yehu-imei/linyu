@@ -422,7 +422,10 @@ private fun CollapsibleHeader(
 
 @Composable
 private fun BoundRoomCard(viewModel: MainViewModel?) {
-    var boundRoom by remember { mutableStateOf(PrefsHelper.boundRoom) }
+    // ⚠️ 显示的是 ViewModel 里的状态，不是本地 state。
+    // 用本地 state 的话首页那份 `remember(..., viewModel.boundRoom)` 不会被触发，
+    // 在「我的」页改完绑定、切回首页时列表还是旧的。
+    val boundRoom = viewModel?.boundRoom ?: PrefsHelper.boundRoom
     var showRoomPicker by remember { mutableStateOf(false) }
 
     BaseCard {
@@ -440,12 +443,9 @@ private fun BoundRoomCard(viewModel: MainViewModel?) {
                         color = AppColors.TextPrimary, maxLines = 1,
                         overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = {
-                        boundRoom = ""
-                        PrefsHelper.boundRoom = ""
-                        // 取消绑定后桌面要立刻恢复成「上次使用的设备」，不能等下次刷新
-                        viewModel?.onBoundRoomChanged()
-                    }) {
+                    // 取消绑定走 applyBoundRoom：写 Prefs + 更新 Compose 状态（首页列表立刻刷新）
+                    // + 收尾（桌面恢复成「上次使用的设备」），三件事一次做完
+                    TextButton(onClick = { viewModel?.applyBoundRoom("") }) {
                         Text("取消绑定", color = AppColors.Danger, fontSize = 12.sp)
                     }
                 }
@@ -497,10 +497,8 @@ private fun BoundRoomCard(viewModel: MainViewModel?) {
                         items(devices) { key ->
                             TextButton(
                                 onClick = {
-                                    boundRoom = key
-                                    PrefsHelper.boundRoom = key
                                     showRoomPicker = false
-                                    viewModel?.onBoundRoomChanged()
+                                    viewModel?.applyBoundRoom(key)
                                     viewModel?.toastMessage = "已绑定寝室：$key"
                                 },
                                 modifier = Modifier.fillMaxWidth()

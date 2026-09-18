@@ -102,6 +102,23 @@ object PrefsHelper {
 
     // ── Last device ──
     var lastDeviceName: String get() = prefs.getString("lastDeviceName", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceName", v).apply()
+
+    /**
+     * 上次使用设备的**原始**设备名（`DeviceInfo.deviceName`），只用来做寝室筛选。
+     *
+     * ⚠️ 不能拿 [lastDeviceName] 去筛寝室。[lastDeviceName] 存的是
+     * `DeviceInfo.displayName`，也就是 [com.hualala.linyu.model.DeviceInfo.formatDeviceName]
+     * 处理过的**显示名**——它会把 `-3层-` 里的楼层去掉、把结尾的「洗手台」换成「房」。
+     *
+     * 而寝室键是从**原始名**取出来的（`龙川北苑-3号楼南-3层-320`）。两边算出来的键
+     * 一个带楼层一个不带，永远不相等：绑定寝室后小组件会一直显示「请先选择设备」，
+     * 哪怕这台设备就在绑定的寝室里。实测就是这么挂的。
+     *
+     * 老用户没有这个字段（空串），调用方回退到 [lastDeviceName]——用老的短绑定值
+     * （`320房`）时靠 `endsWith` 兜底仍然能匹配上。
+     */
+    var lastDeviceRawName: String get() = prefs.getString("lastDeviceRawName", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceRawName", v).apply()
+
     var lastDeviceMac: String get() = prefs.getString("lastDeviceMac", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceMac", v).apply()
     var lastDeviceSnCode: String get() = prefs.getString("lastDeviceSnCode", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceSnCode", v).apply()
     var lastDeviceEmoji: String get() = prefs.getString("lastDeviceEmoji", "🚿") ?: "🚿"; set(v) = prefs.edit().putString("lastDeviceEmoji", v).apply()
