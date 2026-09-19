@@ -3,12 +3,12 @@
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-purple.svg)](https://developer.android.com/jetpack/compose)
-[![Version](https://img.shields.io/badge/Version-v3.0.2-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v3.0.3-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**⬇️ [下载最新 APK (v3.0.2)](https://github.com/yehu-imei/linyu/releases/latest)**
+**⬇️ [下载最新 APK (v3.0.3)](https://github.com/yehu-imei/linyu/releases/latest)**
 
-> 安装包 12.5 MB，仅支持 64 位（arm64-v8a）设备。
+> 安装包 12.6 MB，仅支持 64 位（arm64-v8a）设备。
 >
 > **国内下载慢？用 Gitee 镜像** → https://gitee.com/yehu-imei/linyu/releases
 > App 内的更新下载默认也走镜像。
@@ -49,13 +49,13 @@
 - 📡 **蓝牙扫描** — BLE 扫描附近设备，按信号强度排序；权限按需申请，Android 12+ 不需要定位权限
 - 🎨 **统一的设备图标** — 热水器 / 洗手台用单色图标，不再受各厂商 emoji 字形影响
 - 📷 **扫码绑定** — 扫描设备二维码，直接弹出设备详情，无需蓝牙；也可以**从相册选图识别**，光线不足时有**手电筒**补光
-- 🏠 **绑定寝室** — 绑定寝室关键词，设备列表只显示寝室内的设备
+- 🏠 **绑定寝室** — 在「选择附近」里选一间寝室，首页**和桌面小组件**的设备列表都只显示该寝室的设备；绑定后如果「上次使用的设备」不在这个寝室里会被清掉
 - 🚿 **一键洗澡** — 选择设备即可开始，支持停止和恢复；开阀确认，失败有提示
 - ⏳ **自动关停倒计时** — 显示闲置自动关闭倒计时，关闭时弹出确认框
 - 🔔 **后台用水监控** — 监控跑在前台服务里，**退出 App、划掉最近任务都不影响**：超时自动关停照常生效
 - 🔕 **系统通知** — 用水期间通知栏常驻状态条（显示已用时间）并带「结束用水」按钮；结束、超时自动关停、**开阀失败**都有提醒
   - 开阀失败 / 设备被占用 / 超时关停会弹**横幅**，「横幅提醒」可单独关掉
-- 💰 **消费结算** — 关阀后通过账单自动显示本次消费金额
+- 💰 **消费结算** — 关阀后直接向服务端查这一单结算了多少钱，结束通知里给出**本次消费金额和用水时长**；金额还没回来时先显示「结算中」，拿到后原地更新
 - 🚰 **饮水机支持（待测试）** — 自动识别直饮水机，绿色主题区分，设备名智能精简
 - 🧩 **桌面小组件** — 1x1 / 2x2 / 2x4 三种尺寸，桌面直接启停热水；深色液态玻璃卡片，布局随尺寸自适应
   - **1x1 是一个按钮**：一格大小，点一下开/关；顶部小字标「空闲 / 使用中 / 占用中」，操作中显示转圈

@@ -37,10 +37,10 @@
 | 钱包余额 | GET | `/account/wallet` | ✅ | 获取趣智校园钱包余额 |
 | 设备信息 | GET | `/device/info/mac` | ✅ | 通过 MAC 地址获取设备详情 |
 | 开始洗澡 | POST | `/order/tcpDevice/downRate/rateOrder` | ✅ | 开启热水器 |
-| 开阀结果确认 | POST | `/order/tcpDevice/query/downRateResult` | ✅ | 确认开阀是否成功（v1.2.0 新增） |
+| 开阀结果确认 | POST | `/order/tcpDevice/query/downRateResult` | ✅ | 确认开阀是否成功，**`orderNo` 在这里就能拿到**（v1.2.0 新增，v3.0.3 修正）|
 | 停止洗澡 | POST | `/order/tcpDevice/closeOrder` | ✅ | 关闭热水器 |
-| 关阀结果确认 | POST | `/order/tcpDevice/closeOrder/result/query` | ✅ | 确认关阀是否成功（v1.2.0 新增） |
-| 消费结果查询 | POST | `/order/consumeOrder/result/query` | ✅ | 查询消费结算结果 |
+| 关阀结果确认 | POST | `/order/tcpDevice/closeOrder/result/query` | ✅ | 确认关阀是否成功。实测 `data` 恒为 `null`（v1.2.0 新增）|
+| 消费结果查询 | POST | `/order/consumeOrder/result/query` | ✅ | 查询消费结算结果。⚠️ `consumeMoney` 单位是**厘**，见 [4.11](#411-消费结果查询) |
 | 查询进行中 | POST | `/order/tcpDevice/query/rateOrder/using` | ✅ | 查询设备是否有进行中的订单 |
 | 账单列表 | GET | `/order/query/account/bill/list` | ✅ | 获取月度账单 |
 | 账单详情 | GET | `/order/query/account/bill/detail` | ✅ | 获取单笔账单详情 |
@@ -270,7 +270,79 @@ xfModel=0&snCode=QZXY20230001&loginCode=xxx&userId=xxx&...
 }
 ```
 
-> ⚠️ 调用此接口后，设备不会立即返回 orderNo。需要通过 MQTT 推送或轮询 `queryUsing` 接口获取。
+> ⚠️ **`downRate` 本身确实不返回 orderNo，但紧接着的 `downRateResult` 会返回——不用等 MQTT，也不用轮询 `queryUsing`。**
+>
+> 这条结论以前写错了（说是"需要通过 MQTT 推送或轮询 `queryUsing` 获取"），
+> 导致客户端多绕了一圈：拿到 orderNo 只用来判断"开没开"，落盘时写空串，
+> 再靠一个独立的轮询任务事后补上。那个轮询要 11 轮 × 800ms，
+> **"开完水马上停"时还没跑出结果，本地就是空的**——而关阀、结算这几个接口全都要 orderNo。
+>
+> 实测（09-18 15:06:28，见 4.3.1）：
+>
+> ```json
+> {"success":true,"errorCode":0,"errorMessage":"成功","data":{
+>   "deviceSnCode":"C47F0EDCBCC7",
+>   "consumeDate":"20260918150627",
+>   "orderNo":"13202609181506275230",
+>   "preDeductMoney":0,"accountType":2,"consumeSceneType":4,
+>   "state":1,"result":0,"createTime":"1789715217", ...}}
+> ```
+
+### 4.3.1 开阀结果确认
+
+```
+POST /order/tcpDevice/query/downRateResult
+Content-Type: application/x-www-form-urlencoded
+
+snCode=QZXY20230001&loginCode=xxx&userId=xxx&...
+```
+
+**响应（已确认开阀）**：
+
+> ⚠️ 下面这份是**原样摘录**，不是整理过的样例——日志按行长截断，所以
+> `liquidOrderStatusD...` 后面还有内容没记下来。里面**没有** `autoDisConTime`，
+> 不等于服务端不返回它（见下方字段表）。
+
+```json
+{
+  "success": true,
+  "errorCode": 0,
+  "errorMessage": "成功",
+  "data": {
+    "projectId": null,
+    "accountId": 41681,
+    "deviceSnCode": "C47F0EDCBCC7",
+    "consumeDate": "20260918150655",
+    "orderNo": "13202609181506558872",
+    "preDeductMoney": 0,
+    "accountType": 2,
+    "consumeSceneType": 4,
+    "xfModelName": null,
+    "state": 1,
+    "result": 0,
+    "createTime": "1789715217",
+    "liquidOrderNo": null,
+    "liquidOrderStatus": null
+  }
+}
+```
+
+**响应（还没开好，要继续轮询）**：
+
+```json
+{"success":true,"errorCode":1,"errorMessage":"网络通讯慢,请稍后再试","data":null}
+```
+
+⚠️ 注意 `errorCode: 1` 时 **HTTP 仍然是 200**，不能只判 HTTP 状态码。
+
+| 字段 | 说明 |
+|---|---|
+| `orderNo` | **开阀确认后这里就有**，不用等 MQTT / `queryUsing` |
+| `state` / `result` | 实测成功时是 `state=1, result=0`——**`state` 不是 0**，所以判断不能只看 `state == 0`，要两个都看 |
+| `preDeductMoney` | 预扣金额。**单位见 4.11** |
+| `consumeDate` | 紧凑格式 `yyyyMMddHHmmss`，和账单接口的 `yyyy-MM-dd HH:mm:ss` 不一样 |
+| `createTime` | 服务端当前时间（Unix 秒），**不是**下单时间（每次请求都在变） |
+| `autoDisConTime` | 自动关停秒数，客户端用 `DownRateResult.autoDisConTime` 读它显示倒计时。⚠️ **本次抓到的日志里这一段被截断了，没有真正看到这个字段**，字段名是从客户端已有的行为反推的——如果你的学校拿不到倒计时，先来这里核对 |
 
 ### 4.4 停止洗澡
 
@@ -695,6 +767,96 @@ password=0AB7065F1C&code=198871&loginCode=xxx&...
 ```
 
 **不需要 `oldPassword`。** 新密码同样是 MD5 取后 10 位大写。
+
+### 4.11 消费结果查询
+
+```
+POST /order/consumeOrder/result/query
+Content-Type: application/x-www-form-urlencoded
+
+snCode=QZXY20230001&orderNo=13202609181506558872&loginCode=xxx&userId=xxx&...
+```
+
+**响应**：
+
+```json
+{
+  "success": true,
+  "errorCode": 0,
+  "errorMessage": "成功",
+  "data": {
+    "consumeTime": "2026-09-18 15:06:27",
+    "consumeDate": "2026-09-18 15:06:27",
+    "consumeMoney": 0,
+    "preDeductMoney": 0,
+    "preDeductMoneyAfter": 0,
+    "orderNo": "13202609181506275230",
+    "deviceSnCode": "C47F0EDCBCC7",
+    "orderAccountId": 41681,
+    "createTime": "1789715194",
+    "modeName": null,
+    "liquidModeName": null,
+    "liquidConsumeMoney": null,
+    "leftModeMoney": null,
+    "rightModeMoney": null,
+    "leftModeName": null,
+    "rightModeName": null,
+    "clData": null,
+    "telephone": "1xxxxxxxxxx"
+  }
+}
+```
+
+#### ⚠️ `consumeMoney` 的单位是**厘**，不是元
+
+**这是这个接口最容易踩的坑。** 它和账单列表里**同名字段**的单位差 1000 倍：
+
+| 接口 | 字段 | 类型 | 同一笔 0.04 元的账返回 |
+|---|---|---|---|
+| `consumeOrder/result/query` | `consumeMoney` | **数字** | `40` |
+| `query/account/bill/list` | `consumeMoney` | **字符串** | `"0.04"` |
+
+字段名一模一样、类型一个数字一个字符串、单位还差 1000 倍。忘了换算的后果不是报错，
+而是**静默错 1000 倍**——用了 0.04 元，通知上写「消费 ¥40.00」。
+
+实测证据（09-18 两笔独立订单，用 `dealDate` 对齐同一笔账）：
+
+| `dealDate` | 本接口 | 账单列表 |
+|---|---|---|
+| `2026-09-18 17:16:28` | `40` | `"0.04"` |
+| `2026-09-18 17:16:56` | `80` | `"0.08"` |
+
+#### 为什么该用它，而不是翻账单列表
+
+账单列表里**同名字段**是元，看着更省事，但它**赶不上**结算通知的时间窗：
+
+- 账单是「先以占位的 `consumeMoney: "0.0"` 出现，`uploadDate` 为空，结算完成后才填金额」。
+  实测同一笔账：`12:47:36` 是 `"0.0"`、`uploadDate` 空；`12:47:37` 变成 `"0.41"`、`uploadDate` 填上。
+- 所以「在账单里查到这一单」≠「金额已经算好了」，拿它当准绳反而可能把真金额覆盖成 0。
+
+这个接口是直接问结算结果，答案**一次就给全**。
+
+#### 什么时候能拿到金额
+
+实测 27 次调用，**第 1 轮的返回就是最终值，从来没有变过**：
+
+- 有消费的单子，关阀后第一次查就返回真实金额（`consumeMoney` 为正）
+- 没消费的单子（开完水马上停），第 1 轮就是 `consumeMoney: 0`，
+  **且账单列表里始终没有这一单的账单**——两边对得上，这个 0 是真的
+
+所以不需要像轮询账单那样重试很多轮：查一次，是 0 就再确认一次，够用了。
+
+| 字段 | 说明 |
+|---|---|
+| `consumeMoney` | 消费金额，**单位：厘**（1 元 = 1000 厘）|
+| `consumeTime` / `consumeDate` | 都是**下单/结算时刻**（`yyyy-MM-dd HH:mm:ss`），和 `downRateResult` 里紧凑格式的同名字段不是一回事 |
+| `orderNo` | 就是请求时传进来的那个 |
+| `createTime` | 服务端当前时间（Unix 秒），**每次请求都在变**，不是下单时间 |
+| `preDeductMoneyAfter` | 结算后剩余的预扣额 |
+
+> ⚠️ 响应里**没有** `consumeMoneyStr`，也**没有** `state` / `result` / `status`
+> ——那几个是 `downRateResult` 的字段，别混。客户端早期版本照隔壁接口的模型解析这个响应，
+> 属于没样本时的猜测。
 
 ---
 
