@@ -39,4 +39,21 @@ object ShowerEvents {
     fun notifyFinished(event: Finished) {
         _finished.tryEmit(event)
     }
+
+    /**
+     * 本地活跃订单被**服务回滚**过（关阀未确认时把订单放回去了）。
+     *
+     * ⚠️ 这个事件是必须的，不能指望 App 自己下次读 Prefs 对齐。因为回滚发生在
+     * [notifyFinished] **之后**：App 收到「使用结束」时已经调 `finishShower`
+     * 把设备从**内存**列表里删了，而回滚只写进 Prefs —— 两边就对不上。
+     *
+     * 表现就是「闪一下空闲、又变回使用中」：内存说空闲、Prefs 说使用中，
+     * 要等用户点一次「恢复」（那条路会 `syncActiveOrdersFromPrefs`）才对齐。
+     */
+    private val _ordersRestored = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val ordersRestored: SharedFlow<Unit> = _ordersRestored
+
+    fun notifyOrdersRestored() {
+        _ordersRestored.tryEmit(Unit)
+    }
 }

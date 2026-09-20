@@ -1,13 +1,12 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
--->
+<?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
+    <!-- 加密偏好依赖本机 Keystore，跨设备恢复后无法解密；日志也不应进入云备份。 -->
+    <exclude domain="sharedpref" path="linyu_prefs.xml" />
     <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+      ⚠️ 这份是**明文**回退文件（见 PrefsHelper.FILE_PLAIN，落盘名 = 常量 + ".xml"）。
+      加密初始化失败时登录凭证会落到这里——恰恰是最不该进备份的一份。
+      两份文件名只差一个后缀，加规则时很容易只想起加密那份。
+    -->
+    <exclude domain="sharedpref" path="linyu_prefs_plain.xml" />
+    <exclude domain="file" path="linyu_log.txt" />
 </full-backup-content>

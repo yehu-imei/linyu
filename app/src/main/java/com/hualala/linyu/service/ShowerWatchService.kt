@@ -246,6 +246,33 @@ class ShowerWatchService : Service() {
         // 关阀确认 5 秒 + 账单结算最多 7 秒。用户已经在界面上看到结束了，
         // 这两步纯粹是收尾，慢一点没关系。
         val closeResult = ShowerController.closeValve(snCode, orderNo)
+
+        // ⚠️ 没确认到设备停了。这条路径上本地状态**已经**在前面清掉了
+        // （`markFinished` 提到关阀之前，是为了让用户点完立刻有反馈），
+        // 所以这里没法再"留住停止入口"——那就至少**别谎报成功**。
+        // 发一条明确的「没能确认」，而不是下面那条「使用结束 · 消费 ¥x.xx」。
+        if (closeResult is CloseOutcome.Unconfirmed) {
+            AppLogger.w("ShowerWatch 停止未确认 $snCode: ${closeResult.message}")
+            // ⚠️ **把刚才清掉的本地状态放回去**。
+            //
+            // 前面 `markFinished` 已经把本地状态清成空闲了（那是为了让你点完立刻有反馈），
+            // 但关阀没成功——设备多半还在跑。不放回去的话会出现：
+            // 界面和小组件都显示空闲、用户以为停了，等联网后状态才补回来，
+            // 而**计时基准（startedAt）已经丢了**，于是从 0 重新计时。
+            //
+            // startedAt 是 `markFinished` **之前**取的（见本函数开头），所以这里能原样还原。
+            ShowerController.restoreActiveOrder(snCode, orderNo, startedAt)
+            WidgetBridge.clearBusy()
+            LinYuWidget.refreshAll(this)
+            Notifier.showCloseUnconfirmed(this, deviceName)
+            // ⚠️ 必须通知 App 重新读一次 Prefs。上面那条 `notifyFinished` 是**在关阀之前**
+            // 发的，App 收到时已经把设备从**内存**列表里删了；而回滚只写进 Prefs。
+            // 不补这一下，App 的内存副本会一直停在"空闲"，要等用户点「恢复」才对齐——
+            // 表现就是「闪一下空闲、又变回使用中」。
+            ShowerEvents.notifyOrdersRestored()
+            stopSelf()
+            return
+        }
         if (closeResult is CloseOutcome.Failed) {
             AppLogger.w("ShowerWatch 关阀失败 $snCode: ${closeResult.message}")
         }

@@ -3,10 +3,10 @@
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-purple.svg)](https://developer.android.com/jetpack/compose)
-[![Version](https://img.shields.io/badge/Version-v3.0.3-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v3.0.4-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**⬇️ [下载最新 APK (v3.0.3)](https://github.com/yehu-imei/linyu/releases/latest)**
+**⬇️ [下载最新 APK (v3.0.4)](https://github.com/yehu-imei/linyu/releases/latest)**
 
 > 安装包 12.6 MB，仅支持 64 位（arm64-v8a）设备。
 >
@@ -150,9 +150,8 @@ secret = MD5( 手机号前3位 + 手机号后4位 + "klcx" )
 |---|---|
 | **挤号检测有延迟** | 靠心跳轮询实现，被挤下线最多 25 秒后才提示 |
 | **无实时扣费** | MQTT 仅在订单结束时推送消费金额，洗澡中看不到实时扣费。官方 App 也是如此 |
-| **消费金额结算延迟** | 账单生成有延迟，最长需等待约 20 秒 |
 | **一卡通余额需已签约** | 未签约免密支付的学生拿不到真实余额，会自动回退到本地估算并在界面上注明 |
-| **小组件不显示实时消费** | 小组件不连 MQTT，使用中只显示预扣金额；停止后也不做账单结算，回 App 才会显示 |
+| **小组件不显示实时消费** | 小组件不连 MQTT，**使用中**只显示预扣金额。停止后走前台服务正常结算，「上次消费」会更新 |
 
 ### 🏫 兼容性
 

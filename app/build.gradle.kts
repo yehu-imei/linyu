@@ -6,6 +6,17 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+val localPropertiesFile = rootProject.file("local.properties")
+val releaseSigningProperties = Properties().apply {
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use(::load)
+    }
+}
+val releaseSigningFields = listOf("KEYSTORE_FILE", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
+val releaseKeystorePath = releaseSigningProperties.getProperty("KEYSTORE_FILE")
+val releaseSigningReady = releaseSigningFields.all { !releaseSigningProperties.getProperty(it).isNullOrBlank() } &&
+    releaseKeystorePath?.let { file(it).isFile } == true
+
 android {
     namespace = "com.hualala.linyu"
     compileSdk = 36
@@ -14,8 +25,8 @@ android {
         applicationId = "com.hualala.linyu"
         minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "3.0.3"
+        versionCode = 14
+        versionName = "3.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -35,16 +46,16 @@ android {
         resourceConfigurations += listOf("zh", "en")
     }
 
-    signingConfigs {
-        create("release") {
-            val props = Properties().apply {
-                load(rootProject.file("local.properties").inputStream())
-            }
-            storeFile = file(props.getProperty("KEYSTORE_FILE", "../hualala.jks"))
-            storePassword = props.getProperty("KEYSTORE_PASSWORD", "")
-            keyAlias = props.getProperty("KEY_ALIAS", "")
-            keyPassword = props.getProperty("KEY_PASSWORD", "")
+    val releaseSigningConfig = if (releaseSigningReady) {
+        signingConfigs.create("release") {
+            storeFile = file(releaseKeystorePath!!)
+            storePassword = releaseSigningProperties.getProperty("KEYSTORE_PASSWORD")
+            keyAlias = releaseSigningProperties.getProperty("KEY_ALIAS")
+            keyPassword = releaseSigningProperties.getProperty("KEY_PASSWORD")
         }
+    } else {
+        logger.warn("未找到完整且有效的 release 签名配置，Release APK 将保持未签名；Debug 与测试任务不受影响。")
+        null
     }
 
     buildTypes {
@@ -55,7 +66,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = releaseSigningConfig
         }
     }
     compileOptions {

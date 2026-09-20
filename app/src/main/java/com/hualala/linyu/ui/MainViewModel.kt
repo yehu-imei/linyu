@@ -151,6 +151,15 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             ShowerEvents.finished.collect { onShowerFinishedFromService(it) }
         }
+        // 关阀未确认时服务会把活跃订单**放回去**（见 restoreActiveOrder）。那件事发生在
+        // `finished` 之后，而上面那个处理已经调 `finishShower` 把设备从内存里删了——
+        // 不在这里重新读一次 Prefs，内存和 Prefs 就会一直对不上。
+        viewModelScope.launch {
+            ShowerEvents.ordersRestored.collect {
+                syncActiveOrdersFromPrefs()
+                refreshWidgets()
+            }
+        }
     }
 
     // ── 账单 ──
@@ -344,8 +353,32 @@ class MainViewModel : ViewModel() {
                         saveOrders()
                     }
                 }
-            } else isOwner = true
+                // 设备上确实有订单，且**是自己的** → 之前那个「占用中」已经不成立了。
+                // （不是自己的就是真被占着，标记该留着，不用管。）
+                if (isOwner) clearOccupiedIfStale(snCode)
+            } else {
+                // 服务端说这台上**没有订单**：不管之前记没记过「占用中」，现在都空了。
+                isOwner = true
+                clearOccupiedIfStale(snCode)
+            }
         } catch (_: Exception) {}
+    }
+
+    /**
+     * 这台设备已经不归「占用中」管了，就把标记清掉并让桌面跟着刷。
+     *
+     * 补的是这么一条路径：小组件上点开阀被拒 → 桌面记下「占用中」→ 用户打开 App
+     * 点进设备详情 → `refreshDeviceStatus` 已经查到设备空了 → **但小组件那边没人通知**，
+     * 桌面会一直挂着「占用中」，直到用户再去点一次小组件的开水按钮。
+     *
+     * 现在 App 这边一旦确认设备空了就顺手把它抹掉。`PrefsHelper` 里还有一个
+     * 3 分钟的兜底失效，防的是「用户此后既不打开 App、也不点小组件」那种情况。
+     */
+    private fun clearOccupiedIfStale(snCode: String) {
+        if (PrefsHelper.occupiedSnCode != snCode) return
+        PrefsHelper.clearOccupied()
+        AppLogger.i("设备已空闲（$snCode），清掉小组件的「占用中」标记")
+        refreshWidgets()
     }
 
     fun startLastDevice(phone: String) {
@@ -606,7 +639,20 @@ class MainViewModel : ViewModel() {
     private fun handleMqttMessage(message: String) {
         try {
             val msg = gson.fromJson(message, MqttOrderMsg::class.java)
-            msg.orderNo?.let { if (currentOrderNo == null) { currentOrderNo = it; showerSnCode?.let { updateOrderNo(it, it) } } }
+
+            // ⚠️ 这里曾经是 `showerSnCode?.let { updateOrderNo(it, it) }`——
+            // 内层的 `it` **遮蔽**了外层 `it`，两个参数都变成了设备序列号，
+            // 于是持久化的 orderNo 被写成了 snCode。
+            //
+            // 后果不容易当场发现：关阀和结算拿这个假 orderNo 去查，服务端只会说"查不到"，
+            // 然后静默退化成按时间窗猜账单——而那个兜底本来就不可靠。
+            // 所以这里**必须用具名变量**，别再用嵌套 `let` 的隐式 `it`。
+            msg.orderNo?.let { orderNo ->
+                if (currentOrderNo == null) {
+                    currentOrderNo = orderNo
+                    showerSnCode?.let { sn -> updateOrderNo(sn, orderNo) }
+                }
+            }
             msg.consumeMoney?.let {
                 showerConsumed = it
                 showerRemaining = "%.2f".format(if (showerPreDeduct - it < 0) 0.0 else showerPreDeduct - it)
@@ -743,6 +789,17 @@ class MainViewModel : ViewModel() {
                 if (outcome is CloseOutcome.Failed) {
                     toastMessage = outcome.message
                     isStopping = false
+                    return@launch
+                }
+
+                // ⚠️ 没确认到设备停了（多半是断网，关阀请求压根没发出去）——
+                // **不能退出使用页**。这一页上的「停止」是用户唯一的停止入口，
+                // 退出去就等于把他扔在一个「以为停了、其实还在扣钱」的状态里，
+                // 而且他想再停一次都找不到按钮。留在这里，让他能重试。
+                if (outcome is CloseOutcome.Unconfirmed) {
+                    toastMessage = "没能确认设备已关闭，请检查网络后重试"
+                    isStopping = false
+                    AppLogger.w("停止用水未确认：${outcome.message}")
                     return@launch
                 }
 

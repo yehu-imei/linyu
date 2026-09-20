@@ -3,8 +3,8 @@ package com.hualala.linyu.utils
 import android.content.Context
 import android.util.Log
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
@@ -25,7 +25,8 @@ object AppLogger {
     private const val LOG_FILE_NAME = "linyu_log.txt"
 
     private val memoryLogs = ArrayDeque<String>()
-    private val timeFmt = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.getDefault())
+    private val timeFmt = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss.SSS", Locale.getDefault())
+    private val fileLock = Any()
 
     @Volatile private var logFile: File? = null
     @Volatile private var ready = false
@@ -47,7 +48,7 @@ object AppLogger {
     }
 
     private fun write(level: String, msg: String) {
-        val line = "${timeFmt.format(Date())} [$level] ${mask(msg)}"
+        val line = "${LocalDateTime.now().format(timeFmt)} [$level] ${mask(msg)}"
         synchronized(memoryLogs) {
             memoryLogs.addLast(line)
             while (memoryLogs.size > MAX_MEMORY_LOGS) memoryLogs.removeFirst()
@@ -59,13 +60,15 @@ object AppLogger {
 
     private fun appendToFile(line: String) {
         val f = logFile ?: return
-        runCatching {
-            if (f.exists() && f.length() > MAX_FILE_SIZE) {
-                // 超限：保留后一半，避免无限增长
-                val keep = f.readText().takeLast((MAX_FILE_SIZE / 2).toInt())
-                f.writeText(keep)
+        synchronized(fileLock) {
+            runCatching {
+                if (f.exists() && f.length() > MAX_FILE_SIZE) {
+                    // 截断和追加必须共用一把锁，否则并发写入时可能交错或覆盖刚写入的日志。
+                    val keep = f.readText().takeLast((MAX_FILE_SIZE / 2).toInt())
+                    f.writeText(keep)
+                }
+                f.appendText(line + "\n")
             }
-            f.appendText(line + "\n")
         }
     }
 
@@ -98,7 +101,9 @@ object AppLogger {
     /** 清空内存与文件日志 */
     fun clear() {
         synchronized(memoryLogs) { memoryLogs.clear() }
-        runCatching { logFile?.delete() }
+        synchronized(fileLock) {
+            runCatching { logFile?.delete() }
+        }
     }
 
     /**

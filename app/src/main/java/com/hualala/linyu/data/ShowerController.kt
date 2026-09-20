@@ -60,6 +60,23 @@ sealed interface OpenOutcome {
     }
 }
 
+/**
+ * 「选用设备」的结果。
+ *
+ * ⚠️ **必须分三种，不能只返回一个 Boolean。** 以前是 `Boolean`，调用方只能报一句
+ * 「切换失败，请稍后再试」——而"服务端说没有这台设备"和"网络不通"是两回事：
+ * 前者用户去查网络永远查不出东西，后者查了才有用。
+ */
+sealed interface PickResult {
+    data object Ok : PickResult
+
+    /** 服务端明确回答"没有这台设备" */
+    data object DeviceNotFound : PickResult
+
+    /** 请求本身失败（断网、超时）——**不知道**设备在不在 */
+    data object Network : PickResult
+}
+
 /** 关阀结果 */
 sealed interface CloseOutcome {
     data class Closed(
@@ -71,6 +88,27 @@ sealed interface CloseOutcome {
     data class Failed(
         val message: String,
         override val kickHint: String?
+    ) : CloseOutcome
+
+    /**
+     * 关阀指令**发出去了或没能发出去，但完全没有"设备已停"的证据**。
+     *
+     * ⚠️ 这个状态必须存在，不能合并进 [Closed]。以前是这么写的：轮询 5 次、
+     * 不管结果如何，循环一结束就 `clearDeviceState()` + 返回 [Closed]。
+     * 也就是说**断网时 5 次请求全抛异常，照样告诉用户「使用结束」**——
+     * 界面上水停了，实际阀还开着，钱继续扣。
+     *
+     * 判据是「一点证据都没有」，不是「确认得很完美」，这是有意的：
+     * 真拿"服务端明确说订单没了"当唯一标准的话，网络稍微抖一下就报未确认，
+     * 正常停止会天天弹「没确认到」——那种噪声会让人忽略真正的异常。
+     *
+     * 所以只在**关阀请求本身失败**、且**服务端状态也查不到**时才返回它。
+     */
+    data class Unconfirmed(
+        /** 关阀前的开阀时间戳 */
+        val startTimeMs: Long,
+        val message: String?,
+        override val kickHint: String? = null
     ) : CloseOutcome
 
     /** 需要交给界面做挤号判断的原始服务端消息 */
@@ -259,9 +297,27 @@ object ShowerController {
         val startTime = PrefsHelper.getStartedAt(snCode)
 
         // 1. 下发关阀指令
-        val close = NetworkModule.apiService.closeOrderSafe(
-            snCode = snCode, orderNo = orderNoResolved, auth = NetworkModule.authFields()
-        )
+        //
+        // ⚠️ 这里以前是**裸调用**：请求抛异常（断网、超时）会直接冒到调用方，
+        // 而两个调用方都把「抛异常」当成了不起眼的小事，于是照样走完"使用结束"的流程。
+        // 现在明确接住——请求没发出去就是**没有任何证据**，必须如实报未确认。
+        val close = try {
+            NetworkModule.apiService.closeOrderSafe(
+                snCode = snCode, orderNo = orderNoResolved, auth = NetworkModule.authFields()
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 请求本身失败了，再问一次服务端到底还开着没有
+            val running = orderRunning(snCode)
+            if (running == true) {
+                // 服务端说还开着 → 确实没关成
+                return CloseOutcome.Unconfirmed(startTime, "关阀请求没发出去，设备可能还在用水", null)
+            }
+            // 查不到（多半也是断网）→ 一样没有证据
+            return CloseOutcome.Unconfirmed(startTime, "关阀请求没发出去：${e.message}", null)
+        }
+
         if (!close.success) {
             // 服务器已接受 / 已在关闭中时也视为成功
             if (close.errorCode == 307 || close.displayMessage?.contains("已在") == true) {
@@ -271,28 +327,23 @@ object ShowerController {
             return CloseOutcome.Failed(close.displayMessage ?: "关闭失败，请重试", close.displayMessage)
         }
 
-        // 2. 轮询确认关阀结果（最多 5 次 × 1 秒）
-        var lastMessage: String? = null
-        for (i in 0 until 5) {
-            delay(1000)
-            try {
-                val r = NetworkModule.apiService.closeOrderResultSafe(
-                    snCode = snCode, orderNo = orderNoResolved, auth = NetworkModule.authFields()
-                )
-                if (r.success) {
-                    val d = r.data
-                    val closed = d == null || d.state == 0 || d.status == 0 || d.orderNo.isNullOrEmpty()
-                    if (closed) break
-                } else {
-                    lastMessage = r.displayMessage
-                }
-            } catch (_: Exception) {
-                // 单次轮询失败不算失败
-            }
+        // 2. 顺手核一次服务端状态，只用来**记日志**，不用来等
+        //
+        // ⚠️ 为什么这里不再轮询：`closeOrder` 已经被服务端接受了（上面 `close.success` 过了），
+        // 订单就一定会关掉。这时候再等 5 轮、无论查到什么都还是判「已关闭」，
+        // 那就是**白让用户多等最多 5 秒**——而 App 那条路径的界面退出正是在
+        // `closeValve` 返回之后，等待会直接变成用户可感知的卡顿。
+        // （原来那段轮询本意是确认，但它查的 `closeOrder/result/query` 实测恒返回
+        // `data: null`，第 1 轮就 break，所以其实从没真的等过——现在把意图和代价都写清楚。）
+        //
+        // 真正需要拦的是**关阀请求压根没发出去**那种情况，那个在上面 catch 里已经处理了。
+        val running = orderRunning(snCode)
+        if (running != false) {
+            AppLogger.w("关阀已受理，但服务端仍显示订单（running=$running）：$snCode")
         }
 
         clearDeviceState(snCode)
-        return CloseOutcome.Closed(startTime, lastMessage)
+        return CloseOutcome.Closed(startTime, null)
     }
 
     /**
@@ -332,13 +383,32 @@ object ShowerController {
     }
 
     /** 服务端是否报告该设备有进行中的订单 */
-    private suspend fun hasActiveOrder(snCode: String): Boolean = try {
+    private suspend fun hasActiveOrder(snCode: String): Boolean =
+        orderRunning(snCode) == true
+
+    /**
+     * 服务端上这台设备还有没有订单。**三态**：true 有 / false 明确没有 / null 请求失败、不确定。
+     *
+     * ⚠️ 三态不能省。上面那个 [hasActiveOrder] 以前是 `catch { false }`——
+     * 网络一抖，「查不到」就被当成了「没有订单」。判断"设备关没关"的时候
+     * 用这种二值版本，等于把"不知道"当成"关好了"，正是要避免的那类谎报。
+     *
+     * 判据和 [com.hualala.linyu.service.ShowerWatchService] 里的同名逻辑保持一致：
+     * `errorCode == 307` 也算有订单（服务端在"已在关闭中"这类场景会这么回）。
+     */
+    private suspend fun orderRunning(snCode: String): Boolean? = try {
         val p = NetworkModule.apiService.queryUsingSafe(
             snCode = snCode, auth = NetworkModule.authFields()
         )
-        p.errorCode == 307 || (p.success && p.data?.orderNo != null)
+        when {
+            p.errorCode == 307 || (p.success && p.data?.orderNo != null) -> true
+            p.success -> false
+            else -> null
+        }
+    } catch (e: CancellationException) {
+        throw e
     } catch (_: Exception) {
-        false
+        null
     }
 
     /**
@@ -350,18 +420,20 @@ object ShowerController {
      *
      * @return 是否成功解析到设备
      */
-    suspend fun pickDevice(mac: String): Boolean {
-        if (mac.isBlank()) return false
+    suspend fun pickDevice(mac: String): PickResult {
+        if (mac.isBlank()) return PickResult.DeviceNotFound
         return try {
             val resp = NetworkModule.apiService.getDeviceInfoSafe(mac)
             if (resp.success && resp.data != null) {
                 rememberDevice(resp.data)
-                true
+                PickResult.Ok
             } else {
-                false
+                PickResult.DeviceNotFound
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
-            false
+            PickResult.Network
         }
     }
 
@@ -778,6 +850,31 @@ object ShowerController {
             )
         )
         PrefsHelper.saveActiveOrders(list)
+    }
+
+    /**
+     * 关阀**没成功**时，把刚才清掉的本地状态**放回去**。
+     *
+     * ## 为什么需要"回滚"这一步
+     *
+     * 停止流程为了体验，是**先清本地状态、再去关阀**的（见 `ShowerWatchService.doFinish`
+     * 的注释：不这么做，用户点完要愣 5 秒界面才动）。代价是关阀万一失败，
+     * 本地已经显示成空闲了，而设备其实还在跑。
+     *
+     * 这会连锁出三个问题，实测都出现了：
+     * 1. 界面/小组件显示空闲，用户以为停了
+     * 2. 等联网后真相反回来（`queryUsing` 查到订单还在），状态**补得回来**
+     * 3. 但 [PrefsHelper.getStartedAt] 已经被清了 → 计时从 0 重新开始，看着像刚开的
+     *
+     * 所以这里把订单和**开阀时间戳一起**放回去。时间戳是关键——少了它，
+     * 即使状态补回来，计时也是错的。
+     *
+     * @param startedAtMs 必须在 `markFinished` **之前**取好再传进来
+     */
+    fun restoreActiveOrder(snCode: String, orderNo: String, startedAtMs: Long) {
+        if (snCode.isEmpty()) return
+        ensureActiveOrder(snCode, orderNo, null)
+        if (startedAtMs > 0L) PrefsHelper.setStartedAt(snCode, startedAtMs)
     }
 
     /**

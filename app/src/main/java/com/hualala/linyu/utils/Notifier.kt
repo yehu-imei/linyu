@@ -244,6 +244,29 @@ object Notifier {
             body = "用时 ${formatDuration(elapsedSec)} · 结算中…")
     }
 
+    /**
+     * 停止请求发出去了，但**没确认到设备真的停了**（多半是断网）。
+     *
+     * ⚠️ 这条不能省，也不能拿「使用结束」凑合。水可能还在流、钱还在扣，
+     * 报一条「使用结束」就是**谎报**——用户据此走人，问题要到看账单时才发现。
+     *
+     * 文案刻意短：标题只写状态、正文只带设备名 + 后果。
+     * 以前正文塞的是 `closeResult.message`，而那条消息长这样——
+     * 「关阀请求没发出去：Unable to resolve host "v3-api.china-qzxy.cn"」，
+     * 异常类名和主机名全在里面，通知栏折成三行，用户一个字都得不到有用信息。
+     * 具体原因仍然进日志（`AppLogger.w`），那是排查用的，不是给用户看的。
+     *
+     * 用 [ID_FINISHED] 是对的：它和「结算中」「使用结束」抢同一个位置，
+     * 三种结果互斥，不该在通知栏里并排躺着。
+     */
+    fun showCloseUnconfirmed(context: Context, deviceName: String) {
+        if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyFinished) return
+        postEvent(context, ID_FINISHED, alert = true,
+            title = "关阀失败 · 网络异常",
+            body = "设备未成功关闭",
+            tab = 0)
+    }
+
     /** 手动停止。点通知去账单页——刚消费完，多半想看这笔账 */
     fun showFinished(context: Context, deviceName: String, elapsedSec: Int, money: Double?) {
         if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyFinished) return
@@ -262,14 +285,20 @@ object Notifier {
             tab = 1)
     }
 
-    /** 想开的水正被别人用着。这条不是「某一单在用」，回首页就行 */
-    fun showOccupied(context: Context, deviceName: String) {
+    /**
+     * 想开的水正被别人用着。这条不是「某一单在用」，回首页就行。
+     *
+     * 正文刻意只留「正在被他人使用」。以前后面还跟着一句
+     * 「等对方用完再试，或者在小组件上『选用』换一台设备」——通知栏放不下，
+     * 折成两三行反而把「哪台设备被占了」这个关键信息挤没了。
+     */
+    fun showOccupied(context: Context, deviceName: String, alert: Boolean = true) {
         if (!PrefsHelper.notifyEnabled) return
         // 标题只写状态、正文才带设备名：设备名很长（「龙川北苑 3号楼南 3层 320房」），
         // 放在标题里会把通知栏那一行占满，一眼看不出是"发生了什么"
-        postEvent(context, ID_OCCUPIED, alert = true,
+        postEvent(context, ID_OCCUPIED, alert = alert,
             title = "设备占用中",
-            body = "${shortName(deviceName)}正在被他人使用。等对方用完再试，或者在小组件上「选用」换一台设备。")
+            body = "${shortName(deviceName)}正在被他人使用")
     }
 
     /**

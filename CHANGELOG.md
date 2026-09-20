@@ -2,6 +2,90 @@
 
 ---
 
+## v3.0.4
+
+发布日期：2026-09-20
+
+### 版本信息
+
+| 项 | 值 |
+|---|---|
+| 版本号 | 3.0.4 |
+| versionCode | 14 |
+| 包名 | `com.hualala.linyu` |
+| 构建类型 | Release（R8 混淆 + 签名） |
+| 安装包大小 | 12.6 MB |
+| GitHub Release | https://github.com/yehu-imei/linyu/releases/tag/v3.0.4 |
+| Gitee Release | https://gitee.com/yehu-imei/linyu/releases/tag/v3.0.4 |
+
+---
+
+**本次为质量修复版本，无新增功能。** 改动集中在异常路径与工程加固——正常使用下的行为与 v3.0.3 一致。
+
+### 修复：关阀结果与本地状态
+
+**问题**：`closeValve` 轮询确认关阀结果时，无论结果如何，循环结束后都会执行
+`clearDeviceState()` 并返回 `Closed`。更严重的是那次"确认"本身是空的——
+它查的 `closeOrder/result/query` 实测**恒返回 `data: null`**（见 [API-qzxy.md](API-qzxy.md) 4.4），
+判据里的 `d == null` 永远成立，第 1 轮就 break。也就是说它只验证了「HTTP 请求成功」，
+断网导致 5 次请求全部抛异常时，照样会向用户报「使用结束」。
+
+**改法**：
+
+- 新增 `CloseOutcome.Unconfirmed` 状态。关阀请求本身抛出异常、且服务端状态也查不到时返回它，
+  调用方据此如实提示，不再谎报成功
+- 判据是「**一点证据都没有**」，而不是「确认得很完美」——后者会让网络稍有抖动就报未确认，
+  正常停止天天弹「没确认到」，那种噪声会淹没真正的异常
+- 停止流程中「本地状态先清」的顺序**保留不动**（那是为了用户点完立刻有反馈），
+  改为在未确认时**回滚**：`ShowerController.restoreActiveOrder()` 把活跃订单与
+  `startedAt` 一并放回。`startedAt` 是关键——少了它，即使状态补回来，计时也会从 0 重来
+- 服务与 App 的本地副本通过 `ShowerEvents.ordersRestored` 对齐：回滚发生在
+  `notifyFinished` **之后**，此时 App 已把设备从内存列表删除，不同步会表现为「闪一下空闲、又变回使用中」
+
+### 修复：MQTT 回填订单号
+
+`handleMqttMessage` 里 `showerSnCode?.let { updateOrderNo(it, it) }` 的**内层 `it` 遮蔽了外层**，
+两个参数都变成设备序列号，持久化的 `orderNo` 被写成 `snCode`。后果是关阀与结算拿错误的订单号去查，
+静默退化成按时间窗猜账单。已改为具名变量。
+
+### 修复：桌面小组件的状态与反馈
+
+| 问题 | 根因 | 改法 |
+|---|---|---|
+| 「占用中」永久残留 | `occupiedSnCode` 全项目只有小组件自己读写，App 从未清除；且无过期机制 | App 在 `refreshDeviceStatus` 确认设备空闲/`isOwner` 时清除；`occupiedSnCode` 增加 **3 分钟** TTL 兜底 |
+| 断网点开启无任何反馈 | `openValve` 第一步即发网络请求且自身无 try/catch，异常冒到接收器只落一条日志 | 接住并转成「网络异常」卡片提示 + 横幅通知（与开阀失败同一套反馈） |
+| 「选用」失败文案笼统 | `pickDevice` 返回 `Boolean`，「设备不存在」与「网络不通」无法区分 | 改为三态 `PickResult`，分别提示「设备不存在」/「网络异常」 |
+| 重复被拒反复弹横幅 | `showOccupied` 固定 `alert = true` | 同一占用周期内仅首次弹横幅，后续静默更新同一条通知 |
+
+⚠️ 「状态未知」状态下的按钮发的是 `ACTION_REFRESH`（走 `reconcile`，只重新查询服务端状态），
+**不会重新开阀**——第一次的 `downRate` 可能仍在服务端飞行，此时重开会造成重复下单。
+因此该状态文案为「点此刷新」而非「请重试」。
+
+### 安全
+
+- **应用内更新校验**：新增包名比对、签名证书 SHA-256 比对，以及可选的 Release SHA-256 校验。
+  签名与包名不匹配、或签名无法读取的安装包会被**阻止安装**。
+  GitHub 的 `digest` 字段不可用时不阻止安装（否则 Gitee 用户无法更新），但签名校验不跳过
+- **认证数据备份**：`backup_rules.xml` / `data_extraction_rules.xml` 此前是 Android 模板原样
+  （内容全部注释），等于未排除任何内容。现排除 `linyu_prefs.xml`、`linyu_prefs_plain.xml` 与日志文件
+- **加密存储降级**：`EncryptedSharedPreferences` 初始化失败时的明文回退改用独立文件
+  `linyu_prefs_plain`。此前两者同名，加密恢复后会读到格式不符的同名文件，表现为「登录态莫名丢失」
+- **日志并发安全**：`AppLogger` 的共享 `SimpleDateFormat`（非线程安全）改用 `java.time.DateTimeFormatter`；
+  文件截断与追加共用同一把锁。脱敏逻辑未改动
+
+### 其他
+
+- **更新包下载**：支持复用已下载且校验通过的文件，避免重复下载；下载成功后清理历史版本残留
+- **蓝牙扫描**：保存并撤销超时 `Runnable`，增加一次性回调标志。此前扫描失败后定时任务仍会执行，
+  上层会把失败后的空列表当成有效快照写入小组件
+- **Release 签名配置**：`local.properties` 缺失或字段不全时不再创建 release signingConfig，
+  仅输出警告。此前在**配置阶段**无条件读取该文件，导致干净环境连 `testDebugUnitTest` 都无法执行
+- **文档**：`SECURITY.md` 第 6 节此前称「完整的请求/响应体日志只在 Debug 构建里存在」，
+  该表述仅对 `HttpLoggingInterceptor` 成立——项目自身的拦截器在 Release 下同样记录
+  最多 300/400 字符的请求/响应片段（已脱敏）。已如实修订
+
+---
+
 ## v3.0.3
 
 发布日期：2026-09-18

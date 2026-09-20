@@ -11,12 +11,14 @@ import android.os.Looper
 import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
+import com.hualala.linyu.data.PickResult
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.service.ShowerWatchService
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -165,12 +167,18 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
             PrefsHelper.setWidgetTab(appWidgetId, 0)
             WidgetBridge.renderAll(context)
 
-            if (ShowerController.pickDevice(pickMac)) {
-                AppLogger.i("Widget 选用设备成功 ($pickMac)")
-            } else {
-                // 新设备没查出来就保持原样，只报个错，别把用户原来那台也弄丢
-                AppLogger.w("Widget 选用设备失败 ($pickMac)")
-                WidgetBridge.markNotice(WidgetRenderer.DisabledReason.PICK_FAILED)
+            // 新设备没查出来就保持原样，只报个错，别把用户原来那台也弄丢。
+            // 失败原因分开报：设备不存在和网络不通，用户能做的事完全不一样
+            when (val result = ShowerController.pickDevice(pickMac)) {
+                PickResult.Ok -> AppLogger.i("Widget 选用设备成功 ($pickMac)")
+                PickResult.DeviceNotFound -> {
+                    AppLogger.w("Widget 选用失败：服务端没有这台设备 ($pickMac)")
+                    WidgetBridge.markNotice(WidgetRenderer.DisabledReason.DEVICE_NOT_FOUND)
+                }
+                PickResult.Network -> {
+                    AppLogger.w("Widget 选用失败：网络异常 ($pickMac)")
+                    WidgetBridge.markNotice(WidgetRenderer.DisabledReason.NETWORK)
+                }
             }
             return
         }
@@ -210,12 +218,35 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         }
 
         when (action) {
-            ACTION_START -> when (val outcome = ShowerController.openValve(snCode)) {
+            ACTION_START -> {
+            // ⚠️ `openValve` 的**第一步**就是网络请求（`queryUsing`），而它自己没有
+            // try/catch——断网时异常会一路冒到 `onReceive` 的 catch 里，
+            // 那里只落一条日志、然后 `finishAction` 把 busy 清掉重绘。
+            //
+            // 结果就是：卡片上「正在开启…」闪一下、回到原样，**一句提示都没有**。
+            // 用户完全不知道刚才那一下为什么没反应，多半会以为小组件坏了。
+            //
+            // 所以在这里接住，转成和「开阀失败」同一套反馈：卡片提示 + 横幅通知。
+            val outcome = try {
+                ShowerController.openValve(snCode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.w("Widget 开阀网络异常 ($snCode)：${e.message}")
+                WidgetBridge.markNotice(WidgetRenderer.DisabledReason.NETWORK)
+                Notifier.showOpenFailed(
+                    context,
+                    PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
+                    "网络异常，请检查网络后重试"
+                )
+                return
+            }
+            when (outcome) {
                 // Opened / Resumed：状态已落盘，重新渲染就会变成「使用中」
                 is OpenOutcome.Opened, is OpenOutcome.Resumed -> {
                     AppLogger.i("Widget 开阀成功 ($snCode)")
                     // 开起来了，之前记下的「占用中」不再成立
-                    PrefsHelper.occupiedSnCode = ""
+                    PrefsHelper.clearOccupied()
                     // 先把「使用中」通知发出去，**再**去起服务。
                     //
                     // 顺序很重要：通知本来就由服务负责挂（前台服务必须有一条），
@@ -242,11 +273,17 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                  */
                 is OpenOutcome.InUseByOthers -> {
                     AppLogger.w("Widget 开阀被拒（他人使用中）$snCode")
+                    // 「是不是本来就标着占用中」要在写之前问——写完之后永远是 true。
+                    // 标记的有效期是 3 分钟，所以这等价于「一次连续被占期间只弹一次横幅」：
+                    // 用户边等边反复点，卡片上的徽章会一直告诉他「还被占着」，
+                    // 但不该每次都从屏幕顶上弹一条横幅出来打扰他。
+                    val alreadyOccupied = PrefsHelper.occupiedSnCode == snCode
                     PrefsHelper.occupiedSnCode = snCode
                     WidgetBridge.markNotice(WidgetRenderer.DisabledReason.IN_USE_BY_OTHERS)
                     Notifier.showOccupied(
                         context,
-                        PrefsHelper.lastDeviceName.ifEmpty { "该设备" }
+                        PrefsHelper.lastDeviceName.ifEmpty { "该设备" },
+                        alert = !alreadyOccupied
                     )
                 }
 
@@ -275,6 +312,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                     AppLogger.w("Widget 开阀结果未知（预算耗尽）")
                     WidgetBridge.markUnknown()
                 }
+            }
             }
 
             /**

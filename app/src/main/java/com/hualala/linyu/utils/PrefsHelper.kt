@@ -9,27 +9,68 @@ import com.google.gson.JsonParser
 import com.hualala.linyu.model.ActiveOrder
 
 object PrefsHelper {
+    /** 加密存储的文件名 */
+    private const val FILE_ENCRYPTED = "linyu_prefs"
+
+    /**
+     * 降级用的明文文件名。
+     *
+     * ⚠️ **必须和加密那份不同名**。以前两者都叫 `linyu_prefs`，于是：
+     * - 加密初始化失败退回明文时，写的是**同名文件**，上层完全无感知
+     * - 更要命的是反过来——某次加密又初始化成功了，它会去读**同一份明文文件**，
+     *   发现格式不对（不是加密格式）后要么抛异常、要么当成空文件，
+     *   用户看到的是「登录态莫名其妙没了」
+     *
+     * 分开之后两种情况各自独立：加密能用了就读加密那份（哪怕它是空的、
+     * 需要重新登录），明文那份就静静躺在那儿不再被碰。
+     *
+     * ⚠️ **升级影响**：极少数设备上（老版本曾降级过）`linyu_prefs` 里其实是**明文**。
+     * 这次改动之后，`EncryptedSharedPreferences` 会去解它、解不开，于是落到新的空文件上，
+     * 那台设备会**要求重新登录一次**。
+     *
+     * 这是**有意不做迁移**的：那份数据本来就是明文躺在一个「看起来已加密」的文件里，
+     * 把它原样抄进新的明文文件只会让这个状态延长。宁可让用户重登一次。
+     */
+    private const val FILE_PLAIN = "linyu_prefs_plain"
+
     private lateinit var prefs: SharedPreferences
+
+    /** 本次运行是否退到了明文存储。给「我的 → 关于」之类的诊断位置留的观察口 */
+    @Volatile var usingPlaintextFallback: Boolean = false
+        private set
+
     private val gson = Gson()
 
     /** 是否已经 init 过。小组件可能在没有 Activity 的新进程里被唤起，需要一个幂等的判断 */
     val isInitialized: Boolean get() = ::prefs.isInitialized
 
     fun init(context: Context) {
-        try {
+        val encrypted = try {
             val masterKey = MasterKey.Builder(context)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                 .build()
-            prefs = EncryptedSharedPreferences.create(
+            EncryptedSharedPreferences.create(
                 context,
-                "linyu_prefs",
+                FILE_ENCRYPTED,
                 masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
-        } catch (_: Exception) {
-            // 降级：如果加密初始化失败（如设备不支持），退回明文存储，避免崩溃
-            prefs = context.getSharedPreferences("linyu_prefs", Context.MODE_PRIVATE)
+        } catch (e: Exception) {
+            // 加密初始化失败（设备不支持 / keystore 损坏）不能崩，否则 App 直接起不来。
+            // 但也不能像以前那样**悄悄**退回一个同名明文文件——那是「看起来在加密、其实没有」，
+            // 而且下次加密恢复后会读到格式不对的同名文件。
+            null
+        }
+
+        if (encrypted != null) {
+            prefs = encrypted
+            usingPlaintextFallback = false
+        } else {
+            prefs = context.getSharedPreferences(FILE_PLAIN, Context.MODE_PRIVATE)
+            usingPlaintextFallback = true
+            // 日志脱敏只认手机号之类，这里只写一句「发生了降级」，不带任何凭证
+            AppLogger.w("加密存储初始化失败，本次运行使用明文存储（$FILE_PLAIN）")
         }
     }
 
@@ -207,17 +248,58 @@ object PrefsHelper {
         set(v) = prefs.edit().putBoolean("notifyAlert", v).apply()
 
     /**
+     * 「占用中」标记的有效期。
+     *
+     * 3 分钟是用户定的。**这不是推导出来的数**——理论上界应该是设备的自动关停窗口
+     * （对方不可能用超过那个时长），但那个值是从服务端读的 `autoDisConTime`，
+     * 代码里没有兜底、也没有实测样本，所以只能按经验取。
+     *
+     * 取值理由：徽章**不禁用按钮**（占用中仍然点得动，服务端才是最终裁判），
+     * 所以「设短」只是标签早消失一会儿，用户点一下就知道了；
+     * 而「设长」会让人看到「占用中」干脆不去点——那个代价更大。**宁可短。**
+     */
+    private const val OCCUPIED_TTL_MS = 3 * 60 * 1000L
+
+    /**
      * 已知「被他人占用」的设备 snCode；空串表示当前没有。
      *
      * 小组件上点开始、发现设备正被别人用着时写入，徽章随之变成「占用中」。
-     * 用户下次点那个按钮会重新查一次：空出来就正常开阀并清掉这个标记，
-     * 还被占着就继续保持。
      *
      * ⚠️ 小组件渲染是纯本地同步的，发不了网络请求，所以它**没法自己知道
-     * 设备什么时候空出来**——只能靠「用户下次点」这个时机来刷新。
+     * 设备什么时候空出来**。以前只靠「用户下次点」这个时机刷新，导致
+     * 用户从此不再点小组件的话，桌面会**永远**挂着「占用中」。现在有两条出路：
+     *
+     * 1. App 侧查到设备空了会调 [clearOccupied]（见 `MainViewModel.refreshDeviceStatus`）
+     * 2. 兜底：超过 [OCCUPIED_TTL_MS] 自动失效（见 [occupiedFor]）
      */
     var occupiedSnCode: String get() = prefs.getString("occupiedSnCode", "") ?: ""
-        set(v) = prefs.edit().putString("occupiedSnCode", v).apply()
+        set(v) = prefs.edit()
+            .putString("occupiedSnCode", v)
+            .putLong("occupiedAtMs", System.currentTimeMillis())
+            .apply()
+
+    /**
+     * 这台设备**现在**是不是还该显示「占用中」。
+     *
+     * 除了 snCode 对得上，还要求标记没过期——过期时**顺手把陈旧标记清掉并记一条日志**
+     * （只记一次，因为清完再进来 snCode 就是空串了）。
+     * 那条日志是给以后调这个 3 分钟用的：真实数据比再猜一轮靠谱。
+     */
+    fun occupiedFor(snCode: String): Boolean {
+        if (snCode.isEmpty()) return false
+        if (prefs.getString("occupiedSnCode", "") != snCode) return false
+        val at = prefs.getLong("occupiedAtMs", 0L)
+        if (at > 0L && System.currentTimeMillis() - at <= OCCUPIED_TTL_MS) return true
+        clearOccupied()
+        AppLogger.i("「占用中」标记超过 ${OCCUPIED_TTL_MS / 60000} 分钟，自动失效")
+        return false
+    }
+
+    /** 清掉「占用中」标记。App 查到设备已空闲、或小组件开阀成功时调用 */
+    fun clearOccupied() {
+        if (prefs.getString("occupiedSnCode", "")!!.isEmpty()) return
+        prefs.edit().remove("occupiedSnCode").remove("occupiedAtMs").apply()
+    }
 
     var manualBalance: String get() = prefs.getString("manualBalance", "") ?: ""; set(v) = prefs.edit().putString("manualBalance", v).apply()
     var manualBalanceTime: Long get() = prefs.getLong("manualBalanceTime", 0L); set(v) = prefs.edit().putLong("manualBalanceTime", v).apply()

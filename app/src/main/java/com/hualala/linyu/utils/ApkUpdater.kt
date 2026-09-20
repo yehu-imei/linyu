@@ -2,6 +2,9 @@ package com.hualala.linyu.utils
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -9,6 +12,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.FileProvider
+import com.google.gson.JsonParser
 import com.hualala.linyu.BuildConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +24,7 @@ import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 
@@ -90,7 +95,13 @@ object ApkUpdater {
      * 开始下载。
      * @param fileName 保存到 cacheDir/updates/ 下的文件名，用发行版里的原始名
      */
-    fun start(context: Context, url: String, fileName: String) {
+    fun start(
+        context: Context,
+        url: String,
+        fileName: String,
+        expectedSize: Long = 0L,
+        releaseTag: String? = null
+    ) {
         if (isDownloading) return
         val app = context.applicationContext
 
@@ -100,7 +111,12 @@ object ApkUpdater {
 
         job = scope.launch {
             try {
-                val file = download(app, url, fileName) { done, total ->
+                // GitHub 的 digest 是可选字段，镜像下载也可能遇到 GitHub API 不通，
+                // 因此取不到时只降级到安装前的签名校验，不能让 Gitee 用户无法更新。
+                val expectedSha256 = releaseTag
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { fetchExpectedSha256(it, fileName) }
+                val file = download(app, url, fileName, expectedSize, expectedSha256) { done, total ->
                     if (myAttempt == attempt) {
                         val pct = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else -1
                         state = ApkDownloadState.Running(done, total, pct)
@@ -134,11 +150,23 @@ object ApkUpdater {
         context: Context,
         url: String,
         fileName: String,
+        expectedSize: Long,
+        expectedSha256: String?,
         onProgress: (Long, Long) -> Unit
     ): File {
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         val target = File(dir, fileName)
         val temp = File(dir, "$fileName.part")
+
+        // 用户重复点下载时，完整的同版本包可以直接复用；摘要存在时一并校验，
+        // 避免同长度但内容已损坏的缓存被误判为可安装。
+        if (target.exists() && target.length() > 0 &&
+            (expectedSize <= 0 || target.length() == expectedSize) &&
+            (expectedSha256 == null || sha256(target) == expectedSha256)
+        ) {
+            return target
+        }
+        if (target.exists()) target.delete()
 
         val req = Request.Builder()
             .url(url)
@@ -184,13 +212,64 @@ object ApkUpdater {
             temp.delete()
             error("更新包下载不完整（$actual/$declaredLength 字节），请重新下载")
         }
+        if (expectedSize > 0 && actual != expectedSize) {
+            temp.delete()
+            error("更新包下载不完整（$actual/$expectedSize 字节），请重新下载")
+        }
+        if (expectedSha256 != null && sha256(temp) != expectedSha256) {
+            temp.delete()
+            error("更新包 SHA-256 校验失败，已阻止安装")
+        }
 
         if (target.exists()) target.delete()
         if (!temp.renameTo(target)) {
             temp.copyTo(target, overwrite = true)
             temp.delete()
         }
+        // 跨版本附件名不同，若不主动清理会一直堆在缓存目录里。
+        dir.listFiles()?.forEach { file ->
+            if (file != target) file.delete()
+        }
         return target
+    }
+
+    private fun fetchExpectedSha256(releaseTag: String, fileName: String): String? {
+        val req = Request.Builder()
+            .url("https://api.github.com/repos/yehu-imei/linyu/releases/tags/${Uri.encode(releaseTag)}")
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "LinYu-Android")
+            .build()
+        return try {
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val json = resp.body?.string() ?: return null
+                val assets = JsonParser.parseString(json).asJsonObject.getAsJsonArray("assets")
+                    ?: return null
+                val digest = assets
+                    .map { it.asJsonObject }
+                    .firstOrNull { it.get("name")?.asString == fileName }
+                    ?.get("digest")?.asString
+                    ?: return null
+                digest.substringAfter("sha256:", "")
+                    .lowercase()
+                    .takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -226,6 +305,10 @@ object ApkUpdater {
             return ApkInstallResult.Error("更新包已丢失，请重新下载")
         }
 
+        verifyApkIdentity(context, file)?.let { message ->
+            return ApkInstallResult.Error(message)
+        }
+
         // Android 8.0 起安装未知来源应用需要单独授权
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !context.packageManager.canRequestPackageInstalls()
@@ -243,6 +326,46 @@ object ApkUpdater {
             ApkInstallResult.Installing
         } catch (e: Exception) {
             ApkInstallResult.Error("无法调起安装器：${e.message}")
+        }
+    }
+
+    private fun verifyApkIdentity(context: Context, file: File): String? {
+        val packageManager = context.packageManager
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+            PackageManager.GET_SIGNING_CERTIFICATES
+        else @Suppress("DEPRECATION")
+            PackageManager.GET_SIGNATURES
+        val archiveInfo = packageManager.getPackageArchiveInfo(file.absolutePath, flags)
+            ?: return "无法读取更新包签名，已阻止安装"
+        if (archiveInfo.packageName != BuildConfig.APPLICATION_ID) {
+            return "更新包包名与当前应用不一致，已阻止安装"
+        }
+        val installedInfo = try {
+            packageManager.getPackageInfo(BuildConfig.APPLICATION_ID, flags)
+        } catch (_: Exception) {
+            return "无法读取当前应用签名，已阻止安装"
+        }
+        val archiveDigests = certificateDigests(archiveInfo)
+        val installedDigests = certificateDigests(installedInfo)
+        if (archiveDigests.isEmpty()) return "无法读取更新包签名，已阻止安装"
+        if (installedDigests.isEmpty()) return "无法读取当前应用签名，已阻止安装"
+        if (archiveDigests != installedDigests) {
+            return "更新包签名与当前应用不一致，已阻止安装"
+        }
+        return null
+    }
+
+    private fun certificateDigests(info: PackageInfo): Set<String> {
+        val signatures: Array<Signature> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.apkContentsSigners ?: emptyArray()
+        } else {
+            @Suppress("DEPRECATION")
+            info.signatures ?: emptyArray()
+        }
+        return signatures.mapTo(mutableSetOf()) { signature ->
+            MessageDigest.getInstance("SHA-256")
+                .digest(signature.toByteArray())
+                .joinToString("") { "%02x".format(it) }
         }
     }
 

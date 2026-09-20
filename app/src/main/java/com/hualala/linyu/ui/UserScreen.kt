@@ -1183,7 +1183,13 @@ private fun DownloadSection(
     val startDownload: () -> Unit = {
         installError = null
         if (downloadUrl != null && asset != null) {
-            ApkUpdater.start(context, downloadUrl, asset.name)
+            ApkUpdater.start(
+                context = context,
+                url = downloadUrl,
+                fileName = asset.name,
+                expectedSize = asset.sizeBytes,
+                releaseTag = release.tagName
+            )
         }
     }
     val toggleSource: (Boolean) -> Unit = {
@@ -1799,4 +1805,3 @@ private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Uni
         }
     )
 }
-

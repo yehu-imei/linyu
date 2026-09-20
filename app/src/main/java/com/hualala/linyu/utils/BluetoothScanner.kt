@@ -28,6 +28,14 @@ class BluetoothScanner(
     private val scanner = adapter?.bluetoothLeScanner
     private val handler = Handler(Looper.getMainLooper())
     private var isScanning = false
+    private var callbackDelivered = false
+    private var timeoutRunnable: Runnable? = null
+
+    private fun complete(ok: Boolean) {
+        if (callbackDelivered) return
+        callbackDelivered = true
+        onScanTimeout?.invoke(ok)
+    }
 
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
@@ -47,7 +55,9 @@ class BluetoothScanner(
 
         override fun onScanFailed(errorCode: Int) {
             isScanning = false
-            onScanTimeout?.invoke(false)
+            timeoutRunnable?.let(handler::removeCallbacks)
+            timeoutRunnable = null
+            complete(false)
         }
     }
 
@@ -60,18 +70,31 @@ class BluetoothScanner(
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
+        callbackDelivered = false
         isScanning = true
         // 硬件过滤器精确匹配可能漏掉设备，靠回调里的软件过滤兜底
         scanner.startScan(null, settings, scanCallback)
 
-        handler.postDelayed({
-            stopScan()
-            onScanTimeout?.invoke(true)
-        }, timeoutMillis)
+        // 失败后若超时任务仍存活，上层会先收到失败、再把空列表当有效快照；
+        // 保存同一个 Runnable 才能在失败或手动停止时精确撤销它。
+        timeoutRunnable = Runnable {
+            if (!isScanning) return@Runnable
+            stopScanInternal()
+            complete(true)
+        }.also { handler.postDelayed(it, timeoutMillis) }
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
+        stopScanInternal()
+        // 手动停止不代表扫描成功，且要屏蔽随后到达的失败回调。
+        callbackDelivered = true
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopScanInternal() {
+        timeoutRunnable?.let(handler::removeCallbacks)
+        timeoutRunnable = null
         if (!isScanning) return
         isScanning = false
         scanner?.stopScan(scanCallback)

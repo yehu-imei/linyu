@@ -122,9 +122,9 @@ object WidgetRenderer {
         } else {
             WidgetState.Idle(
                 name, desc, snCode,
-                // 记住的占用设备就是当前这台，才显示「占用中」
-                occupied = PrefsHelper.occupiedSnCode.isNotEmpty() &&
-                    PrefsHelper.occupiedSnCode == snCode
+                // 记住的占用设备就是当前这台、**且标记没过期**才显示「占用中」。
+                // occupiedFor 会在过期时顺手把陈旧标记清掉（并记一条日志）。
+                occupied = PrefsHelper.occupiedFor(snCode)
             )
         }
     }
@@ -734,10 +734,36 @@ object WidgetRenderer {
         STOPPING("正在关闭…"),
         REFRESHING("正在刷新…"),
         SWITCHING("正在切换设备…"),
-        UNKNOWN("状态未知，点此刷新"),
 
-        /** 「选用」失败：查不到设备或网络不通。短时间展示一下就自动消失 */
-        PICK_FAILED("切换失败，请稍后再试", shortText = "切换失败"),
+        /**
+         * 开阀预算耗尽、状态没对齐时的提示。
+         *
+         * ⚠️ **不能写成「请重试」**。这个状态下按钮发的是 `ACTION_REFRESH`
+         * （见 `actionIntent`），走 `ShowerController.reconcile()` —— 只是**重新查一次
+         * 服务端状态**，不会重新开阀。写成"重试"会和按钮行为对不上：用户按下去发现
+         * 水没开，只会更困惑。
+         *
+         * 之所以不干脆改成重开：第一次的 `downRate` 可能还在服务端飞行，
+         * 这时 `queryUsing` 查不到订单，再发一次就会**重复下单**。所以这一态刻意只读。
+         */
+        UNKNOWN("点此刷新"),
+
+        /**
+         * 网络不通。
+         *
+         * 以前这种情况**没有任何提示**：断网点开阀时 `openValve` 第一步请求就抛异常，
+         * 冒到接收器被 catch 掉、只落一条日志，卡片上的「正在开启…」闪一下就没。
+         * 用户完全不知道刚才那一下为什么没反应。
+         */
+        NETWORK("网络异常"),
+
+        /**
+         * 「选用」时服务端说没有这台设备。
+         *
+         * 和 [NETWORK] 分开是因为**原因不同**：以前两者共用一句「切换失败，请稍后再试」，
+         * 于是"这台设备已经不在服务端了"被说成了网络问题，用户会去查网络——查不出东西。
+         */
+        DEVICE_NOT_FOUND("设备不存在"),
 
         /**
          * 想开的设备正被别人用着。
@@ -762,7 +788,8 @@ object WidgetRenderer {
          * 用户在失败后想再点一次重试是很自然的，把点击清掉会让他以为小组件坏了。
          */
         val isNotice: Boolean
-            get() = this == FAILED || this == PICK_FAILED || this == IN_USE_BY_OTHERS
+            get() = this == FAILED || this == DEVICE_NOT_FOUND ||
+                this == NETWORK || this == IN_USE_BY_OTHERS
     }
 
     private fun actionIntent(
