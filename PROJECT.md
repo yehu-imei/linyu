@@ -8,7 +8,7 @@
 |---|---|
 | 应用名称 | 淋浴 |
 | 包名 | `com.hualala.linyu` |
-| 版本 | v3.0.3 |
+| 版本 | v3.0.4 |
 | 技术栈 | Kotlin + Jetpack Compose + Material 3 |
 | 最低 Android 版本 | Android 8.0 (API 26) |
 | 目标 Android 版本 | Android 16 (API 36) |
@@ -422,6 +422,8 @@ buildTypes {
 | 1x1 图标对齐 | 占用仍是**一格**（和应用图标一样），只是靠内边距让视觉大小接近。各家桌面的格子尺寸和图标内边距都不同，做不到像素级一致，6dp 是折中值 |
 | 小组件仍是 emoji | 账单行 / 附近设备行的设备头像用的是 emoji，和 App 内的图标不一致（那两个列表里可能有饮水机，换了会图标与 emoji 混排）|
 | 多语言 | 仅支持中文 |
+| 关阀结果无法完全确认 | 断网时只能知道「请求没发出去」，无法知道服务端**在断网前有没有收到**。这时按未确认处理并把本地状态放回去（显示为仍在用水）——宁可多显示一次使用中，也不谎报「已结束」|
+| 「占用中」徽章可能提前消失 | 徽章的是非对错取决于「对方什么时候用完」，而那个时间客户端拿不到。目前用 **3 分钟** TTL 兜底，所以对方洗得久时徽章会先消失——点一下仍会正常提示被占用。理论上界应该是设备的 `autoDisConTime`，但那个字段的实测样本还没拿到 |
 
 ### 历史问题的修复记录
 
@@ -459,10 +461,36 @@ buildTypes {
 | 绑定寝室后小组件一直显示「请先选择设备」 | ✅ v3.0.3：闸门拿 `lastDeviceName`（**格式化过**、楼层被去掉）算键，和原始名算出来的对不上。新增 `lastDeviceRawName` |
 | 首页取消绑定后要等一会儿才刷新 | ✅ v3.0.3：`PrefsHelper.boundRoom` 是普通 pref 不是 Compose 状态，改它不触发重组。改成 ViewModel 里的 State |
 | `sync-all.sh` 上传 APK 静默跳过 | ✅ v3.0.3：第 3 步 `cd` 换了工作目录，第 5 步相对路径失效，打印「没给 APK」就过去了。改成先转绝对路径 |
+| 关阀没成功却报「已结束」 | ✅ v3.0.4：确认循环无论结果如何都 `clearDeviceState` + 返回 `Closed`；且它查的 `closeOrder/result/query` 实测**恒返回 `data:null`**，那段"确认"实际只验证了 HTTP 成功。新增 `CloseOutcome.Unconfirmed` |
+| 关阀未确认时本地状态对不上 | ✅ v3.0.4：停止流程先清本地状态（为了点完即时反馈），失败时不回滚 → 界面显示空闲、设备还在跑，且 `startedAt` 已被清、计时从 0 重来。新增 `restoreActiveOrder` + `ShowerEvents.ordersRestored` |
+| MQTT 把 orderNo 写成设备序列号 | ✅ v3.0.4：`showerSnCode?.let { updateOrderNo(it, it) }` 内层 `it` 遮蔽外层，两个参数都成了 snCode |
+| 小组件「占用中」永久残留 | ✅ v3.0.4：`occupiedSnCode` 全项目只有小组件自己读写、且无过期机制。App 侧清除 + 3 分钟 TTL |
+| 断网点小组件开启无任何反馈 | ✅ v3.0.4：`openValve` 第一步就发请求且自身无 try/catch，异常被冒到接收器吞掉，卡片闪一下就没。改为「网络异常」+ 横幅 |
+| 「选用」失败文案笼统 | ✅ v3.0.4：`pickDevice` 返回 `Boolean`，「设备不存在」和「网络不通」说不出区别。改为三态 `PickResult` |
+| 更新包只校验字节长度 | ✅ v3.0.4：补包名、签名证书、可选 SHA-256；不通过则**阻止安装** |
+| 加密存储静默降级为同名明文 | ✅ v3.0.4：回退文件与加密文件同名，加密恢复后会读到格式不符的同名文件 → 「登录态莫名丢失」。改用独立文件 `linyu_prefs_plain` |
+| 备份规则是未改动的 Android 模板 | ✅ v3.0.4：内容全被注释，等于没排除任何东西，凭证会进云备份/设备迁移 |
+| 蓝牙扫描失败后重复回调 | ✅ v3.0.4：超时任务没撤销，失败后还会再回调一次「完成」，上层把空列表当有效快照 |
+| 日志共享非线程安全的日期格式 | ✅ v3.0.4：`SimpleDateFormat` 共享实例 + 文件读写无锁。改用 `java.time` 并加锁 |
+| 干净环境跑不了测试任务 | ✅ v3.0.4：`signingConfigs` 在配置阶段无条件读 `local.properties`，缺文件连 `testDebugUnitTest` 都失败 |
+| SECURITY.md 与实现不符 | ✅ v3.0.4：声称「Release 不包含请求/响应体日志」，实际自有拦截器照记（最多 300/400 字符，已脱敏）|
 
 ---
 
 ## 版本历史
+
+### v3.0.4 (2026-09-20)
+
+**质量修复版本，无新增功能。** 16 个文件，改动集中在异常路径与工程加固——正常使用下的行为与 v3.0.3 一致。
+
+- **关阀结果不再谎报** — `closeValve` 的确认循环无论结果如何都 `clearDeviceState` + 返回 `Closed`；而且它查的 `closeOrder/result/query` 实测**恒返回 `data:null`**，那段"确认"实际只验证了 HTTP 成功。新增 `CloseOutcome.Unconfirmed`，关阀请求本身失败时如实提示。判据取「一点证据都没有」而不是「确认得很完美」——后者会让网络稍有抖动就报未确认，那种噪声会淹没真正的异常
+- **未确认时回滚本地状态** — 「先清状态再关阀」的顺序保留（那是为了点完即时反馈），改为失败时 `restoreActiveOrder` 把活跃订单与 `startedAt` 一并放回。`startedAt` 是关键，少了它计时会从 0 重来。回滚发生在 `notifyFinished` 之后，App 内存副本已删设备，故补 `ShowerEvents.ordersRestored` 事件同步
+- **MQTT orderNo** — 内层 `it` 遮蔽外层，`updateOrderNo(it, it)` 把 orderNo 写成了 snCode
+- **小组件「占用中」** — 加 App 侧清除 + 3 分钟 TTL（原来只有小组件自己读写、且无过期，会永久残留）；断网点开启加「网络异常」提示与横幅（原来异常被吞、界面无反馈）；「选用」失败区分设备不存在/网络异常（`pickDevice` 由 `Boolean` 改三态 `PickResult`）；同一占用周期内只弹一次横幅
+- **更新包校验** — 包名比对 + 签名证书 SHA-256 比对 + 可选 Release SHA-256。不通过则阻止安装。GitHub `digest` 不可用时（如 Gitee 下载）不阻止安装，但签名校验不跳过
+- **认证数据** — 备份规则此前是未改动的 Android 模板（等于没排除任何内容），现排除两份 prefs 与日志；加密初始化失败的回退改用独立文件 `linyu_prefs_plain`（原与加密文件同名）
+- **日志** — 共享的 `SimpleDateFormat` 改用线程安全的 `java.time`，文件截断与追加共用一把锁
+- 其余：下载复用与旧版清理、蓝牙扫描失败后的双回调、Release 签名配置改为条件创建、`SECURITY.md` 如实修订
 
 ### v3.0.3 (2026-09-18)
 

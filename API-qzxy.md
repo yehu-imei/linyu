@@ -356,8 +356,59 @@ snCode=QZXY20230001&orderNo=1234567&loginCode=xxx&userId=xxx&...
 | 参数 | 说明 |
 |---|---|
 | `snCode` | 设备序列号 |
-| `orderNo` | 订单号（从 queryUsing 或 MQTT 获取） |
+| `orderNo` | 订单号（从 `queryUsing` / `downRateResult` / MQTT 获取，见 4.3.1） |
 | 认证参数 | 见认证机制 |
+
+**响应**：
+
+```json
+{"success":true,"errorCode":0,"errorMessage":"成功","data":null}
+```
+
+`errorCode: 307` 或 `errorMessage` 含「已在」时，表示服务端已在关闭中——**同样按成功处理**。
+
+### 4.4.1 关阀结果确认：这个接口**确认不了任何东西**
+
+```
+POST /order/tcpDevice/closeOrder/result/query
+Content-Type: application/x-www-form-urlencoded
+
+snCode=QZXY20230001&orderNo=13202609181506558872&loginCode=xxx&...
+```
+
+**响应（实测，每次都是这样）**：
+
+```json
+{"success":true,"errorCode":0,"errorMessage":"成功","data":null}
+```
+
+> ⚠️ **`data` 恒为 `null`。** 客户端早期版本用
+> `d == null || d.state == 0 || d.status == 0 || d.orderNo.isNullOrEmpty()`
+> 判断"关阀成功"——`d == null` 永远成立，于是**第 1 轮就跳出循环**。
+> 那段"确认"实际只验证了「HTTP 请求成功」，跟设备关没关没有半点关系。
+>
+> 更糟的是它给了人**已经确认过**的错觉：断网导致 5 次请求全部抛异常时，
+> 循环照样走完、照样报「使用结束」，而水还在流。
+>
+> **这个接口可以调，但别拿它的返回值当"设备已关闭"的证据。**
+
+#### 想知道设备到底关没关，用 `queryUsing`
+
+唯一可靠的信号是 4.5 的 `/order/tcpDevice/query/rateOrder/using`：
+**服务端说这台设备上没有订单了**，才是真的停了。这也是客户端判定"用水结束"用的信号。
+
+判据必须写成**三态**，不能是 `Boolean`：
+
+| 响应 | 含义 |
+|---|---|
+| `errorCode == 307` 或 `data.orderNo != null` | **有订单**（还在用）|
+| `success == true` 且没有订单 | **没有订单**（确实停了）|
+| 请求本身失败 | **不确定** —— 绝不能当成"没有订单" |
+
+```kotlin
+// ⚠️ 反面写法：catch 里返回 false，等于把"不知道"当成了"关好了"
+try { ... } catch (_: Exception) { false }
+```
 
 ### 4.5 查询进行中的订单
 
@@ -400,8 +451,12 @@ xfModel=0&snCode=QZXY20230001&loginCode=xxx&userId=xxx&...
 | 字段 | 说明 |
 |---|---|
 | `orderNo` | 订单号（null 表示无进行中订单） |
-| `isOwner` | 是否为当前用户发起的订单 |
-| `errorCode: 307` | 设备正在使用中 |
+| `isOwner` | 是否为当前用户发起的订单。**为 false 时绝不能当成"自己的订单"恢复**——那会把别人的单记成自己的，卡片开始计时，用户点停止时还会拿别人的 orderNo 去关阀 |
+| `errorCode: 307` | 设备正在使用中（此时 `success` 为 false，**不能只判 success**）|
+| `preDeductMoney` | 预扣金额。⚠️ 单位见 4.11——那套接口是**厘** |
+| `expireTimes` | 实测见过这个字段，值为 `null`（当时是本人自己的单）。**目前未被客户端使用**。如果**他人的单**会填它，就能直接拿到"还剩多久"，不必靠猜——值得后续抓一次确认 |
+
+**这个接口是判断"设备关没关 / 还在不在用"的可靠信号**（见 4.4.1）。
 
 ### 4.6 账单列表
 
