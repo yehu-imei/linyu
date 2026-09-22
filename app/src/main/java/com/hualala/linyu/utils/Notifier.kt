@@ -117,7 +117,12 @@ object Notifier {
      * **即使 [PrefsHelper.notifyInUse] 关着也照样发**，只是换到静默渠道——
      * 前台服务没有通知就起不来，而它是自动关停的唯一保障。见渠道创建的注释。
      */
-    fun showInUse(context: Context, deviceName: String, startedAtMs: Long): android.app.Notification {
+    fun showInUse(
+        context: Context,
+        snCode: String,
+        deviceName: String,
+        startedAtMs: Long
+    ): android.app.Notification {
         ensureChannels(context)
 
         // 关掉时（总开关，或单独关掉「用水状态通知」）不发内容，
@@ -138,7 +143,26 @@ object Notifier {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             // 点它就是想回使用页看当前状态，不是回首页
             .setContentIntent(openApp(context, tab = 0, showShower = true))
-            .addAction(stopAction(context))
+            .addAction(stopAction(context, snCode))
+            .build()
+
+        notify(context, ID_IN_USE, n)
+        return n
+    }
+
+    /** 多台设备共用一个前台通知位置，只显示汇总并引导回 App。 */
+    fun showInUseSummary(context: Context, count: Int): android.app.Notification {
+        ensureChannels(context)
+        if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyInUse) return minimal(context)
+
+        val n = NotificationCompat.Builder(context, CHANNEL_IN_USE)
+            .setSmallIcon(R.drawable.ic_notify_shower)
+            .setContentTitle("正在使用 $count 台设备")
+            .setContentText("点按查看进行中的用水")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(openApp(context, tab = 0))
             .build()
 
         notify(context, ID_IN_USE, n)
@@ -379,12 +403,13 @@ object Notifier {
     }
 
     /** 「结束使用」按钮：把动作回传给正在跑的 ShowerWatchService */
-    private fun stopAction(context: Context): NotificationCompat.Action {
+    private fun stopAction(context: Context, snCode: String): NotificationCompat.Action {
         val intent = Intent(context, com.hualala.linyu.service.ShowerWatchService::class.java).apply {
             action = ACTION_STOP_SHOWER
+            putExtra(com.hualala.linyu.service.ShowerWatchService.EXTRA_SNCODE, snCode)
         }
         val pi = PendingIntent.getService(
-            context, 7100, intent,
+            context, 7100 + snCode.hashCode(), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Action.Builder(

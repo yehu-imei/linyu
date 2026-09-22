@@ -9,15 +9,18 @@ import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.data.CloseDisposition
 import com.hualala.linyu.data.CloseOutcome
+import com.hualala.linyu.data.KeyedTaskRegistry
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
 import com.hualala.linyu.data.closeDisposition
+import com.hualala.linyu.data.monitorSerials
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
 import com.hualala.linyu.widget.LinYuWidget
 import com.hualala.linyu.widget.WidgetBridge
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -25,6 +28,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 用水监控（前台服务）。
@@ -51,7 +56,8 @@ import kotlinx.coroutines.launch
 class ShowerWatchService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var watchJob: Job? = null
+    private val watchJobs = KeyedTaskRegistry<Job>()
+    private val finishingCount = AtomicInteger(0)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,34 +76,39 @@ class ShowerWatchService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+            finishingCount.incrementAndGet()
+            watchJobs.remove(sn)?.cancel()
             // 先挂前台通知：用 startForegroundService 起的服务，5 秒内不挂就会被系统崩掉
-            attachForeground(
-                Notifier.showStopping(this, PrefsHelper.lastDeviceName.ifEmpty { "热水器" })
-            )
-            scope.launch { doFinish(sn); stopSelf() }
+            attachForeground(Notifier.showStopping(this, deviceNameFor(sn)))
+            scope.launch {
+                try {
+                    doFinish(sn)
+                } finally {
+                    finishingCount.decrementAndGet()
+                    if (PrefsHelper.isLoggedIn && ShowerController.isRunning(sn)) {
+                        startWatching(sn)
+                    }
+                    updateForegroundOrStop()
+                }
+            }
             return START_NOT_STICKY
         }
 
-        val snCode = intent?.getStringExtra(EXTRA_SNCODE)?.takeIf { it.isNotEmpty() }
-            ?: PrefsHelper.lastDeviceSnCode
-
-        if (snCode.isEmpty() || !PrefsHelper.isLoggedIn) {
+        if (!PrefsHelper.isLoggedIn) {
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // 前台服务必须在 5 秒内挂上通知，否则系统直接崩掉这个服务
-        attachForeground(
-            Notifier.showInUse(
-                this,
-                PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
-                PrefsHelper.getStartedAt(snCode)
-            )
-        )
-
-        if (watchJob?.isActive != true) {
-            watchJob = scope.launch { watch(snCode) }
+        val activeOrders = PrefsHelper.getActiveOrders()
+        val requestedSn = intent?.getStringExtra(EXTRA_SNCODE)?.takeIf { it.isNotEmpty() }
+        val serials = requestedSn?.let(::listOf) ?: monitorSerials(activeOrders)
+        if (serials.isEmpty()) {
+            stopSelf()
+            return START_NOT_STICKY
         }
+
+        attachForeground(inUseNotification(activeOrders))
+        serials.forEach(::startWatching)
         return START_STICKY
     }
 
@@ -155,20 +166,18 @@ class ShowerWatchService : Service() {
     private suspend fun finish(snCode: String) {
         // 已经被别处清理过了（比如用户在 App 里手动停的）——不重复处理
         if (!ShowerController.isRunning(snCode)) {
-            stopSelf()
             return
         }
 
         val startedAt = PrefsHelper.getStartedAt(snCode)
         val elapsed = elapsedSec(startedAt)
-        val deviceName = PrefsHelper.lastDeviceName.ifEmpty { "热水器" }
+        val deviceName = deviceNameFor(snCode)
         val orderNo = ShowerController.activeOrderFor(snCode)?.orderNo ?: ""
 
         // ⚠️ 顺序要紧：先清本地状态，小组件的 isRunning() 才会变 false。
         // 以前没有这一步，所以自动关停后小组件永远停在「使用中」。
         ShowerController.markFinished(snCode)
         LinYuWidget.refreshAll(this)
-        Notifier.cancelInUse(this)
 
         // 结算要轮询账单（最多约 7 秒），放在清理之后——金额晚一点到没关系，
         // 状态先对上是第一位的
@@ -187,7 +196,6 @@ class ShowerWatchService : Service() {
         ShowerEvents.notifyFinished(
             ShowerEvents.Finished(snCode, deviceName, elapsed, money, autoClosed = true)
         )
-        stopSelf()
     }
 
     /**
@@ -207,14 +215,12 @@ class ShowerWatchService : Service() {
             // 这条提前返回也必须清掉，否则卡片会永远卡在「正在关闭…」
             WidgetBridge.clearBusy()
             LinYuWidget.refreshAll(this)
-            Notifier.cancelInUse(this)
-            stopForeground(STOP_FOREGROUND_REMOVE)
             return
         }
 
         val startedAt = PrefsHelper.getStartedAt(snCode)
         val elapsed = elapsedSec(startedAt)
-        val deviceName = PrefsHelper.lastDeviceName.ifEmpty { "热水器" }
+        val deviceName = deviceNameFor(snCode)
 
         // ⚠️ orderNo 必须在**关阀之前**敲定，所以它在 `markFinished` 之前读——
         // 本地清理会把活跃订单删掉，之后就再也读不到（`queryUsing` 也问不出来了，
@@ -229,8 +235,6 @@ class ShowerWatchService : Service() {
         // 用户在关阀那 5 秒里看不到任何"正在进行"的反馈。
         // 留着它，卡片会一直显示「正在关闭…」，等关阀完再一起清（见下）。
         LinYuWidget.refreshAll(this)
-        Notifier.cancelInUse(this)
-        stopForeground(STOP_FOREGROUND_REMOVE)
 
         // 关阀结果决定后续分支；失败和未确认都不能进入结算或完成通知。
         val closeResult = ShowerController.closeValve(snCode, orderNo)
@@ -308,6 +312,46 @@ class ShowerWatchService : Service() {
 
     private fun elapsedSec(startedAt: Long): Int =
         if (startedAt > 0) ((System.currentTimeMillis() - startedAt) / 1000).toInt() else 0
+
+    private fun startWatching(snCode: String) {
+        val job = watchJobs.getOrStart(snCode) {
+            scope.launch(start = CoroutineStart.LAZY) {
+                val self = currentCoroutineContext()[Job] ?: return@launch
+                try {
+                    watch(snCode)
+                } finally {
+                    watchJobs.remove(snCode, self)
+                    updateForegroundOrStop()
+                }
+            }
+        }
+        job.start()
+    }
+
+    private fun updateForegroundOrStop() {
+        if (watchJobs.isEmpty() && finishingCount.get() == 0) {
+            stopSelf()
+            return
+        }
+        if (!PrefsHelper.isLoggedIn || finishingCount.get() > 0) return
+        val activeOrders = PrefsHelper.getActiveOrders()
+        if (activeOrders.isNotEmpty()) attachForeground(inUseNotification(activeOrders))
+    }
+
+    private fun inUseNotification(orders: List<com.hualala.linyu.model.ActiveOrder>): android.app.Notification {
+        if (orders.size > 1) return Notifier.showInUseSummary(this, orders.size)
+        val order = orders.first()
+        return Notifier.showInUse(
+            this,
+            order.snCode,
+            order.deviceName.ifEmpty { "热水器" },
+            PrefsHelper.getStartedAt(order.snCode)
+        )
+    }
+
+    private fun deviceNameFor(snCode: String): String =
+        ShowerController.activeOrderFor(snCode)?.deviceName?.takeIf { it.isNotEmpty() }
+            ?: PrefsHelper.lastDeviceName.ifEmpty { "热水器" }
 
     private fun ensureInit() {
         if (!PrefsHelper.isInitialized) PrefsHelper.init(applicationContext)

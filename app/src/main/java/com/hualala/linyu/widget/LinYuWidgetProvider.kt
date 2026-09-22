@@ -256,6 +256,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                     // 用户点完立刻能看到反馈，服务随后起来也只是更新同一条（id 相同）。
                     Notifier.showInUse(
                         context,
+                        snCode,
                         PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
                         PrefsHelper.getStartedAt(snCode)
                     )
