@@ -61,6 +61,13 @@ class ShowerSafetyPolicyTest {
         assertFalse(canLogoutVoluntarily(listOf(activeOrder("device-a"))))
     }
 
+    @Test
+    fun `只有完成处置可以宣布使用结束`() {
+        assertTrue(CloseDisposition.COMPLETE.mayAnnounceFinished)
+        assertFalse(CloseDisposition.RESTORE_FAILED.mayAnnounceFinished)
+        assertFalse(CloseDisposition.RESTORE_UNCONFIRMED.mayAnnounceFinished)
+    }
+
     private fun activeOrder(snCode: String) = ActiveOrder(
         snCode = snCode,
         orderNo = "order-$snCode",

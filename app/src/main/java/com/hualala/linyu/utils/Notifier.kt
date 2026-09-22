@@ -262,8 +262,17 @@ object Notifier {
     fun showCloseUnconfirmed(context: Context, deviceName: String) {
         if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyFinished) return
         postEvent(context, ID_FINISHED, alert = true,
-            title = "关阀失败 · 网络异常",
-            body = "设备未成功关闭",
+            title = "关阀状态未确认 · ${shortName(deviceName)}",
+            body = "网络异常，设备可能仍在用水，请重试",
+            tab = 0)
+    }
+
+    /** 服务端明确拒绝关阀，保留停止入口并展示服务端原因。 */
+    fun showCloseFailed(context: Context, deviceName: String, reason: String) {
+        if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyFinished) return
+        postEvent(context, ID_FINISHED, alert = true,
+            title = "关阀失败 · ${shortName(deviceName)}",
+            body = reason,
             tab = 0)
     }
 

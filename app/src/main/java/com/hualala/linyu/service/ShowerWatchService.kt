@@ -7,9 +7,11 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.api.queryUsingSafe
+import com.hualala.linyu.data.CloseDisposition
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
+import com.hualala.linyu.data.closeDisposition
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
@@ -220,14 +222,8 @@ class ShowerWatchService : Service() {
         // 「开完水马上停」时本地存的还是空串，那就白丢了结算用的那个直答接口。
         val orderNo = ShowerController.resolveOrderNo(snCode)
 
-        // ── 第一阶段：立刻响应 ──
-        //
-        // ⚠️ 顺序很要紧。原来是「先关阀、再清状态」，而关阀要轮询确认最多 5 秒，
-        // 于是用户点了结束之后界面要愣 5 秒才动，中间这几件事全都对不上：
-        //   · 使用页不退出
-        //   · 「上次使用设备」还显示「恢复」
-        //   · 这时候点「恢复」能进使用页，但 startedAt 已被清成 0 → 计时显示 0
-        // 现在把本地清理提到关阀前面，用户点完当场就有反馈。
+        // 先暂时清掉本地状态，让小组件显示「正在关闭」。如果关阀失败，下面会把
+        // 订单和计时完整恢复；App 只有在确认成功后才会收到结束事件。
         ShowerController.markFinished(snCode)
         // ⚠️ 这里**故意不清 busy**：清了小组件会立刻变成「空闲」，
         // 用户在关阀那 5 秒里看不到任何"正在进行"的反馈。
@@ -236,51 +232,44 @@ class ShowerWatchService : Service() {
         Notifier.cancelInUse(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
 
-        // 带上金额 0：这时候还没结算。App 只拿它来退出使用页，
-        // 真正的金额走下面那条通知。
-        ShowerEvents.notifyFinished(
-            ShowerEvents.Finished(snCode, deviceName, elapsed, 0.0, autoClosed = false)
-        )
-
-        // ── 第二阶段：慢活放后面 ──
-        // 关阀确认 5 秒 + 账单结算最多 7 秒。用户已经在界面上看到结束了，
-        // 这两步纯粹是收尾，慢一点没关系。
+        // 关阀结果决定后续分支；失败和未确认都不能进入结算或完成通知。
         val closeResult = ShowerController.closeValve(snCode, orderNo)
 
-        // ⚠️ 没确认到设备停了。这条路径上本地状态**已经**在前面清掉了
-        // （`markFinished` 提到关阀之前，是为了让用户点完立刻有反馈），
-        // 所以这里没法再"留住停止入口"——那就至少**别谎报成功**。
-        // 发一条明确的「没能确认」，而不是下面那条「使用结束 · 消费 ¥x.xx」。
-        if (closeResult is CloseOutcome.Unconfirmed) {
-            AppLogger.w("ShowerWatch 停止未确认 $snCode: ${closeResult.message}")
-            // ⚠️ **把刚才清掉的本地状态放回去**。
-            //
-            // 前面 `markFinished` 已经把本地状态清成空闲了（那是为了让你点完立刻有反馈），
-            // 但关阀没成功——设备多半还在跑。不放回去的话会出现：
-            // 界面和小组件都显示空闲、用户以为停了，等联网后状态才补回来，
-            // 而**计时基准（startedAt）已经丢了**，于是从 0 重新计时。
-            //
-            // startedAt 是 `markFinished` **之前**取的（见本函数开头），所以这里能原样还原。
-            ShowerController.restoreActiveOrder(snCode, orderNo, startedAt)
-            WidgetBridge.clearBusy()
-            LinYuWidget.refreshAll(this)
-            Notifier.showCloseUnconfirmed(this, deviceName)
-            // ⚠️ 必须通知 App 重新读一次 Prefs。上面那条 `notifyFinished` 是**在关阀之前**
-            // 发的，App 收到时已经把设备从**内存**列表里删了；而回滚只写进 Prefs。
-            // 不补这一下，App 的内存副本会一直停在"空闲"，要等用户点「恢复」才对齐——
-            // 表现就是「闪一下空闲、又变回使用中」。
-            ShowerEvents.notifyOrdersRestored()
-            stopSelf()
-            return
-        }
-        if (closeResult is CloseOutcome.Failed) {
-            AppLogger.w("ShowerWatch 关阀失败 $snCode: ${closeResult.message}")
+        when (closeDisposition(closeResult)) {
+            CloseDisposition.RESTORE_FAILED -> {
+                val message = (closeResult as CloseOutcome.Failed).message
+                AppLogger.w("ShowerWatch 关阀失败 $snCode: $message")
+                ShowerController.restoreActiveOrder(snCode, orderNo, startedAt)
+                WidgetBridge.clearBusy()
+                LinYuWidget.refreshAll(this)
+                Notifier.showCloseFailed(this, deviceName, message)
+                ShowerEvents.notifyOrdersRestored()
+                return
+            }
+
+            CloseDisposition.RESTORE_UNCONFIRMED -> {
+                val message = (closeResult as CloseOutcome.Unconfirmed).message
+                AppLogger.w("ShowerWatch 停止未确认 $snCode: $message")
+                ShowerController.restoreActiveOrder(snCode, orderNo, startedAt)
+                WidgetBridge.clearBusy()
+                LinYuWidget.refreshAll(this)
+                Notifier.showCloseUnconfirmed(this, deviceName)
+                ShowerEvents.notifyOrdersRestored()
+                return
+            }
+
+            CloseDisposition.COMPLETE -> Unit
         }
 
         // 关阀走完了才收掉「正在关闭…」，卡片从它直接跳到「空闲」，
         // 中间不会再闪一下「使用中」
         WidgetBridge.clearBusy()
         LinYuWidget.refreshAll(this)
+
+        // 只有关阀确认成功后，App 才能退出使用页并展示完成状态。
+        ShowerEvents.notifyFinished(
+            ShowerEvents.Finished(snCode, deviceName, elapsed, 0.0, autoClosed = false)
+        )
 
         // 关阀已经确认，账单还在路上——先挂一条「结算中」。
         // 它和结束通知**用的是同一个 id**，所以下面 showFinished 是**原地更新**，

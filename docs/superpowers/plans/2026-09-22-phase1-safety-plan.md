@@ -135,31 +135,31 @@
 
 **接口：** 消费任务 3 的 `closeDisposition`；新增按失败类型选择的用户提示，不改变 `CloseOutcome`。
 
-- [ ] **步骤 1：添加“非成功结果不得完成”失败测试**
+- [x] **步骤 1：添加“非成功结果不得完成”失败测试**
 
 以策略输出断言只有 `COMPLETE` 允许进入结算，两个恢复结果都要求保留重试入口。
 
-- [ ] **步骤 2：运行测试确认红灯**
+- [x] **步骤 2：运行测试确认红灯**
 
 预期：当前策略缺少 `mayAnnounceFinished` 行为，测试失败。
 
-- [ ] **步骤 3：为策略增加 `mayAnnounceFinished` 最小属性**
+- [x] **步骤 3：为策略增加 `mayAnnounceFinished` 最小属性**
 
 仅 `COMPLETE` 返回 true。
 
-- [ ] **步骤 4：统一 Service 的失败回滚分支**
+- [x] **步骤 4：统一 Service 的失败回滚分支**
 
 `Failed` 和 `Unconfirmed` 都调用 `restoreActiveOrder`、清除 busy、刷新小组件、同步 App 内存并提前返回；仅 `COMPLETE` 进入结算和完成通知。
 
-- [ ] **步骤 5：分别使用失败与未确认文案**
+- [x] **步骤 5：分别使用失败与未确认文案**
 
 `Failed` 显示服务端错误，`Unconfirmed` 显示网络不确定性；两者不得包含“已结束”。
 
-- [ ] **步骤 6：运行聚焦测试和全部单元测试**
+- [x] **步骤 6：运行聚焦测试和全部单元测试**
 
 预期：全部通过。
 
-- [ ] **步骤 7：提交关阀修复**
+- [x] **步骤 7：提交关阀修复**
 
 提交信息：`fix: retain active state when valve close fails`
 

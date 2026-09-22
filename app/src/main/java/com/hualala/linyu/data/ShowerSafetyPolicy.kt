@@ -2,10 +2,10 @@ package com.hualala.linyu.data
 
 import com.hualala.linyu.model.ActiveOrder
 
-enum class CloseDisposition {
-    COMPLETE,
-    RESTORE_FAILED,
-    RESTORE_UNCONFIRMED
+enum class CloseDisposition(val mayAnnounceFinished: Boolean) {
+    COMPLETE(true),
+    RESTORE_FAILED(false),
+    RESTORE_UNCONFIRMED(false)
 }
 
 fun closeDisposition(outcome: CloseOutcome): CloseDisposition = when (outcome) {
