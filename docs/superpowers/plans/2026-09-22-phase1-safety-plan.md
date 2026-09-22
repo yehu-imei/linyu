@@ -86,43 +86,43 @@
 - 产出：`fun monitorSerials(orders: List<ActiveOrder>): List<String>`
 - 产出：`fun canLogoutVoluntarily(orders: List<ActiveOrder>): Boolean`
 
-- [ ] **步骤 1：编写关阀结果映射失败测试**
+- [x] **步骤 1：编写关阀结果映射失败测试**
 
 测试分别断言 `Closed` → `COMPLETE`、`Failed` → `RESTORE_FAILED`、`Unconfirmed` → `RESTORE_UNCONFIRMED`。生产策略尚不存在，因此测试编译失败。
 
-- [ ] **步骤 2：运行聚焦测试并确认红灯**
+- [x] **步骤 2：运行聚焦测试并确认红灯**
 
 运行：`gradlew testDebugUnitTest --tests "*.ShowerSafetyPolicyTest"`
 
 预期：因 `ShowerSafetyPolicy`/`CloseDisposition` 未定义而失败。
 
-- [ ] **步骤 3：实现最小关阀映射**
+- [x] **步骤 3：实现最小关阀映射**
 
 使用穷尽 `when` 映射三个密封类型，不提供默认分支。
 
-- [ ] **步骤 4：运行聚焦测试并确认绿灯**
+- [x] **步骤 4：运行聚焦测试并确认绿灯**
 
 预期：三个结果映射测试通过。
 
-- [ ] **步骤 5：添加多设备恢复与退出判定失败测试**
+- [x] **步骤 5：添加多设备恢复与退出判定失败测试**
 
 断言序列号去重且保持顺序、两个设备同时返回、空订单允许退出、任一活跃订单阻止退出。
 
-- [ ] **步骤 6：运行测试并确认新增断言失败**
+- [x] **步骤 6：运行测试并确认新增断言失败**
 
 预期：缺少 `monitorSerials` 和 `canLogoutVoluntarily` 导致编译失败。
 
-- [ ] **步骤 7：实现最小纯函数并删除模板测试**
+- [x] **步骤 7：实现最小纯函数并删除模板测试**
 
 `monitorSerials` 过滤空序列号并 `distinct()`；退出判定仅在列表为空时返回 true。
 
-- [ ] **步骤 8：运行全部单元测试**
+- [x] **步骤 8：运行全部单元测试**
 
 运行：`gradlew testDebugUnitTest`
 
 预期：全部通过且不再执行 `2 + 2 = 4` 模板测试。
 
-- [ ] **步骤 9：提交策略与测试**
+- [x] **步骤 9：提交策略与测试**
 
 提交信息：`test: define shower safety policies`
 
