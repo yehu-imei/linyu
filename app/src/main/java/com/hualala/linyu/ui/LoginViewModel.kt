@@ -48,32 +48,40 @@ class LoginViewModel : ViewModel() {
     private fun passwordLogin() {
         viewModelScope.launch {
             isLoading = true; errorMessage = null
-            val result = AuthRepository.login(phone, password)
-            loginResult = result
-            if (result.isFailure) {
-                val msg = result.exceptionOrNull()?.message ?: "登录失败"
-                errorMessage = when {
-                    msg.contains("Unable to resolve host", ignoreCase = true) ||
-                    msg.contains("No address associated", ignoreCase = true) ||
-                    msg.contains("Network is unreachable", ignoreCase = true) -> "网络连接失败，请检查网络设置"
-                    msg.contains("timeout", ignoreCase = true) || msg.contains("timed out", ignoreCase = true) ->
-                        "连接超时，请检查网络后重试"
-                    else -> msg
+            try {
+                val result = AuthRepository.login(phone, password)
+                loginResult = result
+                if (result.isFailure) {
+                    val msg = result.exceptionOrNull()?.message ?: "登录失败"
+                    errorMessage = when {
+                        msg.contains("Unable to resolve host", ignoreCase = true) ||
+                        msg.contains("No address associated", ignoreCase = true) ||
+                        msg.contains("Network is unreachable", ignoreCase = true) -> "网络连接失败，请检查网络设置"
+                        msg.contains("timeout", ignoreCase = true) || msg.contains("timed out", ignoreCase = true) ->
+                            "连接超时，请检查网络后重试"
+                        else -> msg
+                    }
                 }
+            } finally {
+                password = LoginSecretPolicy.clearPassword(password)
+                isLoading = false
             }
-            isLoading = false
         }
     }
 
     private fun smsLogin() {
         viewModelScope.launch {
             isLoading = true; errorMessage = null
-            val result = AuthRepository.smsLogin(phone, smsCode)
-            loginResult = result
-            if (result.isFailure) {
-                errorMessage = result.exceptionOrNull()?.message ?: "登录失败"
+            try {
+                val result = AuthRepository.smsLogin(phone, smsCode)
+                loginResult = result
+                if (result.isFailure) {
+                    errorMessage = result.exceptionOrNull()?.message ?: "登录失败"
+                }
+            } finally {
+                smsCode = LoginSecretPolicy.clearSmsCode(smsCode)
+                isLoading = false
             }
-            isLoading = false
         }
     }
 

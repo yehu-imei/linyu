@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -222,6 +223,7 @@ class QrScanActivity : AppCompatActivity() {
 
     // ── 相机 ──
 
+    @androidx.annotation.OptIn(markerClass = [ExperimentalGetImage::class])
     private fun startCamera(
         previewView: PreviewView,
         onReady: () -> Unit,

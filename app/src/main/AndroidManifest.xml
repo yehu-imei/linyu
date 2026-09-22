@@ -31,6 +31,9 @@
         android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
     <!-- 应用内下载更新包后调起系统安装器（Android 8.0+ 还需用户在设置里单独开启） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
