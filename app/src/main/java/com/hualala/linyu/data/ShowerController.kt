@@ -504,13 +504,19 @@ object ShowerController {
      *               必须带上，否则换设备后小组件会拿上一台的金额冒充当前这台。
      * @return 金额（元）；`0.0` = 确实没花钱；`null` = 没查出来（和 0.0 不是一回事）
      */
-    suspend fun settleAmount(orderNo: String, startTimeMs: Long, snCode: String): Double? {
+    suspend fun settleAmount(
+        orderNo: String,
+        startTimeMs: Long,
+        snCode: String,
+        deviceName: String = ""
+    ): Double? {
         var sawDefiniteZero = false
         if (orderNo.isNotEmpty()) {
             for (attempt in 0 until SETTLE_PROBE_ROUNDS) {
                 when (val probe = queryConsumeResult(orderNo, snCode)) {
                     is MoneyProbe.Found -> {
                         PrefsHelper.recordConsume(snCode, probe.value)
+                        PrefsHelper.clearPendingSettlement(snCode)
                         AppLogger.i("结算命中（consumeOrder/result，第 ${attempt + 1} 轮）：¥${probe.value}")
                         return probe.value
                     }
@@ -533,7 +539,21 @@ object ShowerController {
         // ⚠️ 这一条必须补。不补的话 [settleFromBillList] 返回 null → 通知上一句
         // 「结算中」，而金额**永远不会再来**（压根没有那笔账单），用户看到的是
         // 一条永远停在「结算中」的通知——比直接说「无消费」还糟。
-        return if (fromBills == null && sawDefiniteZero) 0.0 else fromBills
+        val resolved = if (fromBills == null && sawDefiniteZero) 0.0 else fromBills
+        if (resolved == null) {
+            PrefsHelper.recordPendingSettlement(
+                PendingSettlement(
+                    snCode = snCode,
+                    orderNo = orderNo,
+                    startedAt = startTimeMs,
+                    deviceName = deviceName,
+                    createdAt = System.currentTimeMillis()
+                )
+            )
+        } else {
+            PrefsHelper.clearPendingSettlement(snCode)
+        }
+        return resolved
     }
 
     /** 上次记进日志的原始响应体。只在**变了**的时候再记，避免 5 轮刷屏 */

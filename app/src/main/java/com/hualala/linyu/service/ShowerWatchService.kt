@@ -185,8 +185,9 @@ class ShowerWatchService : Service() {
         Notifier.showSettling(this, Notifier.ID_AUTO_CLOSED, "设备已自动关停 · $deviceName", elapsed)
 
         val money = try {
-            ShowerController.settleAmount(orderNo, startedAt, snCode)
+            ShowerController.settleAmount(orderNo, startedAt, snCode, deviceName)
         } catch (_: Exception) { null }
+        LinYuWidget.refreshAll(this)
 
         Notifier.showAutoClosed(this, deviceName, elapsed, money)
         AppLogger.i("ShowerWatch 检测到结束 $snCode 用时 ${elapsed}s 消费 $money")
@@ -281,8 +282,9 @@ class ShowerWatchService : Service() {
         Notifier.showSettling(this, Notifier.ID_FINISHED, "使用结束 · $deviceName", elapsed)
 
         val money = try {
-            ShowerController.settleAmount(orderNo, startedAt, snCode)
+            ShowerController.settleAmount(orderNo, startedAt, snCode, deviceName)
         } catch (_: Exception) { null }
+        LinYuWidget.refreshAll(this)
 
         Notifier.showFinished(this, deviceName, elapsed, money)
         AppLogger.i("ShowerWatch 用户结束 $snCode 用时 ${elapsed}s 消费 $money")

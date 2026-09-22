@@ -27,6 +27,7 @@ import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
+import com.hualala.linyu.data.SettlementReconciler
 import com.hualala.linyu.service.ShowerWatchService
 import com.hualala.linyu.widget.LinYuWidget
 import com.hualala.linyu.model.AccountInfo
@@ -816,7 +817,12 @@ class MainViewModel : ViewModel() {
                             "使用结束 · ${lastDeviceName.ifEmpty { "热水器" }}", elapsed0
                         )
                     }
-                    val amount = ShowerController.settleAmount(settledNo, startTime, snCode)
+                    val amount = ShowerController.settleAmount(
+                        settledNo,
+                        startTime,
+                        snCode,
+                        lastDeviceName
+                    )
                     toastMessage = when {
                         // null = 两条路都没拿到金额，是「还不知道」而不是「没花钱」
                         amount == null -> "已停止，消费金额稍后可在账单中查看"
@@ -1578,6 +1584,14 @@ class MainViewModel : ViewModel() {
                 }
                 billList = all.take(20)
                 billsLoaded = true
+                val reconciliation = SettlementReconciler.reconcile(
+                    PrefsHelper.getPendingSettlements(),
+                    all
+                )
+                reconciliation.updates.forEach { update ->
+                    PrefsHelper.recordConsume(update.snCode, update.amount)
+                }
+                PrefsHelper.savePendingSettlements(reconciliation.remaining)
                 // 顺手把最近一笔消费记给桌面小组件。账单按月倒序拉取，第一条就是最新的。
                 // ⚠️ 只有确认它属于「上次使用设备」时才记——账单接口不带 snCode，只能拿设备名比对。
                 // 比不中就跳过：宁可这次不记录，也别把别的设备的消费记到当前设备头上。

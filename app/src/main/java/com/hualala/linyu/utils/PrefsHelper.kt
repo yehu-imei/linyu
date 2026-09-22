@@ -6,6 +6,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.hualala.linyu.data.PendingSettlement
 import com.hualala.linyu.data.shouldPreserveForRecovery
 import com.hualala.linyu.model.ActiveOrder
 
@@ -122,6 +123,7 @@ object PrefsHelper {
                 .remove("lastConsumeMoney").remove("lastConsumeTime")
                 .remove("widgetNearbyJson").remove("widgetBillJson")
                 .remove("widgetNearbyTime").remove("widgetBillTime")
+                .remove("pendingSettlements")
                 // 占用状态是跟设备走的，换账号后不适用
                 .remove("occupiedSnCode")
                 // 学号和余额是账号数据，换账号必须清掉，否则会显示上一任的
@@ -195,6 +197,34 @@ object PrefsHelper {
     }
 
     fun clearActiveOrders() = prefs.edit().remove("activeOrders").apply()
+
+    @Synchronized
+    fun getPendingSettlements(): MutableList<PendingSettlement> {
+        val json = prefs.getString("pendingSettlements", "[]") ?: "[]"
+        return try {
+            JsonParser().parse(json).asJsonArray.mapTo(mutableListOf()) {
+                gson.fromJson(it, PendingSettlement::class.java)
+            }
+        } catch (_: Exception) {
+            mutableListOf()
+        }
+    }
+
+    @Synchronized
+    fun savePendingSettlements(items: List<PendingSettlement>) {
+        prefs.edit().putString("pendingSettlements", gson.toJson(items)).apply()
+    }
+
+    @Synchronized
+    fun recordPendingSettlement(item: PendingSettlement) {
+        val items = getPendingSettlements().filterNot { it.snCode == item.snCode } + item
+        savePendingSettlements(items)
+    }
+
+    @Synchronized
+    fun clearPendingSettlement(snCode: String) {
+        savePendingSettlements(getPendingSettlements().filterNot { it.snCode == snCode })
+    }
 
     var themeMode: String
         get() = prefs.getString("themeMode", "LIGHT") ?: "LIGHT"
