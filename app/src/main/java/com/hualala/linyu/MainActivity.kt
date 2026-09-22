@@ -30,6 +30,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.data.canLogoutVoluntarily
 import com.hualala.linyu.ui.AppBackgroundLayer
 import com.hualala.linyu.ui.FloatingPillNavBar
 import com.hualala.linyu.ui.LinYuToast
@@ -238,18 +239,12 @@ class MainActivity : ComponentActivity() {
                             onDismissRequest = {},
                             title = { Text("账号在别处登录", fontWeight = FontWeight.Bold,
                                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-                            text = { Text("当前设备已被强制下线", textAlign = TextAlign.Center,
+                            text = { Text("当前登录已失效。设备可能仍在用水，请重新登录核对，或立即使用官方客户端、联系人工处理。", textAlign = TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant) },
                             confirmButton = {
                                 Button(onClick = {
                                     showKickedDialog = false
-                                    // skipNetwork：loginCode 已失效，只清本地，不再发请求，避免重登后又触发挤号
-                                    mainViewModel.stopShower(skipNetwork = true)
-                                    // 注意这里不要顺手把 kickedOut 置回 false：
-                                    // 保持 true 直到下次 beginSession()，期间任何残留请求再报"登录失效"
-                                    // 也会被 kickOut() 的重复触发保护挡住，不会重复弹窗
-                                    PrefsHelper.clear()
-                                    mainViewModel.phone = ""
+                                    mainViewModel.logout(preserveActiveRecovery = true)
                                     isLoggedIn = false
                                 }, modifier = Modifier.fillMaxWidth()) { Text("确定") }
                             }
@@ -257,21 +252,30 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (showLogoutConfirm) {
+                        val canLogout = canLogoutVoluntarily(PrefsHelper.getActiveOrders())
                         AlertDialog(
                             onDismissRequest = { showLogoutConfirm = false },
-                            title = { Text("确认退出") },
-                            text = { Text(if (mainViewModel.isShowering)
-                                "当前正在洗澡中，退出登录不会自动停止热水器。是否退出？" else "确定退出登录？") },
+                            title = { Text(if (canLogout) "确认退出" else "暂时无法退出") },
+                            text = { Text(if (canLogout)
+                                "确定退出登录？" else "仍有正在进行的用水，请先结束全部用水后再退出。") },
                             confirmButton = {
                                 TextButton(onClick = {
                                     showLogoutConfirm = false
-                                    mainViewModel.logout()
-                                    PrefsHelper.clear()
-                                    mainViewModel.phone = ""
-                                    isLoggedIn = false
-                                }) { Text("退出", color = MaterialTheme.colorScheme.error) }
+                                    if (canLogout) {
+                                        mainViewModel.logout()
+                                        isLoggedIn = false
+                                    }
+                                }) {
+                                    Text(
+                                        if (canLogout) "退出" else "返回",
+                                        color = if (canLogout) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             },
-                            dismissButton = { TextButton(onClick = { showLogoutConfirm = false }) { Text("取消") } }
+                            dismissButton = if (canLogout) {
+                                { TextButton(onClick = { showLogoutConfirm = false }) { Text("取消") } }
+                            } else null
                         )
                     }
                 }

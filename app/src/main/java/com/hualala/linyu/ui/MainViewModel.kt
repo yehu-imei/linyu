@@ -874,7 +874,7 @@ class MainViewModel : ViewModel() {
         refreshWidgets()  // 桌面小组件跟着变回「空闲」
     }
 
-    fun logout() {
+    fun logout(preserveActiveRecovery: Boolean = false) {
         // 掐断所有网络任务（含挤号心跳），避免退出后还有响应回来改状态
         stopTimer()
         sessionJob.cancel()
@@ -920,6 +920,8 @@ class MainViewModel : ViewModel() {
         unpaidBills = emptyList()
         deductingConsumeDate = null
         unpaidSeq++
+        PrefsHelper.clear(preserveActiveRecovery)
+        if (preserveActiveRecovery) appContext?.let(ShowerWatchService::stop)
     }
 
     private fun saveOrders() { PrefsHelper.saveActiveOrders(activeOrders.toList()) }
@@ -1045,7 +1047,8 @@ class MainViewModel : ViewModel() {
         if (kickedOut) return
         kickedOut = true
         stopTimer()
-        PrefsHelper.clear()
+        PrefsHelper.clear(preserveActiveRecovery = true)
+        appContext?.let(ShowerWatchService::stop)
         // 和 logout() 同理：账号已经失效，上一任的未支付账单和代扣锁都不能留
         unpaidBills = emptyList()
         deductingConsumeDate = null

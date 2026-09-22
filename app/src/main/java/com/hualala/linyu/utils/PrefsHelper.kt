@@ -6,6 +6,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.hualala.linyu.data.shouldPreserveForRecovery
 import com.hualala.linyu.model.ActiveOrder
 
 object PrefsHelper {
@@ -107,7 +108,7 @@ object PrefsHelper {
     fun saveAuth(lc: String, uid: String, aid: String, pid: String, phone: String, name: String?) {
         loginCode = lc; userId = uid; accountId = aid; projectId = pid; telephone = phone; userName = name ?: ""
     }
-    fun clear() {
+    fun clear(preserveActiveRecovery: Boolean = false) {
         // 保留余额和填写时间
         val bal = manualBalance; val btime = manualBalanceTime
         try {
@@ -117,21 +118,18 @@ object PrefsHelper {
             val editor = prefs.edit()
             editor.remove("loginCode").remove("userId").remove("accountId")
                 .remove("projectId").remove("telephone").remove("userName")
-                .remove("lastDeviceName").remove("lastDeviceMac").remove("lastDeviceSnCode")
-                .remove("lastDeviceEmoji").remove("boundRoom").remove("activeOrders")
+                .remove("boundRoom")
                 .remove("lastConsumeMoney").remove("lastConsumeTime")
-                .remove("lastDeviceTypeName").remove("lastDeviceWithholdMoney").remove("widgetNearbyJson").remove("widgetBillJson")
+                .remove("widgetNearbyJson").remove("widgetBillJson")
                 .remove("widgetNearbyTime").remove("widgetBillTime")
                 // 占用状态是跟设备走的，换账号后不适用
                 .remove("occupiedSnCode")
                 // 学号和余额是账号数据，换账号必须清掉，否则会显示上一任的
                 .remove("userStudentId").remove("campusBalance").remove("campusBalanceTime")
-            // startedAt_/autoDiscon_ 的 key 是「前缀 + snCode」，不是固定名，
-            // 原来写成 remove("startedAt_") 是删不掉的——换个账号登录后，
-            // 上一任的计时器还在，界面会显示莫名其妙的已用时长。这里按前缀扫掉。
             prefs.all.keys
                 .filter {
-                    it.startsWith("startedAt_") || it.startsWith("autoDiscon_") || it.startsWith("consume_")
+                    it.startsWith("consume_") ||
+                        (!preserveActiveRecovery && shouldPreserveForRecovery(it))
                 }
                 .forEach { editor.remove(it) }
             editor.apply()

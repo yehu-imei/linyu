@@ -227,37 +227,37 @@ Intent 有明确序列号时启动该设备；空 Intent 时读取全部活跃�
 - 修改：`MainViewModel.logout(preserveActiveRecovery: Boolean = false)`
 - 消费：`canLogoutVoluntarily(activeOrders)`
 
-- [ ] **步骤 1：添加退出判定和保留键集合测试**
+- [x] **步骤 1：添加退出判定和保留键集合测试**
 
 测试主动退出被活跃订单阻止；强制下线的清理策略保留 `activeOrders`、`lastDevice*`、`startedAt_*` 和 `autoDiscon_*`，但不保留认证字段。
 
-- [ ] **步骤 2：运行测试确认红灯**
+- [x] **步骤 2：运行测试确认红灯**
 
 预期：当前没有保留恢复数据的清理策略，测试失败。
 
-- [ ] **步骤 3：实现可测试的保留键判定**
+- [x] **步骤 3：实现可测试的保留键判定**
 
 增加纯函数 `shouldPreserveForRecovery(key)`，只允许规格列出的恢复键。
 
-- [ ] **步骤 4：修改 PrefsHelper 清理逻辑**
+- [x] **步骤 4：修改 PrefsHelper 清理逻辑**
 
 主动退出维持完整清理；强制下线跳过恢复键，继续删除登录凭证、账户资料、账单缓存和账户消费缓存。
 
-- [ ] **步骤 5：阻止活跃用水时主动退出**
+- [x] **步骤 5：阻止活跃用水时主动退出**
 
 退出弹窗检测持久化活跃订单；存在订单时只提供返回操作并提示先结束全部用水，不调用 logout/clear。
 
-- [ ] **步骤 6：修复强制下线路径**
+- [x] **步骤 6：修复强制下线路径**
 
 不再调用会清订单的 `stopShower(skipNetwork = true)`；改为保留恢复数据的 logout/clear，明确警告设备可能继续运行，并停止无法认证的前台服务。
 
-- [ ] **步骤 7：运行单元测试和 Debug 编译**
+- [x] **步骤 7：运行单元测试和 Debug 编译**
 
 运行：`gradlew testDebugUnitTest assembleDebug`
 
 预期：成功。
 
-- [ ] **步骤 8：提交退出修复**
+- [x] **步骤 8：提交退出修复**
 
 提交信息：`fix: preserve active recovery state on forced logout`
 

@@ -68,6 +68,33 @@ class ShowerSafetyPolicyTest {
         assertFalse(CloseDisposition.RESTORE_UNCONFIRMED.mayAnnounceFinished)
     }
 
+    @Test
+    fun `强制下线只保留活跃用水恢复键`() {
+        val recoveryKeys = listOf(
+            "activeOrders",
+            "lastDeviceName",
+            "lastDeviceRawName",
+            "lastDeviceMac",
+            "lastDeviceSnCode",
+            "lastDeviceEmoji",
+            "lastDeviceTypeName",
+            "lastDeviceWithholdMoney",
+            "startedAt_device-a",
+            "autoDiscon_device-a"
+        )
+        val accountKeys = listOf(
+            "loginCode",
+            "userId",
+            "accountId",
+            "telephone",
+            "widgetBillJson",
+            "consume_device-a"
+        )
+
+        assertTrue(recoveryKeys.all(::shouldPreserveForRecovery))
+        assertTrue(accountKeys.none(::shouldPreserveForRecovery))
+    }
+
     private fun activeOrder(snCode: String) = ActiveOrder(
         snCode = snCode,
         orderNo = "order-$snCode",

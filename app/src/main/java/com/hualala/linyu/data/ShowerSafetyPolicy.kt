@@ -18,3 +18,9 @@ fun monitorSerials(orders: List<ActiveOrder>): List<String> =
     orders.map(ActiveOrder::snCode).filter(String::isNotBlank).distinct()
 
 fun canLogoutVoluntarily(orders: List<ActiveOrder>): Boolean = orders.isEmpty()
+
+fun shouldPreserveForRecovery(key: String): Boolean =
+    key == "activeOrders" ||
+        key.startsWith("lastDevice") ||
+        key.startsWith("startedAt_") ||
+        key.startsWith("autoDiscon_")
