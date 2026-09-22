@@ -662,8 +662,7 @@ object ShowerController {
 
     /** 回退路径：拉账单列表，挑出本次这一单 */
     private suspend fun settleFromBillList(orderNo: String, startTimeMs: Long, snCode: String): Double? {
-        val month = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.getDefault())
-            .format(java.util.Calendar.getInstance().time)
+        val month = java.time.YearMonth.now().toString()
 
         // ⚠️ 兜底时间窗必须**往前放宽**，不能拿 `>= startTimeMs` 卡。
         //
@@ -742,10 +741,7 @@ object ShowerController {
     }
 
     /** 账单里的日期 → 毫秒；解析不了返回 0（会被当成早于窗口而排除） */
-    private fun billTimeMs(consumeDate: String): Long =
-        BILL_DATE_PARSERS.asSequence()
-            .map { p -> try { p.parse(consumeDate)?.time ?: 0L } catch (_: Exception) { 0L } }
-            .maxOrNull() ?: 0L
+    private fun billTimeMs(consumeDate: String): Long = BillDateParser.toEpochMillis(consumeDate)
 
     /**
      * 兜底时间窗往前放宽多久。
@@ -821,12 +817,6 @@ object ShowerController {
     private val AMOUNT_KEY_EXCLUDE = Regex(
         "(balance|remain|surplus|account|wallet|pre|give|given|total|sum|count|id|no\\b|time|date|status|state)",
         RegexOption.IGNORE_CASE
-    )
-
-    private val BILL_DATE_PARSERS = listOf(
-        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()),
-        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.getDefault()),
-        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault())
     )
 
     // ════════════════════════════════════════════
