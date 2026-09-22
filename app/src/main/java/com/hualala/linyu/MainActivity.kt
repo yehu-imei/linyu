@@ -255,9 +255,9 @@ class MainActivity : ComponentActivity() {
                         val canLogout = canLogoutVoluntarily(PrefsHelper.getActiveOrders())
                         AlertDialog(
                             onDismissRequest = { showLogoutConfirm = false },
-                            title = { Text(if (canLogout) "确认退出" else "暂时无法退出") },
+                            title = { Text(if (canLogout) "确认退出" else "无法退出") },
                             text = { Text(if (canLogout)
-                                "确定退出登录？" else "仍有正在进行的用水，请先结束全部用水后再退出。") },
+                                "确定退出登录？" else "设备使用中，无法退出") },
                             confirmButton = {
                                 TextButton(onClick = {
                                     showLogoutConfirm = false

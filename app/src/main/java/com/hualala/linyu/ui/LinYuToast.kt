@@ -23,6 +23,9 @@ import androidx.compose.ui.unit.sp
 import com.hualala.linyu.R
 import kotlinx.coroutines.delay
 
+internal fun isToastVisible(timerVisible: Boolean, message: String?): Boolean =
+    timerVisible && !message.isNullOrEmpty()
+
 @Composable
 fun LinYuToast(
     message: String?,
@@ -37,6 +40,8 @@ fun LinYuToast(
             visible = false
             delay(300)
             onDismiss()
+        } else {
+            visible = false
         }
     }
 
@@ -45,7 +50,7 @@ fun LinYuToast(
         contentAlignment = Alignment.TopCenter
     ) {
         AnimatedVisibility(
-            visible = visible,
+            visible = isToastVisible(visible, message),
             enter = slideInVertically(initialOffsetY = { -it }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { -it }) + fadeOut()
         ) {
