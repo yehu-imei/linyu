@@ -5,7 +5,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.hualala.linyu.MainActivity
@@ -108,8 +110,15 @@ object Notifier {
      * Android 13 起 `POST_NOTIFICATIONS` 是运行时权限，用户拒绝了这里就是 false。
      * 调用方据此决定要不要引导用户去设置里开——**不能假设通知一定能发出去**。
      */
-    fun canNotify(context: Context): Boolean =
-        NotificationManagerCompat.from(context).areNotificationsEnabled()
+    fun canNotify(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return false
+        return NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
 
     /**
      * 用水期间常驻的状态条。重复调用即更新同一条。
@@ -418,7 +427,18 @@ object Notifier {
     }
 
     private fun notify(context: Context, id: Int, n: android.app.Notification) {
-        // 权限可能在运行时被撤销，post 会抛 SecurityException
-        runCatching { NotificationManagerCompat.from(context).notify(id, n) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
+        // 权限可能在检查后、实际发送前被撤销，仍保留异常保护。
+        try {
+            NotificationManagerCompat.from(context).notify(id, n)
+        } catch (_: SecurityException) {
+            Unit
+        }
     }
 }

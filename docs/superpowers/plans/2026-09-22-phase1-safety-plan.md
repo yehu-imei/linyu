@@ -269,32 +269,34 @@ Intent 有明确序列号时启动该设备；空 Intent 时读取全部活跃�
 
 **接口：** 无新接口；验证本阶段全部交付结果。
 
-- [ ] **步骤 1：运行格式与差异检查**
+- [x] **步骤 1：运行格式与差异检查**
 
 运行：`git diff --check`，确认无空白错误和意外生成文件。
 
-- [ ] **步骤 2：运行全部单元测试和 Debug 构建**
+- [x] **步骤 2：运行全部单元测试和 Debug 构建**
 
 运行：`gradlew testDebugUnitTest assembleDebug`
 
 预期：成功。
 
-- [ ] **步骤 3：运行 Release 构建**
+- [x] **步骤 3：运行 Release 构建**
 
 将被忽略的本机签名文件临时提供给 worktree，运行 `gradlew assembleRelease -x lintVitalRelease`，预期签名 Release 构建成功；验证后从 worktree 删除本机私密副本。
 
-- [ ] **步骤 4：运行 Lint 并记录实际结果**
+- [x] **步骤 4：运行 Lint 并记录实际结果**
 
 运行：`gradlew lintDebug`。修复由本阶段修改引入或位于本阶段修改行的错误；其余历史问题记录到最终报告，不建立基线。
 
-- [ ] **步骤 5：检查 Git 与旧工作目录**
+实际结果：本阶段修改引入的通知权限错误已修复；仍有 17 errors、218 warnings、12 hints，均位于未修改的历史文件（CameraX opt-in 1 条、小组件 `android:tint` 15 条、Manifest ChromeOS camera feature 1 条）。
+
+- [x] **步骤 5：检查 Git 与旧工作目录**
 
 确认分支只有计划内提交；旧目录除活动 worktree 外没有重复源码、构建缓存或敏感发布资料；唯一仓库中的 `local.properties` 和 `hualala.jks` 为 ignored。
 
-- [ ] **步骤 6：提交必要的验证修正**
+- [x] **步骤 6：提交必要的验证修正**
 
 若通知权限检查产生独立修正，提交信息：`fix: check notification permission before posting`。
 
-- [ ] **步骤 7：准备集成汇报**
+- [x] **步骤 7：准备集成汇报**
 
 列出提交、测试证据、仍存在的 Lint 历史问题、需要实机验证的多设备和厂商 ROM 风险。
