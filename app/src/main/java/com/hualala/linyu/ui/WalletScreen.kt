@@ -135,6 +135,13 @@ fun WalletScreen(viewModel: MainViewModel) {
 
             Spacer(Modifier.height(24.dp))
 
+            SpendingTrendCard(
+                bills = viewModel.billHistory,
+                loading = viewModel.isLoadingBills && !viewModel.billsLoaded
+            )
+
+            Spacer(Modifier.height(24.dp))
+
             Text("账单", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Text("最近20次消费记录", fontSize = 12.sp, color = AppColors.TextSecondary)
             Spacer(Modifier.height(12.dp))

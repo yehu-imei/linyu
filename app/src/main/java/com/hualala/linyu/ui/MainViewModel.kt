@@ -165,6 +165,7 @@ class MainViewModel : ViewModel() {
 
     // ── 账单 ──
     var billList by mutableStateOf<List<BillItem>>(emptyList())
+    var billHistory by mutableStateOf<List<BillItem>>(emptyList())
     var isLoadingBills by mutableStateOf(false)
 
     /**
@@ -910,6 +911,7 @@ class MainViewModel : ViewModel() {
         activeOrders.clear()
         activeDeviceSnCodes.clear()
         billList = emptyList()
+        billHistory = emptyList()
         // 一起复位：下一轮登录要重新等账单到位，不能沿用上一次的「已加载」
         billsLoaded = false
         useCodeData = null
@@ -1582,6 +1584,7 @@ class MainViewModel : ViewModel() {
                     if (resp.success && !resp.data.isNullOrEmpty()) all.addAll(resp.data)
                     cal.add(java.util.Calendar.MONTH, -1)
                 }
+                billHistory = all.toList()
                 billList = all.take(20)
                 billsLoaded = true
                 val reconciliation = SettlementReconciler.reconcile(
