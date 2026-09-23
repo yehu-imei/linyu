@@ -40,4 +40,57 @@ class UserCardLayoutPolicyTest {
             UserCardLayoutPolicy.restore(UserCardLayoutPolicy.settingsDefaults, "ACCOUNT,USE_CODE")
         )
     }
+
+    @Test
+    fun `moving a profile card appends it to settings without duplication`() {
+        val result = UserCardLayoutPolicy.moveToSettings(
+            UserCardType.ACCOUNT,
+            UserCardLayoutPolicy.profileDefaults,
+            UserCardLayoutPolicy.settingsDefaults
+        )
+
+        assertEquals(listOf(UserCardType.USE_CODE, UserCardType.BOUND_ROOM), result.profile)
+        assertEquals(UserCardLayoutPolicy.settingsDefaults + UserCardType.ACCOUNT, result.settings)
+    }
+
+    @Test
+    fun `moving a settings card appends it to profile without duplication`() {
+        val result = UserCardLayoutPolicy.moveToProfile(
+            UserCardType.NOTIFY,
+            UserCardLayoutPolicy.profileDefaults,
+            UserCardLayoutPolicy.settingsDefaults
+        )
+
+        assertEquals(UserCardLayoutPolicy.profileDefaults + UserCardType.NOTIFY, result.profile)
+        assertEquals(UserCardLayoutPolicy.settingsDefaults - UserCardType.NOTIFY, result.settings)
+    }
+
+    @Test
+    fun `restoring pages keeps cards on their selected page`() {
+        val result = UserCardLayoutPolicy.restorePages(
+            profileSaved = "USE_CODE,BOUND_ROOM",
+            settingsSaved = "NOTIFY,BACKGROUND,LOG,ABOUT,UPDATE,ACCOUNT"
+        )
+
+        assertEquals(listOf(UserCardType.USE_CODE, UserCardType.BOUND_ROOM), result.profile)
+        assertEquals(UserCardLayoutPolicy.settingsDefaults + UserCardType.ACCOUNT, result.settings)
+    }
+
+    @Test
+    fun `legacy single page order is partitioned while preserving relative order`() {
+        val result = UserCardLayoutPolicy.restorePages(
+            profileSaved = "",
+            settingsSaved = "",
+            legacySaved = "LOG,BOUND_ROOM,ACCOUNT,NOTIFY,USE_CODE,BACKGROUND,UPDATE,ABOUT"
+        )
+
+        assertEquals(
+            listOf(UserCardType.BOUND_ROOM, UserCardType.ACCOUNT, UserCardType.USE_CODE),
+            result.profile
+        )
+        assertEquals(
+            listOf(UserCardType.LOG, UserCardType.NOTIFY, UserCardType.BACKGROUND, UserCardType.UPDATE, UserCardType.ABOUT),
+            result.settings
+        )
+    }
 }

@@ -1,33 +1,12 @@
 package com.hualala.linyu.ui
 
-import kotlin.math.ceil
-
 internal object TrendDisplayPolicy {
-    fun pointIndices(size: Int, maxPoints: Int = 14): Set<Int> {
-        if (size <= 0) return emptySet()
-        if (size <= maxPoints) return (0 until size).toSet()
-        val stride = ceil(size.toDouble() / maxPoints).toInt()
-        return buildSet {
-            add(0)
-            for (index in 0 until size step stride) add(index)
-            add(size - 1)
-        }
-    }
+    fun visiblePointIndices(size: Int): Set<Int> = (0 until size.coerceAtLeast(0)).toSet()
 
-    fun pointIndices(size: Int, values: List<Double>, maxPoints: Int = 14): Set<Int> {
-        val base = pointIndices(size, maxPoints)
-        val peak = values.indices.maxByOrNull { values[it] } ?: return base
-        return base + peak
-    }
-
-    fun visiblePointIndices(
-        size: Int,
-        values: List<Double>,
-        selectedIndex: Int,
-        maxPoints: Int = 14
-    ): Set<Int> = buildSet {
-        addAll(pointIndices(size, values, maxPoints))
-        if (selectedIndex in 0 until size) add(selectedIndex)
+    fun plotX(index: Int, size: Int, width: Float, horizontalInset: Float): Float {
+        if (size <= 1) return width / 2f
+        val inset = horizontalInset.coerceIn(0f, width / 2f)
+        return inset + index.toFloat() / (size - 1) * (width - inset * 2f)
     }
 
     fun axisIndices(size: Int, maxLabels: Int = 5): List<Int> {

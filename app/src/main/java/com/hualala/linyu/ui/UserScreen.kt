@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -37,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
@@ -142,20 +144,82 @@ fun UserScreen(
     val useCode = viewModel?.useCodeData
 
     var showSettings by remember { mutableStateOf(false) }
+    var showBackgroundScreen by remember { mutableStateOf(false) }
+    var showLogViewer by remember { mutableStateOf(false) }
     var editMode by remember { mutableStateOf(false) }
-    var cardOrder by remember {
-        mutableStateOf(UserCardLayoutPolicy.restore(UserCardLayoutPolicy.profileDefaults, PrefsHelper.userProfileCardOrder))
+    val migrateLegacyLayout = remember {
+        PrefsHelper.userProfileCardOrder.isBlank() &&
+            PrefsHelper.userSettingsCardOrder.isBlank() &&
+            PrefsHelper.userCardOrder.isNotBlank()
     }
-    var hiddenCards by remember { mutableStateOf(loadHiddenCards(PrefsHelper.userProfileHiddenCards)) }
+    val restoredPages = remember {
+        UserCardLayoutPolicy.restorePages(
+            PrefsHelper.userProfileCardOrder,
+            PrefsHelper.userSettingsCardOrder,
+            PrefsHelper.userCardOrder
+        )
+    }
+    var profileCardOrder by remember { mutableStateOf(restoredPages.profile) }
+    var settingsCardOrder by remember { mutableStateOf(restoredPages.settings) }
+    val legacyHiddenCards = remember { loadHiddenCards(PrefsHelper.userHiddenCards) }
+    var profileHiddenCards by remember {
+        mutableStateOf(
+            if (migrateLegacyLayout) legacyHiddenCards else loadHiddenCards(PrefsHelper.userProfileHiddenCards)
+        )
+    }
+    var settingsHiddenCards by remember {
+        mutableStateOf(
+            if (migrateLegacyLayout) legacyHiddenCards else loadHiddenCards(PrefsHelper.userSettingsHiddenCards)
+        )
+    }
     var themeMode by LocalThemeMode.current
     val themeReveal = LocalThemeReveal.current
     var themeBtnPos by remember { mutableStateOf(Offset.Zero) }
 
     LaunchedEffect(showSettings) { onSettingsVisibilityChanged(showSettings) }
+    LaunchedEffect(migrateLegacyLayout) {
+        if (migrateLegacyLayout) {
+            saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
+            saveCardOrder(settingsCardOrder) { PrefsHelper.userSettingsCardOrder = it }
+            saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
+            saveHiddenCards(settingsHiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
+        }
+    }
     DisposableEffect(Unit) { onDispose { onSettingsVisibilityChanged(false) } }
 
     if (showSettings) {
-        SettingsScreen(onBack = { showSettings = false }, onLogout = onLogout)
+        SettingsScreen(
+            phone = phone,
+            useCode = useCode,
+            viewModel = viewModel,
+            cardOrder = settingsCardOrder,
+            hiddenCards = settingsHiddenCards,
+            onCardOrderChange = {
+                settingsCardOrder = it
+                saveCardOrder(it) { saved -> PrefsHelper.userSettingsCardOrder = saved }
+            },
+            onHiddenCardsChange = {
+                settingsHiddenCards = it
+                saveHiddenCards(it) { saved -> PrefsHelper.userSettingsHiddenCards = saved }
+            },
+            onMoveToProfile = { type ->
+                val pages = UserCardLayoutPolicy.moveToProfile(type, profileCardOrder, settingsCardOrder)
+                profileCardOrder = pages.profile
+                settingsCardOrder = pages.settings
+                profileHiddenCards = profileHiddenCards - type.name
+                settingsHiddenCards = settingsHiddenCards - type.name
+                saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
+                saveCardOrder(settingsCardOrder) { PrefsHelper.userSettingsCardOrder = it }
+                saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
+                saveHiddenCards(settingsHiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
+            },
+            onShowBackground = { showBackgroundScreen = true },
+            onShowLog = { showLogViewer = true },
+            onBack = { showSettings = false },
+            onLogout = onLogout
+        )
+        if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
+        if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
         return
     }
 
@@ -184,50 +248,70 @@ fun UserScreen(
             }
         }
         Spacer(Modifier.height(16.dp))
-        val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }
+        val visibleCards = if (editMode) profileCardOrder else profileCardOrder.filter { it.name !in profileHiddenCards }
         visibleCards.forEachIndexed { index, type ->
             EditableCardSlot(
                 editMode = editMode,
                 title = type.title,
-                isHidden = type.name in hiddenCards,
+                isHidden = type.name in profileHiddenCards,
                 canMoveUp = index > 0,
                 canMoveDown = index < visibleCards.lastIndex,
                 onMoveUp = {
-                    cardOrder = moveItem(cardOrder, index, index - 1)
-                    saveCardOrder(cardOrder) { PrefsHelper.userProfileCardOrder = it }
+                    profileCardOrder = moveItem(profileCardOrder, index, index - 1)
+                    saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
                 },
                 onMoveDown = {
-                    cardOrder = moveItem(cardOrder, index, index + 1)
-                    saveCardOrder(cardOrder) { PrefsHelper.userProfileCardOrder = it }
+                    profileCardOrder = moveItem(profileCardOrder, index, index + 1)
+                    saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
                 },
                 onToggleHide = {
-                    hiddenCards = if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
-                    saveHiddenCards(hiddenCards) { PrefsHelper.userProfileHiddenCards = it }
+                    profileHiddenCards = if (type.name in profileHiddenCards) {
+                        profileHiddenCards - type.name
+                    } else {
+                        profileHiddenCards + type.name
+                    }
+                    saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
+                },
+                moveToOtherPageIcon = Icons.AutoMirrored.Filled.ArrowForward,
+                moveToOtherPageDescription = "移到设置页面",
+                onMoveToOtherPage = {
+                    val pages = UserCardLayoutPolicy.moveToSettings(type, profileCardOrder, settingsCardOrder)
+                    profileCardOrder = pages.profile
+                    settingsCardOrder = pages.settings
+                    profileHiddenCards = profileHiddenCards - type.name
+                    settingsHiddenCards = settingsHiddenCards - type.name
+                    saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
+                    saveCardOrder(settingsCardOrder) { PrefsHelper.userSettingsCardOrder = it }
+                    saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
+                    saveHiddenCards(settingsHiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
                 }
             ) {
-                when (type) {
-                    UserCardType.ACCOUNT -> AccountCard(phone, viewModel)
-                    UserCardType.USE_CODE -> UseCodeCard(useCode, viewModel)
-                    UserCardType.BOUND_ROOM -> BoundRoomCard(viewModel)
-                    else -> Unit
-                }
+                UserCardContent(type, phone, useCode, viewModel, { showBackgroundScreen = true }, { showLogViewer = true })
             }
             Spacer(Modifier.height(16.dp))
         }
         Spacer(Modifier.height(100.dp)) // 底部留出悬浮导航栏空间
     }
-
+    if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
+    if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
 }
 
 @Composable
-private fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
-    var showBackgroundScreen by remember { mutableStateOf(false) }
-    var showLogViewer by remember { mutableStateOf(false) }
+private fun SettingsScreen(
+    phone: String,
+    useCode: UseCodeData?,
+    viewModel: MainViewModel?,
+    cardOrder: List<UserCardType>,
+    hiddenCards: Set<String>,
+    onCardOrderChange: (List<UserCardType>) -> Unit,
+    onHiddenCardsChange: (Set<String>) -> Unit,
+    onMoveToProfile: (UserCardType) -> Unit,
+    onShowBackground: () -> Unit,
+    onShowLog: () -> Unit,
+    onBack: () -> Unit,
+    onLogout: () -> Unit
+) {
     var editMode by remember { mutableStateOf(false) }
-    var cardOrder by remember {
-        mutableStateOf(UserCardLayoutPolicy.restore(UserCardLayoutPolicy.settingsDefaults, PrefsHelper.userSettingsCardOrder))
-    }
-    var hiddenCards by remember { mutableStateOf(loadHiddenCards(PrefsHelper.userSettingsHiddenCards)) }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -250,26 +334,21 @@ private fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
                 canMoveUp = index > 0,
                 canMoveDown = index < visibleCards.lastIndex,
                 onMoveUp = {
-                    cardOrder = moveItem(cardOrder, index, index - 1)
-                    saveCardOrder(cardOrder) { PrefsHelper.userSettingsCardOrder = it }
+                    onCardOrderChange(moveItem(cardOrder, index, index - 1))
                 },
                 onMoveDown = {
-                    cardOrder = moveItem(cardOrder, index, index + 1)
-                    saveCardOrder(cardOrder) { PrefsHelper.userSettingsCardOrder = it }
+                    onCardOrderChange(moveItem(cardOrder, index, index + 1))
                 },
                 onToggleHide = {
-                    hiddenCards = if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
-                    saveHiddenCards(hiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
-                }
+                    onHiddenCardsChange(
+                        if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
+                    )
+                },
+                moveToOtherPageIcon = Icons.AutoMirrored.Filled.ArrowBack,
+                moveToOtherPageDescription = "移到我的页面",
+                onMoveToOtherPage = { onMoveToProfile(type) }
             ) {
-                when (type) {
-                    UserCardType.NOTIFY -> NotifyCard()
-                    UserCardType.BACKGROUND -> BackgroundCard { showBackgroundScreen = true }
-                    UserCardType.LOG -> LogCard { showLogViewer = true }
-                    UserCardType.ABOUT -> AboutCard()
-                    UserCardType.UPDATE -> UpdateCard()
-                    else -> Unit
-                }
+                UserCardContent(type, phone, useCode, viewModel, onShowBackground, onShowLog)
             }
             Spacer(Modifier.height(16.dp))
         }
@@ -283,8 +362,27 @@ private fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
             color = AppColors.TextSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(24.dp))
     }
-    if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
-    if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
+}
+
+@Composable
+private fun UserCardContent(
+    type: UserCardType,
+    phone: String,
+    useCode: UseCodeData?,
+    viewModel: MainViewModel?,
+    onShowBackground: () -> Unit,
+    onShowLog: () -> Unit
+) {
+    when (type) {
+        UserCardType.ACCOUNT -> AccountCard(phone, viewModel)
+        UserCardType.USE_CODE -> UseCodeCard(useCode, viewModel)
+        UserCardType.BOUND_ROOM -> BoundRoomCard(viewModel)
+        UserCardType.NOTIFY -> NotifyCard()
+        UserCardType.BACKGROUND -> BackgroundCard(onShowBackground)
+        UserCardType.LOG -> LogCard(onShowLog)
+        UserCardType.ABOUT -> AboutCard()
+        UserCardType.UPDATE -> UpdateCard()
+    }
 }
 
 /** 统一的卡片外观 */
@@ -311,6 +409,9 @@ private fun EditableCardSlot(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onToggleHide: () -> Unit,
+    moveToOtherPageIcon: ImageVector,
+    moveToOtherPageDescription: String,
+    onMoveToOtherPage: () -> Unit,
     content: @Composable () -> Unit
 ) {
     Column {
@@ -325,6 +426,9 @@ private fun EditableCardSlot(
                     color = if (isHidden) AppColors.TextSecondary.copy(alpha = 0.6f) else AppColors.TextSecondary,
                     modifier = Modifier.weight(1f)
                 )
+                IconButton(onClick = onMoveToOtherPage, modifier = Modifier.size(34.dp)) {
+                    Icon(moveToOtherPageIcon, moveToOtherPageDescription, tint = AppColors.Accent)
+                }
                 IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(34.dp)) {
                     Icon(Icons.Default.KeyboardArrowUp, "上移",
                         tint = if (canMoveUp) AppColors.Accent else AppColors.TextSecondary.copy(alpha = 0.3f))

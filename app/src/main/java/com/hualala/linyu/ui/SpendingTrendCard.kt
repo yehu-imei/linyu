@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,11 +21,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -34,11 +33,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hualala.linyu.data.DailySpend
@@ -49,15 +50,12 @@ import com.hualala.linyu.ui.theme.AppColors
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Fill
 
 enum class TrendChartType(val label: String) {
     BAR("柱形图"),
-    LINE("折线图"),
-    COMBINED("柱形折线图")
+    LINE("折线图")
 }
 
 @Composable
@@ -68,7 +66,7 @@ fun SpendingTrendCard(
 ) {
     var range by remember { mutableStateOf(TrendRange.LAST_7_DAYS) }
     var chartType by remember { mutableStateOf(TrendChartType.LINE) }
-    var collapsed by remember { mutableStateOf(false) }
+    var collapsed by remember { mutableStateOf(true) }
     var selectedIndex by remember(range) { mutableIntStateOf(-1) }
     val today = remember { LocalDate.now() }
     val summary = remember(bills, range, today) {
@@ -85,10 +83,17 @@ fun SpendingTrendCard(
         Column(Modifier.padding(18.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("消费趋势", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                Spacer(Modifier.width(10.dp))
-                TrendRangeControl(range) { range = it }
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { collapsed = !collapsed }) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { collapsed = !collapsed }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
                     Icon(
                         if (collapsed) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
                         contentDescription = if (collapsed) "展开消费趋势" else "折叠消费趋势",
@@ -96,10 +101,6 @@ fun SpendingTrendCard(
                     )
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Text("按自然日汇总", fontSize = 11.sp, color = AppColors.TextSecondary)
-            Spacer(Modifier.height(10.dp))
-            TrendChartTypeControl(chartType) { chartType = it }
 
             if (!collapsed) {
                 Spacer(Modifier.height(18.dp))
@@ -116,15 +117,24 @@ fun SpendingTrendCard(
                     }
                 } else {
                     val selected = summary.points.getOrNull(selectedIndex)
-                    Box(Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
+                    Row(
+                        Modifier.fillMaxWidth().height(32.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
                             selected?.let {
-                                "${it.date.format(FULL_DATE)}  ¥ %.2f  ·  ${it.count} 次".format(it.amount)
-                            } ?: "轻触图表查看每日明细",
+                                "${it.date.format(SHORT_DATE)}  ¥%.2f · ${it.count}次".format(it.amount)
+                            } ?: "每日明细",
                             color = if (selected == null) AppColors.TextSecondary else AppColors.TextPrimary,
                             fontSize = 12.sp,
-                            fontWeight = if (selected == null) FontWeight.Normal else FontWeight.Medium
+                            fontWeight = if (selected == null) FontWeight.Normal else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
+                        TrendRangeControl(range, Modifier.weight(1f)) { range = it }
+                        Spacer(Modifier.width(4.dp))
+                        TrendChartTypeControl(chartType, Modifier.weight(1f)) { chartType = it }
                     }
                     TrendChart(summary.points, chartType, selectedIndex) { selectedIndex = it }
                     TrendAxisLabels(summary.points)
@@ -135,46 +145,67 @@ fun SpendingTrendCard(
 }
 
 @Composable
-private fun TrendRangeControl(selected: TrendRange, onSelected: (TrendRange) -> Unit) {
+private fun TrendRangeControl(
+    selected: TrendRange,
+    modifier: Modifier = Modifier,
+    onSelected: (TrendRange) -> Unit
+) {
     Row(
-        modifier = Modifier.height(30.dp)
+        modifier = modifier.height(30.dp)
     ) {
         TrendRange.entries.forEach { range ->
             val active = range == selected
-            Surface(
-                color = if (active) AppColors.Accent.copy(alpha = 0.14f) else Color.Transparent,
-                shape = RoundedCornerShape(8.dp),
+            Box(
                 modifier = Modifier
                     .height(30.dp)
-                    .width(62.dp)
-                    .clickable { onSelected(range) }
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (active) AppColors.Accent.copy(alpha = 0.14f) else Color.Transparent)
+                    .clickable(
+                        interactionSource = remember(range) { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onSelected(range) }
+                    ),
+                contentAlignment = Alignment.Center
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        if (range == TrendRange.LAST_7_DAYS) "近 7 天" else "本月",
-                        color = if (active) AppColors.Accent else AppColors.TextSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = if (active) FontWeight.Medium else FontWeight.Normal
-                    )
-                }
+                Text(
+                    if (range == TrendRange.LAST_7_DAYS) "7天" else "本月",
+                    color = if (active) AppColors.Accent else AppColors.TextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = if (active) FontWeight.Medium else FontWeight.Normal
+                )
             }
         }
     }
 }
 
 @Composable
-private fun TrendChartTypeControl(selected: TrendChartType, onSelected: (TrendChartType) -> Unit) {
-    Row(Modifier.fillMaxWidth().height(30.dp), horizontalArrangement = Arrangement.End) {
+private fun TrendChartTypeControl(
+    selected: TrendChartType,
+    modifier: Modifier = Modifier,
+    onSelected: (TrendChartType) -> Unit
+) {
+    Row(modifier.height(30.dp)) {
         TrendChartType.entries.forEach { type ->
             val active = type == selected
-            Surface(
-                color = if (active) AppColors.Accent.copy(alpha = 0.14f) else Color.Transparent,
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.height(30.dp).clickable { onSelected(type) }
+            Box(
+                modifier = Modifier
+                    .height(30.dp)
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (active) AppColors.Accent.copy(alpha = 0.14f) else Color.Transparent)
+                    .clickable(
+                        interactionSource = remember(type) { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onSelected(type) }
+                    ),
+                contentAlignment = Alignment.Center
             ) {
-                Box(Modifier.padding(horizontal = 9.dp), contentAlignment = Alignment.Center) {
-                    Text(type.label, color = if (active) AppColors.Accent else AppColors.TextSecondary, fontSize = 11.sp)
-                }
+                Text(
+                    if (type == TrendChartType.BAR) "柱形" else "折线",
+                    color = if (active) AppColors.Accent else AppColors.TextSecondary,
+                    fontSize = 11.sp
+                )
             }
         }
     }
@@ -218,10 +249,18 @@ private fun TrendChart(
         val bottom = size.height - 10.dp.toPx()
         val usableHeight = bottom - top
         val maxAmount = points.maxOfOrNull(DailySpend::amount)?.coerceAtLeast(1.0) ?: 1.0
-        val xStep = if (points.size == 1) 0f else size.width / (points.size - 1)
+        val barWidth = (size.width / points.size) * 0.58f
+        val horizontalInset = if (chartType == TrendChartType.BAR) {
+            (barWidth / 2f).coerceAtLeast(5.dp.toPx())
+        } else {
+            5.dp.toPx()
+        }
         fun position(index: Int): Offset {
             val ratio = (points[index].amount / maxAmount).toFloat()
-            return Offset(index * xStep, bottom - usableHeight * ratio)
+            return Offset(
+                TrendDisplayPolicy.plotX(index, points.size, size.width, horizontalInset),
+                bottom - usableHeight * ratio
+            )
         }
 
         val line = Path().apply {
@@ -239,27 +278,22 @@ private fun TrendChart(
             lineTo(size.width, bottom)
             close()
         }
-        if (chartType == TrendChartType.BAR || chartType == TrendChartType.COMBINED) {
-            val barWidth = (size.width / points.size) * 0.58f
+        if (chartType == TrendChartType.BAR) {
             points.indices.forEach { index ->
                 val p = position(index)
                 drawRoundRect(
-                    color = accent.copy(alpha = if (chartType == TrendChartType.COMBINED) 0.28f else 0.72f),
+                    color = accent.copy(alpha = 0.72f),
                     topLeft = Offset(p.x - barWidth / 2f, p.y),
                     size = Size(barWidth, bottom - p.y),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx(), 4.dp.toPx())
                 )
             }
         }
-        if (chartType == TrendChartType.LINE || chartType == TrendChartType.COMBINED) {
-            if (chartType == TrendChartType.LINE) drawPath(area, accent.copy(alpha = 0.10f))
+        if (chartType == TrendChartType.LINE) {
+            drawPath(area, accent.copy(alpha = 0.10f))
             drawPath(line, accent, style = Stroke(width = 2.5.dp.toPx()))
         }
-        val visiblePoints = TrendDisplayPolicy.visiblePointIndices(
-            points.size,
-            points.map(DailySpend::amount),
-            selectedIndex
-        )
+        val visiblePoints = TrendDisplayPolicy.visiblePointIndices(points.size)
         visiblePoints.forEach { index ->
             val p = position(index)
             val selected = index == selectedIndex
@@ -281,4 +315,3 @@ private fun TrendAxisLabels(points: List<DailySpend>) {
 }
 
 private val SHORT_DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("M/d")
-private val FULL_DATE: DateTimeFormatter = DateTimeFormatter.ofPattern("M月d日")
