@@ -3,6 +3,7 @@ package com.hualala.linyu.ui
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -21,9 +22,10 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -88,53 +90,23 @@ enum class UserCardType(val title: String) {
     LOG("运行日志")
 }
 
-// ── 卡片顺序 / 隐藏状态的读写 ──
-
-/**
- * 历代的默认顺序。
- *
- * 存下来的顺序**恰好等于**其中任意一条，就说明用户从没手动排过（只是某次进页面时
- * 顺手存了默认值），这时应该用当前的新默认顺序，而不是把他锁在旧排序里。
- *
- * 代价是：用户真的手动排成了和某条默认完全一样的顺序时，会跟着新默认走。
- * 这种巧合概率极低，换来的是改默认顺序时老用户能跟着更新——值得。
- */
-private val SUPERSEDED_DEFAULT_ORDERS = listOf(
-    // v2.2.x 早期：「运行日志」在「关于项目」之前
-    listOf("ACCOUNT", "BOUND_ROOM", "USE_CODE", "BACKGROUND", "UPDATE", "LOG", "ABOUT"),
-    // 之后：补上了「通知」，但顺序仍是旧的
-    listOf("ACCOUNT", "BOUND_ROOM", "USE_CODE", "BACKGROUND", "UPDATE", "NOTIFY", "ABOUT", "LOG")
-)
-
-private fun loadCardOrder(): List<UserCardType> {
-    val all = UserCardType.values().toList()
-    val savedNames = PrefsHelper.userCardOrder.split(",")
-        .map { it.trim() }.filter { it.isNotEmpty() }
-    val effective = if (savedNames in SUPERSEDED_DEFAULT_ORDERS) emptyList() else savedNames
-    val saved = effective.mapNotNull { name -> all.find { it.name == name } }
-    // 已保存的顺序 + 新增卡片（追加到末尾），并去重
-    return (saved + all).distinct()
-}
-
-private fun saveCardOrder(order: List<UserCardType>) {
-    PrefsHelper.userCardOrder = order.joinToString(",") { it.name }
-    UserPageCache.cardOrder = order
-}
-
-private fun loadHiddenCards(): Set<String> =
-    PrefsHelper.userHiddenCards.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-
-private fun saveHiddenCards(hidden: Set<String>) {
-    PrefsHelper.userHiddenCards = hidden.joinToString(",")
-    UserPageCache.hiddenCards = hidden
-}
-
 private fun <T> moveItem(list: List<T>, from: Int, to: Int): List<T> {
     if (from == to || from !in list.indices || to !in list.indices) return list
     val mutable = list.toMutableList()
     val item = mutable.removeAt(from)
     mutable.add(to, item)
     return mutable
+}
+
+private fun loadHiddenCards(value: String): Set<String> =
+    value.split(',').map(String::trim).filter(String::isNotEmpty).toSet()
+
+private fun saveCardOrder(order: List<UserCardType>, save: (String) -> Unit) {
+    save(order.joinToString(",") { it.name })
+}
+
+private fun saveHiddenCards(hidden: Set<String>, save: (String) -> Unit) {
+    save(hidden.joinToString(","))
 }
 
 /**
@@ -146,8 +118,6 @@ private fun <T> moveItem(list: List<T>, from: Int, to: Int): List<T> {
  * 缓存后只做一次，切换 tab 就不再卡顿。
  */
 private object UserPageCache {
-    var cardOrder: List<UserCardType>? = null
-    var hiddenCards: Set<String>? = null
     var releasesFetched: Boolean = false
     var releases: List<GithubRelease> = emptyList()
     var repoInfoFetched: Boolean = false
@@ -155,7 +125,12 @@ private object UserPageCache {
 }
 
 @Composable
-fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = null) {
+fun UserScreen(
+    phone: String,
+    onLogout: () -> Unit,
+    viewModel: MainViewModel? = null,
+    onSettingsVisibilityChanged: (Boolean) -> Unit = {}
+) {
     LaunchedEffect(Unit) {
         viewModel?.loadUseCode()
         // 姓名 / 学号走 /account/info，一卡通余额走 /settlement/campus/userInfo。
@@ -167,12 +142,20 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
     val useCode = viewModel?.useCodeData
 
     var showSettings by remember { mutableStateOf(false) }
+    var editMode by remember { mutableStateOf(false) }
+    var cardOrder by remember {
+        mutableStateOf(UserCardLayoutPolicy.restore(UserCardLayoutPolicy.profileDefaults, PrefsHelper.userProfileCardOrder))
+    }
+    var hiddenCards by remember { mutableStateOf(loadHiddenCards(PrefsHelper.userProfileHiddenCards)) }
     var themeMode by LocalThemeMode.current
     val themeReveal = LocalThemeReveal.current
     var themeBtnPos by remember { mutableStateOf(Offset.Zero) }
 
+    LaunchedEffect(showSettings) { onSettingsVisibilityChanged(showSettings) }
+    DisposableEffect(Unit) { onDispose { onSettingsVisibilityChanged(false) } }
+
     if (showSettings) {
-        SettingsScreen(onBack = { showSettings = false })
+        SettingsScreen(onBack = { showSettings = false }, onLogout = onLogout)
         return
     }
 
@@ -184,8 +167,8 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
         ) {
             Text("我的账号", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { showSettings = true }) {
-                    Icon(Icons.Default.Settings, contentDescription = "打开设置", tint = AppColors.TextSecondary)
+                TextButton(onClick = { editMode = !editMode }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text(if (editMode) "完成" else "编辑", fontSize = 14.sp, color = AppColors.Accent)
                 }
                 IconButton(
                     onClick = { themeReveal.toggle(themeBtnPos) },
@@ -195,53 +178,110 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
                 ) {
                     Text(if (themeMode == ThemeMode.DARK) "🌙" else "☀️", fontSize = 20.sp)
                 }
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "打开设置", tint = AppColors.TextSecondary)
+                }
             }
         }
         Spacer(Modifier.height(16.dp))
-        AccountCard(phone, viewModel)
-        Spacer(Modifier.height(16.dp))
-        UseCodeCard(useCode, viewModel)
-        Spacer(Modifier.height(16.dp))
-        BoundRoomCard(viewModel)
-
-        Spacer(Modifier.height(8.dp))
-
-        OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColors.Danger)) {
-            Text("退出登录")
+        val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }
+        visibleCards.forEachIndexed { index, type ->
+            EditableCardSlot(
+                editMode = editMode,
+                title = type.title,
+                isHidden = type.name in hiddenCards,
+                canMoveUp = index > 0,
+                canMoveDown = index < visibleCards.lastIndex,
+                onMoveUp = {
+                    cardOrder = moveItem(cardOrder, index, index - 1)
+                    saveCardOrder(cardOrder) { PrefsHelper.userProfileCardOrder = it }
+                },
+                onMoveDown = {
+                    cardOrder = moveItem(cardOrder, index, index + 1)
+                    saveCardOrder(cardOrder) { PrefsHelper.userProfileCardOrder = it }
+                },
+                onToggleHide = {
+                    hiddenCards = if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
+                    saveHiddenCards(hiddenCards) { PrefsHelper.userProfileHiddenCards = it }
+                }
+            ) {
+                when (type) {
+                    UserCardType.ACCOUNT -> AccountCard(phone, viewModel)
+                    UserCardType.USE_CODE -> UseCodeCard(useCode, viewModel)
+                    UserCardType.BOUND_ROOM -> BoundRoomCard(viewModel)
+                    else -> Unit
+                }
+            }
+            Spacer(Modifier.height(16.dp))
         }
-
-        Spacer(Modifier.height(8.dp))
-        Text("Hualala v${BuildConfig.VERSION_NAME} · 哗啦啦啦啦让我去淋浴~",
-            color = AppColors.TextSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(100.dp)) // 底部留出悬浮导航栏空间
     }
 
 }
 
 @Composable
-private fun SettingsScreen(onBack: () -> Unit) {
+private fun SettingsScreen(onBack: () -> Unit, onLogout: () -> Unit) {
     var showBackgroundScreen by remember { mutableStateOf(false) }
     var showLogViewer by remember { mutableStateOf(false) }
+    var editMode by remember { mutableStateOf(false) }
+    var cardOrder by remember {
+        mutableStateOf(UserCardLayoutPolicy.restore(UserCardLayoutPolicy.settingsDefaults, PrefsHelper.userSettingsCardOrder))
+    }
+    var hiddenCards by remember { mutableStateOf(loadHiddenCards(PrefsHelper.userSettingsHiddenCards)) }
+    BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
-                Icon(Icons.Default.ArrowBack, contentDescription = "返回我的页面", tint = AppColors.TextPrimary)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回我的页面", tint = AppColors.TextPrimary)
             }
             Text("设置", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { editMode = !editMode }) {
+                Text(if (editMode) "完成" else "编辑", color = AppColors.Accent)
+            }
         }
         Spacer(Modifier.height(16.dp))
-        NotifyCard()
-        Spacer(Modifier.height(16.dp))
-        BackgroundCard { showBackgroundScreen = true }
-        Spacer(Modifier.height(16.dp))
-        UpdateCard()
-        Spacer(Modifier.height(16.dp))
-        AboutCard()
-        Spacer(Modifier.height(16.dp))
-        LogCard { showLogViewer = true }
-        Spacer(Modifier.height(100.dp))
+        val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }
+        visibleCards.forEachIndexed { index, type ->
+            EditableCardSlot(
+                editMode = editMode,
+                title = type.title,
+                isHidden = type.name in hiddenCards,
+                canMoveUp = index > 0,
+                canMoveDown = index < visibleCards.lastIndex,
+                onMoveUp = {
+                    cardOrder = moveItem(cardOrder, index, index - 1)
+                    saveCardOrder(cardOrder) { PrefsHelper.userSettingsCardOrder = it }
+                },
+                onMoveDown = {
+                    cardOrder = moveItem(cardOrder, index, index + 1)
+                    saveCardOrder(cardOrder) { PrefsHelper.userSettingsCardOrder = it }
+                },
+                onToggleHide = {
+                    hiddenCards = if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
+                    saveHiddenCards(hiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
+                }
+            ) {
+                when (type) {
+                    UserCardType.NOTIFY -> NotifyCard()
+                    UserCardType.BACKGROUND -> BackgroundCard { showBackgroundScreen = true }
+                    UserCardType.LOG -> LogCard { showLogViewer = true }
+                    UserCardType.ABOUT -> AboutCard()
+                    UserCardType.UPDATE -> UpdateCard()
+                    else -> Unit
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+        OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = AppColors.Danger)) {
+            Text("退出登录")
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("Hualala v${BuildConfig.VERSION_NAME} · 哗啦啦啦啦让我去淋浴~",
+            color = AppColors.TextSecondary, fontSize = 12.sp)
+        Spacer(Modifier.height(24.dp))
     }
     if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
     if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })

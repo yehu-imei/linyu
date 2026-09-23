@@ -173,6 +173,10 @@ object PrefsHelper {
     // ── 「我的」页面卡片顺序 / 已隐藏卡片（逗号分隔的枚举名） ──
     var userCardOrder: String get() = prefs.getString("userCardOrder", "") ?: ""; set(v) = prefs.edit().putString("userCardOrder", v).apply()
     var userHiddenCards: String get() = prefs.getString("userHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userHiddenCards", v).apply()
+    var userProfileCardOrder: String get() = prefs.getString("userProfileCardOrder", "") ?: ""; set(v) = prefs.edit().putString("userProfileCardOrder", v).apply()
+    var userProfileHiddenCards: String get() = prefs.getString("userProfileHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userProfileHiddenCards", v).apply()
+    var userSettingsCardOrder: String get() = prefs.getString("userSettingsCardOrder", "") ?: ""; set(v) = prefs.edit().putString("userSettingsCardOrder", v).apply()
+    var userSettingsHiddenCards: String get() = prefs.getString("userSettingsHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userSettingsHiddenCards", v).apply()
 
     // ── 自定义背景：两套独立配置（scope = home / shower），与深浅模式完全无关 ──
     fun bgGetBool(scope: String, name: String, def: Boolean) = prefs.getBoolean("bg_${scope}_$name", def)

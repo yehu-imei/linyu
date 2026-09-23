@@ -1,5 +1,6 @@
 package com.hualala.linyu.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,6 +48,7 @@ import kotlinx.coroutines.withContext
  */
 @Composable
 fun CustomBackgroundScreen(onDismiss: () -> Unit) {
+    BackHandler(onBack = onDismiss)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 

@@ -255,7 +255,11 @@ private fun TrendChart(
             if (chartType == TrendChartType.LINE) drawPath(area, accent.copy(alpha = 0.10f))
             drawPath(line, accent, style = Stroke(width = 2.5.dp.toPx()))
         }
-        val visiblePoints = TrendDisplayPolicy.pointIndices(points.size, points.map(DailySpend::amount)) + selectedIndex
+        val visiblePoints = TrendDisplayPolicy.visiblePointIndices(
+            points.size,
+            points.map(DailySpend::amount),
+            selectedIndex
+        )
         visiblePoints.forEach { index ->
             val p = position(index)
             val selected = index == selectedIndex

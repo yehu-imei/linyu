@@ -1,5 +1,6 @@
 package com.hualala.linyu.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -38,6 +39,7 @@ fun ShowerScreen(
     onStopClick: () -> Unit,
     onMinimizeClick: () -> Unit = {}
 ) {
+    BackHandler(onBack = onMinimizeClick)
     val minutes = elapsedSec / 60
     val seconds = elapsedSec % 60
     val timeText = if (minutes > 0) "${minutes}分${seconds}秒" else "${seconds}秒"

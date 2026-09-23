@@ -108,6 +108,7 @@ class MainActivity : ComponentActivity() {
             var currentTab by rememberSaveable { mutableStateOf(navRequest.value?.tab ?: 0) }
             var showKickedDialog by remember { mutableStateOf(false) }
             var showLogoutConfirm by remember { mutableStateOf(false) }
+            var userSettingsVisible by rememberSaveable { mutableStateOf(false) }
             val mainViewModel: MainViewModel = viewModel()
 
             // 消费跳转请求：冷启动和「App 已在跑时再点通知」走的是同一条路
@@ -214,11 +215,12 @@ class MainActivity : ComponentActivity() {
                                     0 -> MainScreen(phone = mainViewModel.phone, viewModel = mainViewModel)
                                     1 -> WalletScreen(viewModel = mainViewModel)
                                     2 -> UserScreen(phone = mainViewModel.phone, viewModel = mainViewModel,
-                                        onLogout = { showLogoutConfirm = true })
+                                        onLogout = { showLogoutConfirm = true },
+                                        onSettingsVisibilityChanged = { userSettingsVisible = it })
                                 }
                             }
                             // 悬浮胶囊导航栏
-                            if (!mainViewModel.isShowering) {
+                            if (!mainViewModel.isShowering && !userSettingsVisible) {
                                 FloatingPillNavBar(
                                     currentTab = currentTab,
                                     onTabSelected = { currentTab = it },
@@ -264,6 +266,7 @@ class MainActivity : ComponentActivity() {
                                     if (canLogout) {
                                         mainViewModel.logout()
                                         isLoggedIn = false
+                                        userSettingsVisible = false
                                     }
                                 }) {
                                     Text(

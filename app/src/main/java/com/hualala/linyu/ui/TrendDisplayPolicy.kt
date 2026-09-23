@@ -20,6 +20,16 @@ internal object TrendDisplayPolicy {
         return base + peak
     }
 
+    fun visiblePointIndices(
+        size: Int,
+        values: List<Double>,
+        selectedIndex: Int,
+        maxPoints: Int = 14
+    ): Set<Int> = buildSet {
+        addAll(pointIndices(size, values, maxPoints))
+        if (selectedIndex in 0 until size) add(selectedIndex)
+    }
+
     fun axisIndices(size: Int, maxLabels: Int = 5): List<Int> {
         if (size <= 0) return emptyList()
         if (size <= maxLabels) return listOf(0, size / 2, size - 1).distinct()
