@@ -7,8 +7,10 @@ import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hualala.linyu.data.PendingSettlement
+import com.hualala.linyu.data.BillHistoryCache
 import com.hualala.linyu.data.shouldPreserveForRecovery
 import com.hualala.linyu.model.ActiveOrder
+import com.hualala.linyu.model.BillItem
 
 object PrefsHelper {
     /** 加密存储的文件名 */
@@ -131,6 +133,7 @@ object PrefsHelper {
             prefs.all.keys
                 .filter {
                     it.startsWith("consume_") ||
+                        it.startsWith("billCache_") ||
                         (!preserveActiveRecovery && shouldPreserveForRecovery(it))
                 }
                 .forEach { editor.remove(it) }
@@ -224,6 +227,13 @@ object PrefsHelper {
     @Synchronized
     fun clearPendingSettlement(snCode: String) {
         savePendingSettlements(getPendingSettlements().filterNot { it.snCode == snCode })
+    }
+
+    fun getCachedBills(accountKey: String): List<BillItem> =
+        BillHistoryCache.decode(prefs.getString(BillHistoryCache.keyFor(accountKey), "") ?: "")
+
+    fun saveCachedBills(accountKey: String, bills: List<BillItem>) {
+        prefs.edit().putString(BillHistoryCache.keyFor(accountKey), BillHistoryCache.encode(bills)).apply()
     }
 
     var themeMode: String

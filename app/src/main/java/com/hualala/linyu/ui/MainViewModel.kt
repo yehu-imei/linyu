@@ -1574,19 +1574,29 @@ class MainViewModel : ViewModel() {
     fun loadBills() {
         sessionScope().launch {
             isLoadingBills = true
+            val cacheKey = PrefsHelper.userId.ifEmpty { PrefsHelper.telephone }
+            val cached = PrefsHelper.getCachedBills(cacheKey)
+            if (cached.isNotEmpty()) {
+                billHistory = cached
+                billList = cached.take(20)
+                billsLoaded = true
+            }
             try {
                 val fmt = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.getDefault())
                 val cal = java.util.Calendar.getInstance()
                 val all = mutableListOf<BillItem>()
+                var allRequestsSucceeded = true
                 for (i in 0..2) {
                     val month = fmt.format(cal.time)
                     val resp = NetworkModule.apiService.getBillListSafe(month = month)
+                    if (!resp.success) allRequestsSucceeded = false
                     if (resp.success && !resp.data.isNullOrEmpty()) all.addAll(resp.data)
                     cal.add(java.util.Calendar.MONTH, -1)
                 }
                 billHistory = all.toList()
                 billList = all.take(20)
                 billsLoaded = true
+                if (allRequestsSucceeded) PrefsHelper.saveCachedBills(cacheKey, all)
                 val reconciliation = SettlementReconciler.reconcile(
                     PrefsHelper.getPendingSettlements(),
                     all

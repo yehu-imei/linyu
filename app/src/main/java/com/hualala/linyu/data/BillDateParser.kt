@@ -6,6 +6,8 @@ import java.time.format.DateTimeFormatter
 import java.time.format.ResolverStyle
 
 object BillDateParser {
+    fun defaultZoneId(): ZoneId = ZoneId.systemDefault()
+
     private val formatters = listOf(
         DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss").withResolverStyle(ResolverStyle.STRICT),
         DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss").withResolverStyle(ResolverStyle.STRICT),

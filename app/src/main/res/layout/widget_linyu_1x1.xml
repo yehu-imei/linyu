@@ -13,6 +13,8 @@
   顶部的状态小字只是为了让状态不只靠颜色区分（色弱、或者瞟一眼的时候）。
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="UseAppTint"
     android:id="@+id/widget_tile_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"

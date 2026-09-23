@@ -3,10 +3,26 @@ package com.hualala.linyu.data
 import com.hualala.linyu.model.BillDTO
 import com.hualala.linyu.model.BillItem
 import java.time.LocalDate
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class SpendingAnalyticsTest {
+
+    @Test
+    fun `uses explicit zone when converting a bill timestamp`() {
+        val bill = bill("2026-09-23 00:30:00", "1.20")
+
+        val summary = SpendingAnalytics.summarize(
+            listOf(bill),
+            TrendRange.LAST_7_DAYS,
+            today = LocalDate.of(2026, 9, 23),
+            zoneId = ZoneId.of("America/Los_Angeles")
+        )
+
+        assertEquals(1, summary.points.last().count)
+        assertEquals(1.20, summary.points.last().amount, 0.001)
+    }
     private val today = LocalDate.of(2026, 9, 22)
 
     @Test

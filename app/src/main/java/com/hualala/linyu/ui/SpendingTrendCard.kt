@@ -160,7 +160,6 @@ private fun TrendChart(
     onSelected: (Int) -> Unit
 ) {
     val accent = AppColors.Accent
-    val grid = AppColors.Border.copy(alpha = 0.9f)
     val pointFill = AppColors.Card
     Canvas(
         Modifier
@@ -188,11 +187,6 @@ private fun TrendChart(
             return Offset(index * xStep, bottom - usableHeight * ratio)
         }
 
-        repeat(3) { row ->
-            val y = top + usableHeight * row / 2f
-            drawLine(grid, Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
-        }
-
         val line = Path().apply {
             points.indices.forEach { index ->
                 val p = position(index)
@@ -210,7 +204,8 @@ private fun TrendChart(
         }
         drawPath(area, accent.copy(alpha = 0.10f))
         drawPath(line, accent, style = Stroke(width = 2.5.dp.toPx()))
-        points.indices.forEach { index ->
+        val visiblePoints = TrendDisplayPolicy.pointIndices(points.size)
+        visiblePoints.forEach { index ->
             val p = position(index)
             val selected = index == selectedIndex
             drawCircle(accent, radius = if (selected) 5.dp.toPx() else 3.dp.toPx(), center = p)
@@ -222,7 +217,7 @@ private fun TrendChart(
 @Composable
 private fun TrendAxisLabels(points: List<DailySpend>) {
     if (points.isEmpty()) return
-    val indices = listOf(0, points.lastIndex / 2, points.lastIndex).distinct()
+    val indices = TrendDisplayPolicy.axisIndices(points.size)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         indices.forEach { index ->
             Text(points[index].date.format(SHORT_DATE), fontSize = 10.sp, color = AppColors.TextSecondary)

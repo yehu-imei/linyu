@@ -1,7 +1,9 @@
 package com.hualala.linyu.data
 
 import com.hualala.linyu.model.BillItem
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 
 enum class TrendRange { LAST_7_DAYS, THIS_MONTH }
 
@@ -22,25 +24,28 @@ object SpendingAnalytics {
     fun summarize(
         bills: List<BillItem>,
         range: TrendRange,
-        today: LocalDate = LocalDate.now()
+        today: LocalDate? = null,
+        zoneId: ZoneId = BillDateParser.defaultZoneId()
     ): SpendingSummary {
+        val targetDay = today ?: LocalDate.now(zoneId)
         val start = when (range) {
-            TrendRange.LAST_7_DAYS -> today.minusDays(6)
-            TrendRange.THIS_MONTH -> today.withDayOfMonth(1)
+            TrendRange.LAST_7_DAYS -> targetDay.minusDays(6)
+            TrendRange.THIS_MONTH -> targetDay.withDayOfMonth(1)
         }
         val byDate = bills.mapNotNull { bill ->
             val dto = bill.consumeBillDTO
-            val date = BillDateParser.parseLocalDateTime(dto.consumeDate)?.toLocalDate()
-                ?: return@mapNotNull null
+            val timestamp = BillDateParser.toEpochMillis(dto.consumeDate, zoneId)
+            if (timestamp == 0L) return@mapNotNull null
+            val date = Instant.ofEpochMilli(timestamp).atZone(zoneId).toLocalDate()
             val amount = dto.consumeMoney.toDoubleOrNull()
                 ?.takeIf { it.isFinite() && it >= 0.0 }
                 ?: return@mapNotNull null
-            if (date < start || date > today) return@mapNotNull null
+            if (date < start || date > targetDay) return@mapNotNull null
             date to amount
         }.groupBy({ it.first }, { it.second })
 
         val points = generateSequence(start) { date ->
-            date.plusDays(1).takeIf { it <= today }
+            date.plusDays(1).takeIf { it <= targetDay }
         }.map { date ->
             val amounts = byDate[date].orEmpty()
             DailySpend(date, amounts.sum(), amounts.size)
