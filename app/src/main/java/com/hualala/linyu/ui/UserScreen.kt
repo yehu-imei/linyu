@@ -20,6 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -164,23 +166,17 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
     }
     val useCode = viewModel?.useCodeData
 
-    // 编辑模式与卡片布局
-    var editMode by remember { mutableStateOf(false) }
-    var cardOrder by remember {
-        mutableStateOf(UserPageCache.cardOrder ?: loadCardOrder().also { UserPageCache.cardOrder = it })
-    }
-    var hiddenCards by remember {
-        mutableStateOf(UserPageCache.hiddenCards ?: loadHiddenCards().also { UserPageCache.hiddenCards = it })
-    }
-
-    var showLogViewer by remember { mutableStateOf(false) }
-    var showBackgroundScreen by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var themeMode by LocalThemeMode.current
     val themeReveal = LocalThemeReveal.current
     var themeBtnPos by remember { mutableStateOf(Offset.Zero) }
 
+    if (showSettings) {
+        SettingsScreen(onBack = { showSettings = false })
+        return
+    }
+
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
-        // 标题栏：标题 + 编辑 + 主题
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -188,8 +184,8 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
         ) {
             Text("我的账号", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { editMode = !editMode }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Text(if (editMode) "完成" else "编辑", fontSize = 14.sp, color = AppColors.Accent)
+                IconButton(onClick = { showSettings = true }) {
+                    Icon(Icons.Default.Settings, contentDescription = "打开设置", tint = AppColors.TextSecondary)
                 }
                 IconButton(
                     onClick = { themeReveal.toggle(themeBtnPos) },
@@ -202,41 +198,11 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
             }
         }
         Spacer(Modifier.height(16.dp))
-
-        // 卡片列表（编辑模式下显示全部，便于恢复隐藏项）
-        val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }
-        visibleCards.forEachIndexed { index, type ->
-            EditableCardSlot(
-                editMode = editMode,
-                title = type.title,
-                isHidden = type.name in hiddenCards,
-                canMoveUp = index > 0,
-                canMoveDown = index < visibleCards.lastIndex,
-                onMoveUp = {
-                    cardOrder = moveItem(cardOrder, index, index - 1); saveCardOrder(cardOrder)
-                },
-                onMoveDown = {
-                    cardOrder = moveItem(cardOrder, index, index + 1); saveCardOrder(cardOrder)
-                },
-                onToggleHide = {
-                    hiddenCards = if (type.name in hiddenCards) hiddenCards - type.name
-                                  else hiddenCards + type.name
-                    saveHiddenCards(hiddenCards)
-                }
-            ) {
-                when (type) {
-                    UserCardType.ACCOUNT -> AccountCard(phone, viewModel)
-                    UserCardType.BOUND_ROOM -> BoundRoomCard(viewModel)
-                    UserCardType.USE_CODE -> UseCodeCard(useCode, viewModel)
-                    UserCardType.BACKGROUND -> BackgroundCard { showBackgroundScreen = true }
-                    UserCardType.UPDATE -> UpdateCard()
-                    UserCardType.NOTIFY -> NotifyCard()
-                    UserCardType.LOG -> LogCard { showLogViewer = true }
-                    UserCardType.ABOUT -> AboutCard()
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-        }
+        AccountCard(phone, viewModel)
+        Spacer(Modifier.height(16.dp))
+        UseCodeCard(useCode, viewModel)
+        Spacer(Modifier.height(16.dp))
+        BoundRoomCard(viewModel)
 
         Spacer(Modifier.height(8.dp))
 
@@ -252,13 +218,33 @@ fun UserScreen(phone: String, onLogout: () -> Unit, viewModel: MainViewModel? = 
         Spacer(Modifier.height(100.dp)) // 底部留出悬浮导航栏空间
     }
 
-    if (showLogViewer) {
-        LogViewerDialog(onDismiss = { showLogViewer = false })
-    }
+}
 
-    if (showBackgroundScreen) {
-        CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
+@Composable
+private fun SettingsScreen(onBack: () -> Unit) {
+    var showBackgroundScreen by remember { mutableStateOf(false) }
+    var showLogViewer by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "返回我的页面", tint = AppColors.TextPrimary)
+            }
+            Text("设置", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+        }
+        Spacer(Modifier.height(16.dp))
+        NotifyCard()
+        Spacer(Modifier.height(16.dp))
+        BackgroundCard { showBackgroundScreen = true }
+        Spacer(Modifier.height(16.dp))
+        UpdateCard()
+        Spacer(Modifier.height(16.dp))
+        AboutCard()
+        Spacer(Modifier.height(16.dp))
+        LogCard { showLogViewer = true }
+        Spacer(Modifier.height(100.dp))
     }
+    if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
+    if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
 }
 
 /** 统一的卡片外观 */

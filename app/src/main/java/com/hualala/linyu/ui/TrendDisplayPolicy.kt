@@ -14,6 +14,12 @@ internal object TrendDisplayPolicy {
         }
     }
 
+    fun pointIndices(size: Int, values: List<Double>, maxPoints: Int = 14): Set<Int> {
+        val base = pointIndices(size, maxPoints)
+        val peak = values.indices.maxByOrNull { values[it] } ?: return base
+        return base + peak
+    }
+
     fun axisIndices(size: Int, maxLabels: Int = 5): List<Int> {
         if (size <= 0) return emptyList()
         if (size <= maxLabels) return listOf(0, size / 2, size - 1).distinct()
