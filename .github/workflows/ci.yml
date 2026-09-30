@@ -1,0 +1,68 @@
+name: CI
+
+# 每次 push / PR 自动跑一遍：编译 + 单元测试 + Lint。
+# 目的：把「改 A 坏 B」的回归挡在提交那一刻，不等到发版前才发现。
+# （真机蓝牙、设备兼容性、UI 外观这些 CI 管不到，仍需人工验证。）
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续 push 时，取消上一次还在跑的，省额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: 编译 · 测试 · Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # AGP 8.13 要求 JDK 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'gradle/libs.versions.toml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: 编译
+        run: ./gradlew compileDebugKotlin --stacktrace
+
+      - name: 单元测试
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Lint
+        run: ./gradlew lintDebug --stacktrace
+
+      # 失败时也要留下报告，方便直接看是哪条挂了
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: |
+            app/build/reports/tests/testDebugUnitTest
+            app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore

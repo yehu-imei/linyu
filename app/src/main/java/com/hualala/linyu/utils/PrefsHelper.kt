@@ -106,7 +106,26 @@ object PrefsHelper {
 
     var campusBalanceTime: Long get() = prefs.getLong("campusBalanceTime", 0L)
         set(v) = prefs.edit().putLong("campusBalanceTime", v).apply()
-    var schoolName: String get() = prefs.getString("schoolName", "金华职业技术大学") ?: "金华职业技术大学"; set(v) = prefs.edit().putString("schoolName", v).apply()
+
+    /**
+     * 趣智校园**钱包**余额（`/account/wallet` 的 `money`，单位已是元）。
+     *
+     * ⚠️ 这不是一卡通，是趣智校园自己的账户余额。两者是两个不同的东西：
+     *
+     * | 接口 | 含义 | 什么情况下拿得到 |
+     * |---|---|---|
+     * | `/settlement/campus/userInfo` | **一卡通**（校园卡） | 学校接入了校园卡免密支付 |
+     * | `/account/wallet` | **趣智校园钱包** | 几乎所有学校都有 |
+     *
+     * 之前只认一卡通，于是「没接一卡通的学校」（如某工商职业学院，该接口返回
+     * `errorCode 12「无效支付配置」`）会一路回退到**用户手填的估算值**——
+     * 而钱包余额明明就在手边：它每 25 秒被挤号心跳拉一次，只是数字从来没被用过。
+     *
+     * 现在作为一卡通拿不到时的第二来源，见 [com.hualala.linyu.data.BalanceEstimator]。
+     */
+    var walletBalance: String get() = prefs.getString("walletBalance", "") ?: ""
+        set(v) = prefs.edit().putString("walletBalance", v).apply()
+    var schoolName: String get() = prefs.getString("schoolName", "") ?: ""; set(v) = prefs.edit().putString("schoolName", v).apply()
     val isLoggedIn: Boolean get() = loginCode.isNotEmpty()
     fun saveAuth(lc: String, uid: String, aid: String, pid: String, phone: String, name: String?) {
         loginCode = lc; userId = uid; accountId = aid; projectId = pid; telephone = phone; userName = name ?: ""
@@ -130,6 +149,7 @@ object PrefsHelper {
                 .remove("occupiedSnCode")
                 // 学号和余额是账号数据，换账号必须清掉，否则会显示上一任的
                 .remove("userStudentId").remove("campusBalance").remove("campusBalanceTime")
+                .remove("walletBalance")
             prefs.all.keys
                 .filter {
                     it.startsWith("consume_") ||
@@ -170,6 +190,57 @@ object PrefsHelper {
     // ── 绑定的寝室（设备筛选关键词） ──
     var boundRoom: String get() = prefs.getString("boundRoom", "") ?: ""; set(v) = prefs.edit().putString("boundRoom", v).apply()
 
+    // ── 已确认需要蓝牙开阀的设备 ──
+    //
+    // 服务端**不提供**任何能区分"云端表 / 蓝牙表"的字段：
+    //   · `smallTypeId` —— 两校的 4G 表也都是 1，无区分能力
+    //   · `isBle`       —— 服务端压根不返回
+    // 参考项目也没做这个判断（它本身就是纯蓝牙客户端）。
+    //
+    // 所以只能**让用户来告诉 App**：云端开阀返回 306 时问一句，
+    // 用户选"是"就把 snCode 记在这里，以后直接走蓝牙。
+    //
+    // ⚠️ 记的是 **snCode** 而不是设备名或 MAC：
+    //   · 设备名会变（各校命名不同），MAC 有虚拟/真实之分（见 DeviceInfo.realMac）
+    //   · snCode 是开阀接口真正用的标识，最稳
+    private fun bleDevicesKey() = "bleDevices"
+
+    /** 该设备是否已被用户确认需要蓝牙开阀 */
+    fun isBleDevice(snCode: String): Boolean {
+        if (snCode.isEmpty()) return false
+        val raw = prefs.getString(bleDevicesKey(), "") ?: ""
+        if (raw.isEmpty()) return false
+        return raw.split(',').any { it == snCode }
+    }
+
+    /** 记住「这台需要蓝牙」（用户确认后、或蓝牙开阀成功后调用） */
+    fun markBleDevice(snCode: String) {
+        if (snCode.isEmpty()) return
+        val cur = (prefs.getString(bleDevicesKey(), "") ?: "")
+            .split(',').filter { it.isNotEmpty() }.toMutableSet()
+        if (cur.add(snCode)) {
+            prefs.edit().putString(bleDevicesKey(), cur.joinToString(",")).apply()
+            AppLogger.i("已记住蓝牙设备：$snCode")
+        }
+    }
+
+    /**
+     * 撤销「这台需要蓝牙」的标记。
+     *
+     * 用在**确定猜错**的时候：蓝牙连上了但找不到 FF00/FF01/FF02 服务，
+     * 说明这台设备根本没有水控协议——不是蓝牙表。自动撤销，
+     * 免得以后每次都白试一遍蓝牙。
+     */
+    fun unmarkBleDevice(snCode: String) {
+        if (snCode.isEmpty()) return
+        val cur = (prefs.getString(bleDevicesKey(), "") ?: "")
+            .split(',').filter { it.isNotEmpty() }.toMutableSet()
+        if (cur.remove(snCode)) {
+            prefs.edit().putString(bleDevicesKey(), cur.joinToString(",")).apply()
+            AppLogger.i("已撤销蓝牙设备标记（找不到水控服务）：$snCode")
+        }
+    }
+
     // ── 「我的」页面卡片顺序 / 已隐藏卡片（逗号分隔的枚举名） ──
     var userCardOrder: String get() = prefs.getString("userCardOrder", "") ?: ""; set(v) = prefs.edit().putString("userCardOrder", v).apply()
     var userHiddenCards: String get() = prefs.getString("userHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userHiddenCards", v).apply()
@@ -187,6 +258,18 @@ object PrefsHelper {
     fun bgPutInt(scope: String, name: String, v: Int) = prefs.edit().putInt("bg_${scope}_$name", v).apply()
 
     // ── Active orders list ──
+    //
+    // ⚠️ 这三个都加了 [@Synchronized]：活跃订单会被 UI、前台服务、桌面小组件
+    // 三处的后台协程同时读写，而调用方普遍是「读出来 → 改 → 写回去」的模式。
+    // 没有锁时，A 加设备 1、B 加设备 2，两者基于同一份旧列表各自写回，
+    // 后写的会整份覆盖先写的——直接丢一条订单。
+    //
+    // 这只是**缓解**，不是完整解：锁的粒度是单次 get / 单次 save，
+    // 「读-改-写」这三步作为一个整体仍然不是原子的。真正的解法是
+    // 收口成一个 `ActiveOrderRepository`，用 `Mutex` 串行化并提供
+    // `update { old -> new }` 形式的原子操作。在那之前，加锁能消掉
+    // 最常见的一类竞态，而且成本只有几个注解。
+    @Synchronized
     fun getActiveOrders(): MutableList<ActiveOrder> {
         val json = prefs.getString("activeOrders", "[]") ?: "[]"
         return try {
@@ -199,11 +282,37 @@ object PrefsHelper {
         } catch (_: Exception) { mutableListOf() }
     }
 
+    @Synchronized
     fun saveActiveOrders(orders: List<ActiveOrder>) {
         prefs.edit().putString("activeOrders", gson.toJson(orders)).apply()
     }
 
+    @Synchronized
     fun clearActiveOrders() = prefs.edit().remove("activeOrders").apply()
+
+    /**
+     * 蓝牙会话（JSON 字符串）。**小组件服务与 App 共用**——蓝牙关阀/结算要靠会话里的
+     * mac / randomNumber / protocolType，而小组件是另一个进程入口，读不到 ViewModel 内存。
+     */
+    var bleSessionJson: String get() = prefs.getString("bleSessionJson", "") ?: ""
+        set(v) = prefs.edit().putString("bleSessionJson", v).apply()
+
+    /**
+     * 通知里「结束使用」按钮的 `PendingIntent` requestCode（按 snCode **稳定分配**）。
+     *
+     * ⚠️ 不能用 `snCode.hashCode()`：两台设备的哈希一旦碰撞，它们的按钮会共享同一个
+     * PendingIntent，**点 A 的按钮可能停了 B 的设备**。这里按 snCode 递增分配并存进
+     * Prefs —— 既保证不同设备不撞，又保证重启后数值不变（否则旧通知的按钮会失效）。
+     */
+    @Synchronized
+    fun notifyRequestCode(snCode: String): Int {
+        val key = "notifyReqCode_$snCode"
+        val existing = prefs.getInt(key, -1)
+        if (existing > 0) return existing
+        val next = prefs.getInt("notifyReqCodeNext", 7101)
+        prefs.edit().putInt(key, next).putInt("notifyReqCodeNext", next + 1).apply()
+        return next
+    }
 
     @Synchronized
     fun getPendingSettlements(): MutableList<PendingSettlement> {
@@ -288,6 +397,37 @@ object PrefsHelper {
      */
     var notifyAlert: Boolean get() = prefs.getBoolean("notifyAlert", true)
         set(v) = prefs.edit().putBoolean("notifyAlert", v).apply()
+
+    /**
+     * 「消费趋势」卡片（钱包页那张统计图）是否显示。
+     *
+     * 开关放在「设置 → 消费趋势」卡片里，控制 [com.hualala.linyu.ui.SpendingTrendCard]
+     * 在钱包页的显隐。默认开启，跟历史行为保持一致。
+     */
+    var trendEnabled: Boolean get() = prefs.getBoolean("trendEnabled", true)
+        set(v) = prefs.edit().putBoolean("trendEnabled", v).apply()
+
+    /**
+     * 消费趋势卡片的**视图状态**（跨会话保留）。
+     *
+     * ⚠️ 这三个原来用 `remember` 存在 Composable 里，退出「我的」页再进来就复位成
+     * 「7 天 / 折线 / 折叠」——用户每次都要重新点一遍。存进 Prefs 就能记住上次的选择。
+     */
+    var trendRange: String get() = prefs.getString("trendRange", "LAST_7_DAYS") ?: "LAST_7_DAYS"
+        set(v) = prefs.edit().putString("trendRange", v).apply()
+
+    var trendChartType: String get() = prefs.getString("trendChartType", "LINE") ?: "LINE"
+        set(v) = prefs.edit().putString("trendChartType", v).apply()
+
+    var trendCollapsed: Boolean get() = prefs.getBoolean("trendCollapsed", true)
+        set(v) = prefs.edit().putBoolean("trendCollapsed", v).apply()
+
+    /**
+     * 背景装扮页上次在看的范围（`home` / `shower`）。
+     * 同样是「退出重进就复位」的浏览偏好，存起来省得每次重新点。
+     */
+    var backgroundScope: String get() = prefs.getString("backgroundScope", "home") ?: "home"
+        set(v) = prefs.edit().putString("backgroundScope", v).apply()
 
     /**
      * 「占用中」标记的有效期。

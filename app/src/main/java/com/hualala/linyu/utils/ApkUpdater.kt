@@ -154,9 +154,17 @@ object ApkUpdater {
         expectedSha256: String?,
         onProgress: (Long, Long) -> Unit
     ): File {
+        // ⚠️ `fileName` 是 GitHub / Gitee Release 附件名，属于**远端可控输入**，
+        // 不能直接拿去拼路径。`File(...).name` 会剥掉目录部分；
+        // 再显式拒绝反斜杠——Android 上它不是分隔符，`File().name` 不会处理，
+        // 留着等于给构造畸形路径留口子。
+        val safeName = File(fileName).name
+            .takeIf { it.isNotBlank() && it != "." && it != ".." && !it.contains('\\') }
+            ?: error("更新包文件名不合法，已阻止下载")
+
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-        val target = File(dir, fileName)
-        val temp = File(dir, "$fileName.part")
+        val target = File(dir, safeName)
+        val temp = File(dir, "$safeName.part")
 
         // 用户重复点下载时，完整的同版本包可以直接复用；摘要存在时一并校验，
         // 避免同长度但内容已损坏的缓存被误判为可安装。

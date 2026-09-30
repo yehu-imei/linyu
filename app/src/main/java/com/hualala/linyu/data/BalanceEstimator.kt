@@ -1,35 +1,68 @@
 package com.hualala.linyu.data
 
 import com.hualala.linyu.model.BillItem
+import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.PrefsHelper
 
 /**
- * 一卡通余额。
+ * 账户余额。
  *
- * **首选真实值**：`GET /settlement/campus/userInfo` 直接返回一卡通余额
- * （趣智校园把易校园的接口代理了，所以不用去破易校园那套 native 签名）。
+ * **余额有三个来源，按优先级取第一个拿得到的：**
  *
- * **拿不到才回退估算**：没签约校园卡免密支付时服务端不给 `amount`，
- * 这时退回本地推算——
+ * | 优先级 | 来源 | 接口 | 什么学校会有 |
+ * |---|---|---|---|
+ * | 1 | **一卡通**（校园卡） | `GET /settlement/campus/userInfo` | 接入了校园卡免密支付 |
+ * | 2 | **趣智校园钱包** | `GET /account/wallet` | 几乎所有学校都有 |
+ * | 3 | 本地估算 | — | 前两者都拿不到的兜底 |
  *
- *     估算余额 = 用户手动填写的初始余额 − 填写时刻之后产生的消费
+ * ## 为什么要有第 2 档
  *
- * 这段估算逻辑原先在 [com.hualala.linyu.ui.MainScreen] 和 [com.hualala.linyu.ui.WalletScreen]
+ * 原先只有「一卡通」和「本地估算」两档，于是没接一卡通的学校
+ * （如某工商职业学院，`/settlement/campus/userInfo` 返回
+ * `errorCode 12「无效支付配置」`）会一路掉到**用户手填的估算值**上——
+ * 而钱包余额明明就在手边：`/account/wallet` 每 25 秒被挤号心跳拉一次，
+ * 响应里的 `money` 就是余额，只是数字从来没被显示过。
+ *
+ * 顺序上**一卡通优先**，是为了不动已有学校的行为：项目 v3.0.0 接一卡通
+ * 就是为了拿真实余额，作者学校走的就是这条。钱包只在一卡通拿不到时补位。
+ *
+ * 本地估算 = 用户手动填写的初始余额 − 填写时刻之后产生的消费。
+ * 这段逻辑原先在 [com.hualala.linyu.ui.MainScreen] 和 [com.hualala.linyu.ui.WalletScreen]
  * 里各写了一遍，桌面小组件是第三份——而小组件那份当时漏了减法，直接显示没动过的初始值，
  * 于是「App 里余额变了、桌面上不变」。抽到这里，三处共用一份，不会再各算各的。
  */
 object BalanceEstimator {
 
     /**
-     * 一卡通真实余额；拿不到返回 null。
+     * 真实余额：一卡通优先，其次趣智校园钱包；都拿不到返回 null。
      *
      * 从 **Prefs** 读而不是从 ViewModel：小组件是另一个进程入口，
      * 它读不到 ViewModel 的内存状态，只能读持久化的那份。
      */
-    fun realBalance(): Double? = PrefsHelper.campusBalance.toDoubleOrNull()
+    fun realBalance(): Double? =
+        PrefsHelper.campusBalance.toDoubleOrNull()
+            ?: PrefsHelper.walletBalance.toDoubleOrNull()
 
     /** 有没有真实余额可用（决定界面要不要标注「估算」） */
     fun hasRealBalance(): Boolean = realBalance() != null
+
+    /** 是否有**一卡通**余额（来自 `/settlement/campus/userInfo`） */
+    fun hasCampusBalance(): Boolean = PrefsHelper.campusBalance.toDoubleOrNull() != null
+
+    /** 是否有**趣智校园钱包**余额（来自 `/account/wallet`） */
+    fun hasWalletBalance(): Boolean = PrefsHelper.walletBalance.toDoubleOrNull() != null
+
+    /**
+     * 余额标题——按**钱在哪**来写，避免张冠李戴：
+     * - 一卡通余额 → 「一卡通余额」
+     * - 趣智校园钱包余额 → 「趣智校园余额」
+     * - 只有本地估算 → 「余额」
+     */
+    fun title(): String = when {
+        hasCampusBalance() -> "一卡通余额"
+        hasWalletBalance() -> "趣智校园余额"
+        else -> "余额"
+    }
 
     /** 账单里的日期字符串 → 毫秒时间戳；解析不了返回 0，会被当成「早于填余额的时刻」而不计入 */
     fun billTimeMs(consumeDate: String): Long = try {
@@ -71,5 +104,13 @@ object BalanceEstimator {
      */
     fun format(balance: Double): String =
         if (!hasRealBalance() && PrefsHelper.manualBalance.isEmpty()) "¥ —"
-        else "¥ %.2f".format(balance)
+        else "¥ ${formatMoney(balance)}"
+
+    /**
+     * 余额数字：默认保留 3 位小数；**末位为 0 时收敛为 2 位**。
+     *
+     * 见 [com.hualala.linyu.utils.MoneyFormat]——全项目金额统一走那份实现，
+     * 不再各自 `%.2f`（那会把 0.025 显示成 0.03）。
+     */
+    fun formatMoney(value: Double): String = MoneyFormat.format(value)
 }

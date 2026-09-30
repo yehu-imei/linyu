@@ -3,10 +3,10 @@
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-purple.svg)](https://developer.android.com/jetpack/compose)
-[![Version](https://img.shields.io/badge/Version-v3.0.4-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v3.1.0-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**⬇️ [下载最新 APK (v3.0.4)](https://github.com/yehu-imei/linyu/releases/latest)**
+**⬇️ [下载最新 APK (v3.1.0)](https://github.com/yehu-imei/linyu/releases/latest)**
 
 > 安装包 12.6 MB，仅支持 64 位（arm64-v8a）设备。
 >
@@ -47,6 +47,7 @@
 
 - 🔐 **手机号登录** — 默认**短信验证码登录**（未注册的手机号会自动创建账号），也可切换密码登录；支持系统自动填充保存账号密码，登录状态持久化与自动恢复
 - 📡 **蓝牙扫描** — BLE 扫描附近设备，按信号强度排序；权限按需申请，Android 12+ 不需要定位权限
+- 🔌 **蓝牙水表直连（v3.1.0）** — 部分学校的表不联网，手机**通过蓝牙直连**即可开阀 / 关阀 / 结算：关阀即结清、遗留订单自动补结算、App 被杀重开能恢复用水；通知栏「结束使用」和桌面小组件都能走蓝牙关阀，App 被杀也能关
 - 🎨 **统一的设备图标** — 热水器 / 洗手台用单色图标，不再受各厂商 emoji 字形影响
 - 📷 **扫码绑定** — 扫描设备二维码，直接弹出设备详情，无需蓝牙；也可以**从相册选图识别**，光线不足时有**手电筒**补光
 - 🏠 **绑定寝室** — 在「选择附近」里选一间寝室，首页**和桌面小组件**的设备列表都只显示该寝室的设备；绑定后如果「上次使用的设备」不在这个寝室里会被清掉
@@ -177,6 +178,19 @@ secret = MD5( 手机号前3位 + 手机号后4位 + "klcx" )
 | **仅中文界面** | 无多语言支持 |
 
 > 欢迎提 Issue 或 PR 帮助改进！
+
+## 🙏 感谢
+
+感谢每一位为本项目做出贡献的朋友，是你们让「淋浴」从想法一步步变成今天的样子：
+
+| 贡献者 | 贡献内容 |
+|---|---|
+| [@Cainite07](https://github.com/Cainite07) | 短信登录的实现 |
+| [@SubmergeDQ](https://github.com/SubmergeDQ) | 蓝牙阀控制的实现 |
+| [@XiaoLoad](https://github.com/XiaoLoad) | 项目优化的宝贵建议 |
+| 同学们 | 测试与体验反馈 |
+
+> 每一段代码、每一条建议、每一次测试，都在让「淋浴」变得更好。谢谢你们 🙌
 
 ## 📄 许可证
 

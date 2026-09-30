@@ -53,6 +53,7 @@ import com.hualala.linyu.utils.BackgroundManager
 import com.hualala.linyu.utils.BackgroundState
 import com.hualala.linyu.utils.PrefsHelper
 import com.hualala.linyu.utils.ScanPermission
+import com.hualala.linyu.utils.MoneyFormat
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
@@ -153,9 +154,12 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     // 但真实余额不用等账单，它是现成的数字。
     val displayBalance = remember(
         viewModel.billList, viewModel.billsLoaded, viewModel.campusBalance,
+        viewModel.walletBalance,
         PrefsHelper.manualBalance, PrefsHelper.manualBalanceTime
     ) {
-        if (viewModel.campusBalance != null || viewModel.billsLoaded)
+        // 真实余额（一卡通或钱包）不用等账单，是现成的数字；
+        // 只有要走估算时才必须等账单到位，否则减数为 0 会先亮一个错数字。
+        if (viewModel.campusBalance != null || viewModel.walletBalance != null || viewModel.billsLoaded)
             BalanceEstimator.estimate(viewModel.billList)
         else null
     }
@@ -240,7 +244,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                                 Text("附近设备", fontWeight = FontWeight.Bold, fontSize = 18.sp,
                                     color = AppColors.TextPrimary)
                                 // 余额在 LazyColumn 外已算好并缓存
-                                Text(displayBalance?.let { "余额 ¥%.2f".format(it) } ?: "余额 ¥ —",
+                                Text(displayBalance?.let { "${BalanceEstimator.title()} ¥${BalanceEstimator.formatMoney(it)}" } ?: "${BalanceEstimator.title()} ¥ —",
                                     color = AppColors.TextSecondary, fontSize = 14.sp)
                             }
                         }
@@ -427,11 +431,55 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                     verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.5.dp, color = AppColors.Accent)
                     Spacer(Modifier.width(12.dp))
-                    Text("正在确认设备是否开启，请稍候", color = AppColors.TextSecondary)
+                    // 蓝牙表那条链路要好几步（连接设备 → 读状态帧 → 下费率 → 写费率包），
+                    // 比 4G 表慢得多；给具体进度，别让用户以为卡死了
+                    Text(
+                        viewModel.bleProgress ?: "正在确认设备是否开启，请稍候",
+                        color = AppColors.TextSecondary
+                    )
                 }
             },
             confirmButton = {},
             dismissButton = {}
+        )
+    }
+
+    // 云端开阀回了「设备不在线」——问用户要不要改用手机蓝牙。
+    //
+    // 为什么必须问用户：服务端**不提供**任何能区分「云端表 / 蓝牙表」的字段
+    // （`smallTypeId` 两校的 4G 表也都是 1；`isBle` 压根不返回），
+    // 参考项目也没做这个判断。只有站在设备旁的人才知道答案。
+    viewModel.bleRetryDevice?.let { dev ->
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissBleRetry() },
+            title = {
+                Text(
+                    "要用蓝牙方式开启吗？",
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            text = {
+                Text(
+                    "「${dev.displayName}」无法通过云端开启。\n\n" +
+                        "如果这台设备需要手机蓝牙直连（开启时必须待在设备旁边），" +
+                        "可以改用蓝牙方式。\n\n" +
+                        "不确定的话：用官方「趣智校园」试一下——" +
+                        "需要站到设备旁才能开的就是这一类。",
+                    color = AppColors.TextSecondary,
+                    lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.confirmBleRetry() },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("用蓝牙开启") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissBleRetry() }) { Text("取消") }
+            }
         )
     }
 
@@ -467,7 +515,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                         // 金额可能是 null（结算没拿到）——那是「还不知道」，
                         // 不能显示成 ¥0.00，否则用户以为没花钱
                         Text(
-                            viewModel.autoCloseConsumed?.let { "本次消费：¥%.2f".format(it) }
+                            viewModel.autoCloseConsumed?.let { "本次消费：${MoneyFormat.withSymbol(it)}" }
                                 ?: "消费金额稍后可在账单中查看",
                             fontWeight = FontWeight.Bold, color = AppColors.Accent
                         )

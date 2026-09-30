@@ -17,6 +17,7 @@ class UserCardLayoutPolicyTest {
         assertEquals(
             listOf(
                 UserCardType.NOTIFY,
+                UserCardType.TREND,
                 UserCardType.BACKGROUND,
                 UserCardType.LOG,
                 UserCardType.ABOUT,
@@ -69,7 +70,7 @@ class UserCardLayoutPolicyTest {
     fun `restoring pages keeps cards on their selected page`() {
         val result = UserCardLayoutPolicy.restorePages(
             profileSaved = "USE_CODE,BOUND_ROOM",
-            settingsSaved = "NOTIFY,BACKGROUND,LOG,ABOUT,UPDATE,ACCOUNT"
+            settingsSaved = "NOTIFY,TREND,BACKGROUND,LOG,ABOUT,UPDATE,ACCOUNT"
         )
 
         assertEquals(listOf(UserCardType.USE_CODE, UserCardType.BOUND_ROOM), result.profile)
@@ -89,7 +90,7 @@ class UserCardLayoutPolicyTest {
             result.profile
         )
         assertEquals(
-            listOf(UserCardType.LOG, UserCardType.NOTIFY, UserCardType.BACKGROUND, UserCardType.UPDATE, UserCardType.ABOUT),
+            listOf(UserCardType.LOG, UserCardType.NOTIFY, UserCardType.BACKGROUND, UserCardType.UPDATE, UserCardType.ABOUT, UserCardType.TREND),
             result.settings
         )
     }

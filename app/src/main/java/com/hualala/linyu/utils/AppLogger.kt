@@ -79,15 +79,28 @@ object AppLogger {
         //
         // ⚠️ 前后必须加**数字边界**（`(?<!\d)` / `(?!\d)`）。少了它，任何
         // 「13 开头、后面还有数字」的长串都会被截走 11 位——最典型的就是订单号：
-        // `13202609181506275230`（20 位）会被打成 `132****9181506275230`。
+        // `13200000000000000000`（20 位）会被打成 `132****0000000000000`。
         // 那不是脱敏，是把日志里唯一能把订单和账单对上的线索毁掉了：
         // 实测排查结算问题时，日志里的 orderNo 和账单里的 orderNo 因此没法比对。
         r = r.replace(Regex("(?<!\\d)1[3-9]\\d{9}(?!\\d)")) { m ->
             m.value.take(3) + "****" + m.value.takeLast(4)
         }
         // 敏感字段的值 → ***
+        //
+        // ⚠️ `code` 前面**必须**加 `(?<![A-Za-z])`。
+        //    `QzxyService` 用通用字段名 `code` 传短信验证码（getVerificationCode /
+        //    registerAndLogin / updatePhone / forgetPassword 四处），这个词太通用，
+        //    不加边界的话 `snCode` / `useCode` 里的 "Code" 也会被吃掉——
+        //    设备序列号是排查结算问题时**唯一**能把日志和账单对上的线索，
+        //    打码掉等于自断一臂。
+        //
+        // `useCode`（使用码）单独列出：它是能在物理键盘上开阀的凭证，属于该保护的。
+        // `userId` / `accountId` 是账号标识，登录响应体会原样进日志，必须遮。
         r = r.replace(
-            Regex("(?i)(password|loginCode|secret|telPhone|telephone|smsCode)[\"']?\\s*[:=]\\s*[\"']?([^\"'&\\s,}]+)")
+            Regex(
+                "(?i)(password|loginCode|secret|telPhone|telephone|smsCode|useCode|userId|accountId" +
+                    "|(?<![A-Za-z])code)[\"']?\\s*[:=]\\s*[\"']?([^\"'&\\s,}]+)"
+            )
         ) { m -> "${m.groupValues[1]}=***" }
         return r
     }
@@ -97,6 +110,41 @@ object AppLogger {
 
     /** 导出用的日志文件 */
     fun logFile(): File? = logFile
+
+    /**
+     * 文件日志的总行数。
+     *
+     * 界面显示的是**内存缓冲**（上限 [MAX_MEMORY_LOGS] 条、只含本次运行），
+     * 而文件是**累积**的（上限 [MAX_FILE_SIZE]）。两者数量差很多是正常的，
+     * 但界面上没有任何说明，很容易让人以为「导出带上了别人的日志」。
+     * 所以这个数字要显示在界面上，把差异摆明。
+     */
+    fun fileLineCount(): Int {
+        val f = logFile ?: return 0
+        return synchronized(fileLock) {
+            runCatching { f.readLines().size }.getOrDefault(0)
+        }
+    }
+
+    /**
+     * 读文件**末尾** [maxLines] 行——导出优先用这个。
+     *
+     * ⚠️ 为什么不直接导出整个文件：文件上限 2MB，实测累积几天就有
+     * **1.4 万行**，而排查问题基本只看最后几百行。整份导出既慢、又难读，
+     * 分享给别人也显得没重点。
+     *
+     * 读不出来时返回空列表（调用方回退到 [getLogs]）。
+     */
+    fun tailLines(maxLines: Int): List<String> {
+        val f = logFile ?: return emptyList()
+        if (maxLines <= 0) return emptyList()
+        return synchronized(fileLock) {
+            runCatching {
+                val all = f.readLines()
+                if (all.size <= maxLines) all else all.takeLast(maxLines)
+            }.getOrDefault(emptyList())
+        }
+    }
 
     /** 清空内存与文件日志 */
     fun clear() {

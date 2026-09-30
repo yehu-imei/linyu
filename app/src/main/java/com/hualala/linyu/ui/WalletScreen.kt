@@ -55,6 +55,10 @@ fun WalletScreen(viewModel: MainViewModel) {
     var showEditDialog by remember { mutableStateOf(false) }
     var editValue by remember { mutableStateOf("") }
 
+    // 消费趋势开关：进页面时读一次。设置页改完切回来，本页会被重建（AnimatedContent），
+    // remember 重新初始化，读到最新值——和通知开关（NotifyCard）同一套模型。
+    var trendEnabled by remember { mutableStateOf(PrefsHelper.trendEnabled) }
+
     var pullRefreshing by remember { mutableStateOf(false) }
     val pullState = rememberPullRefreshState(
         refreshing = pullRefreshing,
@@ -73,9 +77,12 @@ fun WalletScreen(viewModel: MainViewModel) {
     //
     // 账单没到位时给 null，避免先把初始余额亮出来再跳变（见 MainViewModel.billsLoaded）——
     // 但**真实余额不受这个限制**：它是现成的数字，不是减出来的，不用等账单。
-    val hasReal = viewModel.campusBalance != null
+    // ⚠️ 必须把钱包余额也算进「有真实余额」——只认一卡通的话，
+    // 没接一卡通的学校会被误判成「只能估算」，明明钱包里有确切数字却让用户手填。
+    val hasReal = viewModel.campusBalance != null || viewModel.walletBalance != null
     val displayBalance = remember(
         viewModel.billList, viewModel.billsLoaded, viewModel.campusBalance,
+        viewModel.walletBalance,
         PrefsHelper.manualBalance, PrefsHelper.manualBalanceTime
     ) {
         if (hasReal || viewModel.billsLoaded) BalanceEstimator.estimate(viewModel.billList) else null
@@ -89,7 +96,12 @@ fun WalletScreen(viewModel: MainViewModel) {
                 .verticalScroll(rememberScrollState())
                 .padding(20.dp)
         ) {
-            Text("一卡通余额", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+            // 标题按**钱在哪**写：一卡通 → 「一卡通余额」，趣智校园钱包 → 「趣智校园余额」。
+            // （卡片内那行「账户余额 (元)」保持不动。）
+            Text(
+                BalanceEstimator.title(),
+                fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary
+            )
             Spacer(Modifier.height(16.dp))
 
             Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
@@ -113,7 +125,7 @@ fun WalletScreen(viewModel: MainViewModel) {
                                         // 预填**当前显示的余额**，不是上次填的那个初始值。
                                         // 预扣过几次之后再进来，填上次的旧数字会让人以为没生效，
                                         // 而且从这个数字改起本来也更顺手。
-                                        editValue = displayBalance?.let { "%.2f".format(it) }
+                                        editValue = displayBalance?.let { BalanceEstimator.formatMoney(it) }
                                             ?: PrefsHelper.manualBalance.ifEmpty { "0" }
                                         showEditDialog = true
                                     }
@@ -122,12 +134,17 @@ fun WalletScreen(viewModel: MainViewModel) {
                         }
                     }
                     Spacer(Modifier.height(4.dp))
-                    Text(displayBalance?.let { "¥ %.2f".format(it) } ?: "¥ —",
+                    Text(displayBalance?.let { "¥ ${BalanceEstimator.formatMoney(it)}" } ?: "¥ —",
                         fontSize = 36.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
                     Spacer(Modifier.height(8.dp))
+                    // 三个来源要分别说清是哪来的：都写成「校园卡」的话，
+                    // 显示趣智校园钱包余额的学校会对不上账。
                     Text(
-                        if (hasReal) "来自校园卡账户的实时余额"
-                        else "仅通过初始金额和账单进行估算，并非真实余额",
+                        when {
+                            viewModel.campusBalance != null -> "来自校园卡账户的实时余额"
+                            hasReal -> "来自趣智校园账户的实时余额"
+                            else -> "仅通过初始金额和账单进行估算，并非真实余额"
+                        },
                         color = AppColors.TextSecondary, fontSize = 11.sp
                     )
                 }
@@ -135,12 +152,13 @@ fun WalletScreen(viewModel: MainViewModel) {
 
             Spacer(Modifier.height(24.dp))
 
-            SpendingTrendCard(
-                bills = viewModel.billHistory,
-                loading = viewModel.isLoadingBills && !viewModel.billsLoaded
-            )
-
-            Spacer(Modifier.height(24.dp))
+            if (trendEnabled) {
+                SpendingTrendCard(
+                    bills = viewModel.billHistory,
+                    loading = viewModel.isLoadingBills && !viewModel.billsLoaded
+                )
+                Spacer(Modifier.height(24.dp))
+            }
 
             Text("账单", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Text("最近20次消费记录", fontSize = 12.sp, color = AppColors.TextSecondary)
@@ -189,9 +207,11 @@ fun WalletScreen(viewModel: MainViewModel) {
             title = { Text("手动填写余额", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
-                    Text("请输入一卡通当前余额", color = AppColors.TextSecondary, fontSize = 14.sp)
+                    // 这个弹窗只在拿不到任何真实余额时才出现，写「一卡通」会让人
+                    // 以为填的是校园卡——其实就是个本地基准值，说「账户」更准。
+                    Text("请输入账户当前余额", color = AppColors.TextSecondary, fontSize = 14.sp)
                     Spacer(Modifier.height(4.dp))
-                    Text("此操作仅用于本地估算，不会修改一卡通真实余额",
+                    Text("此操作仅用于本地估算，不会修改账户真实余额",
                         color = AppColors.TextSecondary, fontSize = 11.sp)
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(

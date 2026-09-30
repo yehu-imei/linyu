@@ -8,7 +8,14 @@ data class PendingSettlement(
     val orderNo: String,
     val startedAt: Long,
     val deviceName: String,
-    val createdAt: Long
+    val createdAt: Long,
+    /**
+     * 用水时长（秒），登记时就定下来。
+     *
+     * 事后对账补通知时已经拿不到准确的结束时刻了（服务早就收工、界面也退了），
+     * 所以得在这儿存一份，否则补发的通知只能写「消费 ¥x.xx」而写不出用时。
+     */
+    val elapsedSec: Int = 0
 )
 
 data class SettlementUpdate(

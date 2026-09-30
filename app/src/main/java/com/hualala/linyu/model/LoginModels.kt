@@ -90,7 +90,7 @@ data class BillDTO(
     val consumeMoney: String,
     val description: String,
     /**
-     * 下单时返回的 `orderNo`（20 位，如 `13202609172359167875`）——**这才是关阀用的那个**。
+     * 下单时返回的 `orderNo`（20 位，如 `13200000000000000002`）——**这才是关阀用的那个**。
      *
      * 以前没解析它，`settleAmount` 只能拿 `orderId` 去比 `orderNo`，永远匹配不上，
      * 于是结束通知永远显示「无消费」。字段可空：Gson 反序列化时缺字段就是 null。

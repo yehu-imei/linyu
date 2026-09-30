@@ -48,12 +48,30 @@ object NetworkModule {
         "telephone" to telephone,
         "telPhone" to telephone,
         "phoneSystem" to "android",
-        "version" to "6.5.24"
+        "version" to "6.5.28"
     )
+
+    /**
+     * 官方 v3 API 固定要求的配置请求头。
+     *
+     * 参考 Funnyass_school（能正常结算）的 `ApiClient.headers()`：每个请求都带
+     * `Config-Project`（= projectId）与 `Config-Keys`。我们此前完全没带，
+     * 蓝牙结算（upload）因此报 226「加密校验失败」。
+     */
+    private const val CONFIG_KEYS =
+        "module_list,advertise_type,question_list,service_phone_list," +
+            "banner_list_app,activity_list_app,aliCard_popup_config"
 
     private val authInterceptor = Interceptor { chain ->
         val originalRequest = chain.request()
         val originalUrl = originalRequest.url
+        val builder = originalRequest.newBuilder()
+
+        // 所有请求都补上官方配置头（对齐 v3 API）
+        if (projectId.isNotEmpty() && projectId != "0") {
+            builder.addHeader("Config-Project", projectId)
+            builder.addHeader("Config-Keys", CONFIG_KEYS)
+        }
 
         if (loginCode.isNotEmpty() && originalRequest.method == "GET" && !originalUrl.encodedPath.contains("verification")) {
             val urlBuilder = originalUrl.newBuilder()
@@ -68,12 +86,11 @@ object NetworkModule {
                 // 只看状态码完全看不出来，只能靠读 errorMessage。
                 .addQueryParameter("telPhone", telephone)
                 .addQueryParameter("phoneSystem", "android")
-                .addQueryParameter("version", "6.5.24")
-
-            chain.proceed(originalRequest.newBuilder().url(urlBuilder.build()).build())
-        } else {
-            chain.proceed(originalRequest)
+                .addQueryParameter("version", "6.5.28")
+            builder.url(urlBuilder.build())
         }
+
+        chain.proceed(builder.build())
     }
 
     /** 应用内日志拦截器：始终生效，把每个请求/响应写入 AppLogger（自动脱敏），供 App 内查看 */

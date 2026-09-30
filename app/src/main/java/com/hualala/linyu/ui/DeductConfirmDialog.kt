@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hualala.linyu.ui.theme.AppColors
+import com.hualala.linyu.utils.MoneyFormat
 
 /**
  * 代扣前的二次确认。
@@ -49,7 +50,7 @@ fun DeductConfirmDialog(
                 Text("将从校园卡中扣除：", color = AppColors.TextSecondary, fontSize = 13.sp)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    if (known) "¥ %.2f".format(amount) else "金额无法识别",
+                    if (known) MoneyFormat.withSymbol(amount) else "金额无法识别",
                     fontSize = 22.sp, fontWeight = FontWeight.Bold,
                     color = if (known) AppColors.Danger else AppColors.TextSecondary
                 )

@@ -3,6 +3,7 @@ package com.hualala.linyu.ui
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
@@ -23,8 +24,13 @@ import com.hualala.linyu.api.setUseCodeSafe
 import com.hualala.linyu.api.getWalletSafe
 import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.data.BleArbiter
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
+import com.hualala.linyu.ble.BleController
+import com.hualala.linyu.ble.BleConnectResult
+import com.hualala.linyu.ble.DeviceQueryState
+import com.hualala.linyu.data.BleShowerController
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
 import com.hualala.linyu.data.SettlementReconciler
@@ -55,6 +61,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import com.hualala.linyu.utils.MoneyFormat
+import com.hualala.linyu.data.DeviceInfoCache
+import com.hualala.linyu.data.SettlementEngine
 
 /**
  * 开阀失败的原因分类。
@@ -88,6 +97,74 @@ class MainViewModel : ViewModel() {
     var isShowering by mutableStateOf(false)
     var isStartingShower by mutableStateOf(false)
     var isStopping by mutableStateOf(false)
+
+    // ── 蓝牙水表（smallTypeId==1 / isBle）──
+    //
+    // 与 4G 表最大的不同：**连接必须跨「开阀 → 用水 → 关阀」整段存活**。
+    // 蓝牙表的阀是手机直连开的，中途断开连接就没法再关阀了，
+    // 所以这两个对象挂在 ViewModel 上，不能像普通请求那样用完即弃。
+
+    /** 当前蓝牙连接。没有进行中的蓝牙用水时为 null */
+    private var bleController: BleController? = null
+
+    /** 当前蓝牙用水会话。开阀成功后写入，结算完清空 */
+    private var bleSession: BleShowerController.Session? = null
+
+    /**
+     * 蓝牙流程的进度文案（null 表示没在进行）。
+     *
+     * 蓝牙开阀比 4G 表慢得多——要连设备、等状态帧、下费率、写费率包，
+     * 全程好几秒，不给反馈用户会以为卡死。
+     */
+    var bleProgress by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * 云端开阀返回 306 时暂存这里，等用户在确认框里决定要不要改用蓝牙。
+     *
+     * 非 null 即表示「弹框正在显示」。用户确认或取消后清空。
+     */
+    var bleRetryDevice by mutableStateOf<DeviceInfo?>(null)
+        private set
+
+    /**
+     * 用户在确认框里选了「用蓝牙重试」。
+     *
+     * 先记下这台设备（`markBleDevice`），再走蓝牙流程——
+     * **先记再看结果**：万一蓝牙连接超时（用户走远了），标记还是要保住的，
+     * 否则下次又要问一遍。真猜错了（连上但没有水控服务）会自动撤销。
+     */
+    fun confirmBleRetry() {
+        val device = bleRetryDevice ?: return
+        bleRetryDevice = null
+        PrefsHelper.markBleDevice(device.snCode)
+        isStartingShower = true
+        sessionScope().launch {
+            try {
+                showerError = null
+                showerSnCode = device.snCode
+                startBleShower(device, phone, device.snCode)
+            } catch (t: Throwable) {
+                AppLogger.e("蓝牙重试异常", t)
+                showerError = ShowerError("蓝牙开启失败，请重试", ShowerErrorKind.NETWORK)
+            } finally {
+                isStartingShower = false
+            }
+        }
+    }
+
+    /** 用户放弃蓝牙方式 */
+    fun dismissBleRetry() {
+        bleRetryDevice = null
+    }
+
+    /**
+     * 服务端「设备不在线」的业务错误码。
+     *
+     * ⚠️ 用它判断，**不要匹配文案**（之前就是匹配「不在线」三个字，太脆：
+     * 措辞会随学校和服务端版本变，而且我们只能覆盖到自己见过的说法）。
+     */
+    private val ERROR_DEVICE_OFFLINE = 306
     var showerRemaining by mutableStateOf("0.00")
     var showerConsumed by mutableStateOf(0.0)
     var showerPreDeduct by mutableStateOf(0.0)
@@ -113,7 +190,21 @@ class MainViewModel : ViewModel() {
 
     var selectedDevice by mutableStateOf<DeviceInfo?>(null)
     var showDeviceDetail by mutableStateOf(false)
-    var isOwner by mutableStateOf(true)
+
+    /**
+     * 设备归属（按 snCode 索引）。
+     *
+     * ⚠️ 原先是一个全局 `isOwner` 布尔，而 [refreshDeviceStatus] 是**异步**的——
+     * 快速切换设备时，A 的响应回来会盖到 B 上（「A 是别人的」串成 B 的状态，
+     * 详情弹窗的按钮就会错灰或错亮）。改成按 snCode 存：谁的结果写谁，互不干扰。
+     */
+    private val ownerBySn = mutableStateMapOf<String, Boolean>()
+
+    /** 该设备是否归自己（没查过时按「是自己的」处理，与原默认值一致） */
+    fun isOwnerFor(snCode: String): Boolean = ownerBySn[snCode] ?: true
+
+    /** 当前选中设备是否归自己（设备详情弹窗用） */
+    val isOwner: Boolean get() = selectedDevice?.snCode?.let { isOwnerFor(it) } ?: true
 
     // ── 多设备活跃订单 ──
     val activeOrders = mutableStateListOf<ActiveOrder>()
@@ -146,6 +237,8 @@ class MainViewModel : ViewModel() {
     private fun sessionScope() = CoroutineScope(viewModelScope.coroutineContext + sessionJob)
 
     init {
+        // 让小组件服务知道「App 还活着、可能握着 BLE 连接」（见 BleArbiter）
+        BleArbiter.appAlive = true
         // 用水结束由 ShowerWatchService 检测（它会清理本地状态并发通知），
         // 这里只负责界面收尾：同步内存状态 + 弹确认框。
         // App 不在前台时这个事件没人收，也没关系——服务那边已经处理完了。
@@ -159,6 +252,17 @@ class MainViewModel : ViewModel() {
             ShowerEvents.ordersRestored.collect {
                 syncActiveOrdersFromPrefs()
                 refreshWidgets()
+            }
+        }
+        // 通知栏「结束使用」按钮对蓝牙表：服务发来请求，App 若还持有 BLE 连接就关阀结算
+        viewModelScope.launch {
+            ShowerEvents.stopBleRequest.collect { snCode ->
+                AppLogger.i("收到服务请求停止蓝牙用水 $snCode")
+                if (bleSession?.snCode == snCode) {
+                    stopBleShower()
+                } else {
+                    toastMessage = "蓝牙连接已断开，请打开设备页重新连接后再关闭"
+                }
             }
         }
     }
@@ -209,6 +313,15 @@ class MainViewModel : ViewModel() {
      * 看着像数据丢了。先亮上次的值，拉到新的再覆盖。
      */
     var campusBalance by mutableStateOf(PrefsHelper.campusBalance.toDoubleOrNull())
+
+    /**
+     * 趣智校园钱包余额（`/account/wallet`）。
+     *
+     * 一卡通拿不到时的第二来源，见 [com.hualala.linyu.data.BalanceEstimator]。
+     * 界面判断「有没有真实余额」时必须把它算进去，否则没接一卡通的学校
+     * 会被误判成「只能估算」。
+     */
+    var walletBalance by mutableStateOf(PrefsHelper.walletBalance.toDoubleOrNull())
         private set
 
     /**
@@ -252,6 +365,7 @@ class MainViewModel : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        BleArbiter.appAlive = false
         stopTimer()
         sessionJob.cancel()
         mqttManager?.disconnect(); scanner?.stopScan()
@@ -272,14 +386,33 @@ class MainViewModel : ViewModel() {
         val e = System.currentTimeMillis() - scanStartTime
         if (e < 600) sessionScope().launch { delay(600 - e); isScanning = false }
         else isScanning = false
-        if (ok) cacheNearbyForWidget()
+        if (!ok) return
+
+        // ⚠️ 扫描**结束后**才按信号强度排一次序。
+        //
+        // 原先列表是纯插入顺序（谁先被扫到谁在前面）。寝室场景只有一两台设备时无所谓，
+        // 但**公共澡堂**完全不是这回事：一间屋十二个位置、几个屋子连在一起，
+        // 一次能扫到几十上百台，按扫描顺序排列等于让用户在一堆设备名里大海捞针，
+        // 根本找不到自己站的那个位置。
+        //
+        // 按 RSSI 降序后排在最前面的，就是离手机最近的那一台——澡堂里也就是
+        // 用户面前这个位置，通常正是他要开的那个。
+        //
+        // ⚠️ **必须是扫描结束后排，不能实时排**。扫描过程中 RSSI 一直在小幅波动，
+        // 实时重排会让列表不停跳动，用户正要点的时候被挪走，直接点错设备——
+        // 点错在澡堂里意味着替别人付了水费。结束后排一次既有正确的顺序，又不会跳。
+        val sorted = nearbyDevices.sortedByDescending { it.rssi }
+        nearbyDevices.clear()
+        nearbyDevices.addAll(sorted)
+
+        cacheNearbyForWidget()
     }
 
     // ── 扫码绑定 ──
     fun scanBind(snCode: String) {
         sessionScope().launch {
             try {
-                val resp = NetworkModule.apiService.getDeviceInfoSafe(snCode)
+                val resp = DeviceInfoCache.load(snCode)
                 if (resp.success && resp.data != null) {
                     val info = resp.data
                     // 保存为上次使用设备
@@ -322,7 +455,7 @@ class MainViewModel : ViewModel() {
         }
         sessionScope().launch {
             try {
-                val resp = NetworkModule.apiService.getDeviceInfoSafe(mac)
+                val resp = DeviceInfoCache.load(mac)
                 if (resp.success && resp.data != null) {
                     selectedDevice = resp.data; showDeviceDetail = true
                     refreshDeviceStatus(resp.data.snCode)
@@ -345,9 +478,11 @@ class MainViewModel : ViewModel() {
             val q = NetworkModule.apiService.queryUsingSafe(snCode = snCode, auth = NetworkModule.authFields())
             if (q.errorCode == 307 || (q.success && q.data?.orderNo != null)) {
                 activeDeviceSnCodes.add(snCode)
-                isOwner = q.data?.isOwner ?: true
+                // ⚠️ 按 snCode 记录归属（不能写全局变量：异步响应会串到别的设备上）
+                val owner = q.data?.isOwner ?: true
+                ownerBySn[snCode] = owner
                 // 只有自己的订单才加入 activeOrders
-                if (isOwner && activeOrders.none { it.snCode == snCode }) {
+                if (owner && activeOrders.none { it.snCode == snCode }) {
                     val orderNo = q.data?.orderNo ?: ""
                     val deviceInfo = nearbyDevices.find { it.deviceInfo?.snCode == snCode }?.deviceInfo
                     if (deviceInfo != null) {
@@ -357,10 +492,10 @@ class MainViewModel : ViewModel() {
                 }
                 // 设备上确实有订单，且**是自己的** → 之前那个「占用中」已经不成立了。
                 // （不是自己的就是真被占着，标记该留着，不用管。）
-                if (isOwner) clearOccupiedIfStale(snCode)
+                if (owner) clearOccupiedIfStale(snCode)
             } else {
                 // 服务端说这台上**没有订单**：不管之前记没记过「占用中」，现在都空了。
-                isOwner = true
+                ownerBySn[snCode] = true
                 clearOccupiedIfStale(snCode)
             }
         } catch (_: Exception) {}
@@ -390,7 +525,7 @@ class MainViewModel : ViewModel() {
         if (order != null) {
             sessionScope().launch {
                 try {
-                    val resp = NetworkModule.apiService.getDeviceInfoSafe(order.deviceMac)
+                    val resp = DeviceInfoCache.load(order.deviceMac)
                     if (resp.success && resp.data != null) {
                         selectedDevice = resp.data; startShower(phone)
                     } else {
@@ -405,7 +540,7 @@ class MainViewModel : ViewModel() {
         val mac = lastDeviceMac.ifEmpty { return }
         sessionScope().launch {
             try {
-                val resp = NetworkModule.apiService.getDeviceInfoSafe(mac)
+                val resp = DeviceInfoCache.load(mac)
                 if (resp.success && resp.data != null) {
                     selectedDevice = resp.data; startShower(phone)
                 } else {
@@ -428,6 +563,14 @@ class MainViewModel : ViewModel() {
             try {
                 showerError = null
                 showerSnCode = snCode
+
+                // ① 用户之前确认过这台需要蓝牙（或服务端明确标了 isBle）→ 直接走蓝牙，
+                //    不再白试一次云端、再吃一句 306
+                // ② 否则按普通设备走云端；万一回 306，会在下面弹框问用户要不要改用蓝牙
+                if (device.needsBluetoothControl || PrefsHelper.isBleDevice(snCode)) {
+                    startBleShower(device, phone, snCode)
+                    return@launch
+                }
 
                 // 「查询是否已有订单 → 开阀 → 轮询确认 → 落盘」这套流程在 ShowerController 里，
                 // 桌面小组件也走同一份逻辑；这里只负责 MQTT、界面状态与结果提示
@@ -460,6 +603,14 @@ class MainViewModel : ViewModel() {
                     }
 
                     is OpenOutcome.Failed -> {
+                        // 306「设备不在线」：**这台很可能就是蓝牙表**（云端到不了它）。
+                        // 弹框问用户要不要改用手机蓝牙——这是唯一可靠的判别方式：
+                        // 服务端不给字段、参考项目也不判断，只有用户站在设备旁才知道。
+                        if (outcome.errorCode == ERROR_DEVICE_OFFLINE &&
+                            device.macAddress.isNotBlank()
+                        ) {
+                            bleRetryDevice = device
+                        }
                         showerError = ShowerError(outcome.message, ShowerErrorKind.SERVER_REJECTED)
                         checkKick(outcome.kickHint)
                         mqttManager?.disconnect()
@@ -481,6 +632,128 @@ class MainViewModel : ViewModel() {
                 }
             } finally { isStartingShower = false }
         }
+    }
+
+    /**
+     * 蓝牙表开阀。
+     *
+     * 与 [startShower] 主体（4G 表）的区别：
+     *
+     * | | 4G 表 | 蓝牙表 |
+     * |---|---|---|
+     * | 连接 | 无需连接 | **必须先连上设备**，还要保持在范围内 |
+     * | 耗时 | 1~2 秒 | 数秒（连接 + 等状态帧 + 下费率 + 写费率包） |
+     * | MQTT | 用来收实时消费 | **用不上**（蓝牙表不走 MQTT） |
+     * | 自动关停 | 服务端下发时间 | 设备自己管 |
+     *
+     * ⚠️ 这里**不 disconnect**——连接要留给后面的关阀用。
+     * 蓝牙表的阀是手机开的，断开连接就再也关不上了。
+     */
+    private suspend fun startBleShower(device: DeviceInfo, phone: String, snCode: String) {
+        val ctx = appContext
+        if (ctx == null) {
+            showerError = ShowerError("应用上下文丢失，请重试", ShowerErrorKind.UNKNOWN_RESULT)
+            return
+        }
+
+        // 蓝牙通道互斥：小组件服务可能正在操作同一台设备，两边同时 connectGatt 会互抢连接
+        if (!BleArbiter.begin(snCode, "app")) {
+            showerError = ShowerError("该设备正在处理其他蓝牙操作，请稍候再试", ShowerErrorKind.UNKNOWN_RESULT)
+            return
+        }
+
+        val ble = bleController ?: BleController(ctx).also { bleController = it }
+
+        bleProgress = "正在连接设备…"
+        val result = try {
+            BleShowerController.openValve(
+                ble = ble,
+                device = device,
+                loginCode = PrefsHelper.loginCode,
+                telephone = phone
+            )
+        } catch (t: Throwable) {
+            AppLogger.e("蓝牙开阀异常", t)
+            null
+        } finally {
+            // 临界区（连设备 + 开阀）结束即释放，后面的状态处理不需要独占
+            BleArbiter.end(snCode)
+        }
+        bleProgress = null
+
+        when (result) {
+            is BleShowerController.OpenOutcome.Opened -> {
+                bleSession = result.session
+                // 会话落盘：小组件服务是另一个入口，关阀时要读它（App 退出也能关阀）
+                PrefsHelper.bleSessionJson = gson.toJson(result.session)
+                // ✅ 开阀成功 ⇒ 这台**确实**是蓝牙表，记下来，以后直接走蓝牙
+                PrefsHelper.markBleDevice(snCode)
+                AppLogger.i("蓝牙开阀成功，进入使用页")
+                // 蓝牙表没有服务端下发的自动关停时间，第四项传 0
+                enterShowerState(null, snCode, device, 0)
+            }
+
+            is BleShowerController.OpenOutcome.Resumed -> {
+                // 恢复用水：设备本来就在出水，不再写费率包、不再重新开阀。
+                // 沿用当前 BLE 连接（session）进入使用页，让用户能继续计时、也能关阀。
+                bleSession = result.session
+                PrefsHelper.bleSessionJson = gson.toJson(result.session)
+                AppLogger.i("蓝牙恢复用水，进入使用页")
+                enterShowerState(null, snCode, device, 0)
+            }
+
+            is BleShowerController.OpenOutcome.Recovered -> {
+                // 补结算完成：上一笔遗留账单已结清，但设备要等下次 rateOrder 才生成新
+                // randomNumber，立刻开阀会 226。用 toast 温和提示，让用户重新点开阀。
+                AppLogger.i("蓝牙补结算完成，提示重新开阀")
+                releaseBle()
+                toastMessage = result.message
+            }
+
+            is BleShowerController.OpenOutcome.NotBleDevice -> {
+                // 连上了但没有水控服务 ⇒ 用户当初猜错了。
+                // **自动撤销标记**，以后不再对这台设备尝试蓝牙——
+                // 否则用户每次开阀都要白等一次连接超时。
+                PrefsHelper.unmarkBleDevice(snCode)
+                showerError = ShowerError(
+                    "这台设备不支持蓝牙控制，已切回普通方式，请重试",
+                    ShowerErrorKind.BAD_DEVICE
+                )
+                releaseBle()
+            }
+
+            is BleShowerController.OpenOutcome.Failed -> {
+                // ⚠️ 这里**不撤销标记**：可能是走远了、设备忙、蓝牙没开，
+                // 但设备本身大概率确实是蓝牙表。撤销了反而要用户重新确认一遍。
+                showerError = ShowerError(result.message, ShowerErrorKind.SERVER_REJECTED)
+                releaseBle()
+            }
+
+            is BleShowerController.OpenOutcome.Unconfirmed -> {
+                showerError = ShowerError(result.message, ShowerErrorKind.UNKNOWN_RESULT)
+                // ⚠️ **故意不断开**：费率包可能已经写进设备、水正在流，
+                // 断开等于把唯一的关阀通道也扔掉了。留在使用页让用户能停。
+            }
+
+            null -> {
+                showerError = ShowerError("蓝牙开阀失败，请重试", ShowerErrorKind.NETWORK)
+                releaseBle()
+            }
+        }
+    }
+
+    /**
+     * 释放蓝牙连接。
+     *
+     * ⚠️ 只在**确定没有进行中的用水**时调用。蓝牙表断开后无法再关阀，
+     * 所以「开阀未确认」那种情况必须保留连接。
+     */
+    private fun releaseBle() {
+        bleController?.disconnect()
+        bleController = null
+        bleSession = null
+        // 会话已结束/失效，落盘那份也要清——否则小组件会拿一条过期会话去关阀
+        PrefsHelper.bleSessionJson = ""
     }
 
     /**
@@ -588,7 +861,7 @@ class MainViewModel : ViewModel() {
     private fun enterShowerState(orderNo: String?, snCode: String, device: DeviceInfo, autoDiscon: Int = 0) {
         currentOrderNo = orderNo; isShowering = true
         showerPreDeduct = device.withholdMoney; showerConsumed = 0.0
-        showerRemaining = "%.2f".format(device.withholdMoney)
+        showerRemaining = MoneyFormat.format(device.withholdMoney)
         activeDeviceSnCodes.add(snCode)
         // 开阀时间戳可能刚刚才写入（开阀成功时），这里读一次再刷新桌面，计时才对得上
         refreshWidgets()
@@ -657,7 +930,7 @@ class MainViewModel : ViewModel() {
             }
             msg.consumeMoney?.let {
                 showerConsumed = it
-                showerRemaining = "%.2f".format(if (showerPreDeduct - it < 0) 0.0 else showerPreDeduct - it)
+                showerRemaining = MoneyFormat.format(if (showerPreDeduct - it < 0) 0.0 else showerPreDeduct - it)
             }
         } catch (_: Exception) {}
     }
@@ -765,6 +1038,22 @@ class MainViewModel : ViewModel() {
     // ════════════════════════════════════════════
     fun stopShower(skipNetwork: Boolean = false) {
         if (!isShowering || isStopping) return
+
+        // 蓝牙表：关阀靠**当前这条 BLE 连接**，和云端下发完全不是一条路
+        if (bleSession != null) {
+            stopBleShower(skipNetwork)
+            return
+        }
+
+        // 会话丢了但设备标着蓝牙 → 进程曾被杀（崩溃/系统回收），
+        // 恢复出使用页但内存里的 session 没了。落到下面的云端关阀对
+        // 无 4G 的蓝牙表**必然失败**，必须重连设备再关。
+        val snForBle = showerSnCode ?: activeOrders.firstOrNull()?.snCode ?: ""
+        if (PrefsHelper.isBleDevice(snForBle)) {
+            reconnectAndStopBle(snForBle)
+            return
+        }
+
         val snCode = showerSnCode ?: ""
         val oNo = currentOrderNo ?: activeOrders.find { it.snCode == snCode }?.orderNo ?: ""
 
@@ -818,7 +1107,7 @@ class MainViewModel : ViewModel() {
                             "使用结束 · ${lastDeviceName.ifEmpty { "热水器" }}", elapsed0
                         )
                     }
-                    val amount = ShowerController.settleAmount(
+                    val amount = SettlementEngine.settleAmount(
                         settledNo,
                         startTime,
                         snCode,
@@ -827,7 +1116,7 @@ class MainViewModel : ViewModel() {
                     toastMessage = when {
                         // null = 两条路都没拿到金额，是「还不知道」而不是「没花钱」
                         amount == null -> "已停止，消费金额稍后可在账单中查看"
-                        amount > 0 -> "已停止，本次消费 ¥%.2f".format(amount)
+                        amount > 0 -> "已停止，本次消费 ${MoneyFormat.withSymbol(amount)}"
                         else -> "热水器已关闭，本次无消费"
                     }
                     // 结算拿到了新的「上次消费」，让桌面小组件跟上
@@ -855,6 +1144,169 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    /**
+     * 蓝牙表：关阀 + 结算。
+     *
+     * 流程：关阀(`0x22`) → 采集(`0x85`) → 上传 → 解密 `clData` → 写回(`0x86`)。
+     *
+     * ⚠️ 两个和 4G 表不一样的地方：
+     *
+     * 1. **关阀是本地 BLE 操作，不依赖登录态**——所以即使被挤号、
+     *    `loginCode` 已失效，也要尽力把阀关掉（只是结算会失败）。
+     * 2. **关阀失败时绝不能退出使用页**。这一页的按钮是用户唯一的停止入口，
+     *    退出去等于把他扔在「以为停了、其实水还在流」的状态里。
+     *
+     * @param skipNetwork 保留以对齐 [stopShower] 的调用方；蓝牙表关阀不走网络，
+     *   所以这里**不因它跳过流程**（结算失败会自然落到「部分结算」分支）
+     */
+    /**
+     * BLE 会话丢失后的补救关阀：重连设备 → 拿状态帧重建会话 → 走正常蓝牙关阀。
+     *
+     * 适用场景：开阀成功后进程被杀（崩溃 / 系统回收），App 重启恢复出使用页，
+     * 但内存里的 [bleSession] 已经没了。此时云端关阀必然失败（蓝牙表没有 4G，
+     * 服务端管不到阀），唯一的路是重新连上设备把阀关掉。
+     *
+     * 状态帧里的 `protocolType` / `randomNumber` 重连后设备会重新给，
+     * 所以会话可以完整重建；`consumeDate` 拿不回来了（只在失败上报时用，留空）。
+     */
+    private fun reconnectAndStopBle(snCode: String) {
+        val ctx = appContext
+        if (ctx == null) {
+            toastMessage = "应用上下文丢失，请重试"
+            isStopping = false
+            return
+        }
+        isStopping = true
+        appContext?.let { Notifier.showStopping(it, lastDeviceName.ifEmpty { "热水器" }) }
+        sessionScope().launch {
+            // MAC 优先取活跃订单里存的（就是开阀时用的那个），丢了再回落
+            val mac = (ShowerController.activeOrderFor(snCode)?.deviceMac ?: PrefsHelper.lastDeviceMac)
+                .replace(":", "")
+                .replace("-", "")
+                .uppercase()
+            if (mac.length != 12) {
+                AppLogger.w("蓝牙补救关阀中止：MAC 无效（$mac）")
+                toastMessage = "设备地址丢失，无法关闭，请重新进入设备页面后重试"
+                isStopping = false
+                return@launch
+            }
+
+            val ble = bleController ?: BleController(ctx).also { bleController = it }
+            bleProgress = "正在重新连接设备…"
+            val st: DeviceQueryState? = try {
+                when (val cr = ble.connect(mac)) {
+                    is BleConnectResult.Ready -> ble.query()
+                    is BleConnectResult.NoService -> null
+                    is BleConnectResult.Failed -> {
+                        AppLogger.w("蓝牙补救关阀连接失败：${cr.reason}")
+                        null
+                    }
+                }
+            } catch (t: Throwable) {
+                AppLogger.e("蓝牙补救关阀重连异常", t)
+                null
+            }
+            bleProgress = null
+            if (st == null) {
+                toastMessage = "蓝牙连接失败，请靠近设备后重试"
+                isStopping = false
+                return@launch
+            }
+
+            AppLogger.i("蓝牙会话已重建：protocol=${st.protocolType} random=${st.randomNumber}")
+            bleSession = BleShowerController.Session(
+                snCode = snCode,
+                mac = mac,
+                protocolType = st.protocolType,
+                randomNumber = st.randomNumber,
+                consumeDate = "",   // 进程死亡后拿不到了；只有失败上报用，先留空
+                orderNo = ShowerController.activeOrderFor(snCode)?.orderNo ?: ""
+            )
+            // 会话已就位，走正常蓝牙关阀 + 结算
+            stopBleShower()
+        }
+    }
+
+    private fun stopBleShower(@Suppress("UNUSED_PARAMETER") skipNetwork: Boolean = false) {
+        val session = bleSession ?: return
+        val ble = bleController
+        if (ble == null) {
+            // 连接已经没了，阀关不了——如实告诉用户，别假装成功
+            toastMessage = "蓝牙连接已断开，请重新连接该设备后再关闭"
+            isStopping = false
+            return
+        }
+
+        // 蓝牙通道互斥：小组件服务可能正在操作同一台设备，两边同时 connectGatt 会互抢连接
+        if (!BleArbiter.begin(session.snCode, "app")) {
+            toastMessage = "该设备正在处理其他蓝牙操作，请稍候再试"
+            isStopping = false
+            return
+        }
+
+        isStopping = true
+        appContext?.let { Notifier.showStopping(it, lastDeviceName.ifEmpty { "热水器" }) }
+
+        sessionScope().launch {
+            bleProgress = "正在关闭设备…"
+            val outcome = try {
+                BleShowerController.closeAndSettle(
+                    ble = ble,
+                    session = session,
+                    loginCode = PrefsHelper.loginCode,
+                    telephone = phone
+                )
+            } catch (t: Throwable) {
+                AppLogger.e("蓝牙停止异常", t)
+                null
+            } finally {
+                // 临界区（连设备 + 关阀 + 结算）结束即释放
+                BleArbiter.end(session.snCode)
+            }
+            bleProgress = null
+
+            when (outcome) {
+                is BleShowerController.SettleOutcome.Completed -> {
+                    // ⚠️ 金额单位**未实测确认**。按与 4G 表一致的「厘」处理（÷1000），
+                    // 并在日志里留原始值——第一次真机结算后要用账单列表核对一次。
+                    val yuan = MoneyFormat.milliToYuan(outcome.rawUpMoney)
+                    AppLogger.i("蓝牙结算金额：原始=${outcome.rawUpMoney} 按厘换算=¥$yuan")
+                    toastMessage = if (yuan != null && yuan > 0) {
+                        "已停止，本次消费 ${MoneyFormat.withSymbol(yuan)}"
+                    } else {
+                        "设备已关闭"
+                    }
+                    // ⚠️ 立即记一笔「上次消费」给桌面小组件。蓝牙路径原先漏了这一步，
+                    // 卡片只能等下次拉账单才对上，表现为「上次消费更新不及时」。
+                    if (yuan != null && yuan > 0) PrefsHelper.recordConsume(session.snCode, yuan)
+                    finishShower(session.snCode, yuan)
+                    refreshWidgets()
+                    releaseBle()
+                }
+
+                is BleShowerController.SettleOutcome.PartialSettlement -> {
+                    // 水**已经关了**，只是账没结完。要退出使用页（否则用户被卡住），
+                    // 但明确告诉他金额去哪儿看
+                    toastMessage = "设备已关闭；${outcome.message}，金额请稍后在账单中查看"
+                    finishShower(session.snCode, null)
+                    releaseBle()
+                }
+
+                is BleShowerController.SettleOutcome.CloseFailed -> {
+                    // ⚠️ 水可能还在流 —— 留在使用页，让他能重试
+                    toastMessage = outcome.message
+                    AppLogger.w("蓝牙关阀失败，保留使用页以便重试")
+                    isStopping = false
+                }
+
+                null -> {
+                    toastMessage = "停止失败，请重试"
+                    isStopping = false
+                }
+            }
+        }
+    }
+
     /** 完成停止流程：退出洗澡界面，清理状态，显示结算结果 */
     private fun finishShower(snCode: String, consumed: Double?) {
         isShowering = false
@@ -865,9 +1317,10 @@ class MainViewModel : ViewModel() {
         saveOrders()
         activeDeviceSnCodes.remove(snCode)
 
-        if (consumed != null) {
-            toastMessage = "已停止，本次消费 ¥%.2f".format(consumed)
+        if (consumed != null && consumed > 0) {
+            toastMessage = "已停止，本次消费 ${MoneyFormat.withSymbol(consumed)}"
         } else {
+            // 0.0 或 null（结算没拿到金额）都只提示关闭，不弹「消费 ¥0.00」
             toastMessage = "热水器已关闭"
         }
 
@@ -886,6 +1339,11 @@ class MainViewModel : ViewModel() {
         stopTimer()
         sessionJob.cancel()
         sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+
+        // 释放蓝牙连接。能走到这里说明**没有进行中的用水**——
+        // 有活跃订单时 `canLogoutVoluntarily` 会先拦住，所以断连是安全的。
+        // ⚠️ 蓝牙表断开后就再也关不了阀，这句话是这里唯一的安全保证，别绕过。
+        releaseBle()
 
         // 断开 MQTT 连接
         try { mqttManager?.disconnect() } catch (_: Exception) {}
@@ -919,6 +1377,7 @@ class MainViewModel : ViewModel() {
         // 账号信息是跟人走的，换账号必须清掉，否则会显示上一任的姓名/学号/余额
         accountInfo = null
         campusBalance = null
+        walletBalance = null
         phone = ""
         useCodeLoaded = false
         // 未支付账单和代扣锁是**跟账号走的**：不清的话，换账号后开阀失败弹窗会列出
@@ -928,6 +1387,22 @@ class MainViewModel : ViewModel() {
         unpaidBills = emptyList()
         deductingConsumeDate = null
         unpaidSeq++
+        // 内存态的「上次设备」也要跟着清。
+        //
+        // Prefs 那份由 `PrefsHelper.clear()` 负责——它的动态 filter 走
+        // `shouldPreserveForRecovery`，而那个函数覆盖了 `lastDevice*` 前缀，
+        // 所以正常登出时落盘的七个字段都会被 remove。**内存副本是另一份**，
+        // 不清的话，重新登录之后、`initManagers` 重新读 Prefs 覆盖回来之前
+        // 那段窗口里，界面读到的还是上一任的设备。
+        //
+        // ⚠️ 挤号（`preserveActiveRecovery = true`）时**绝不能清**：那时正是要靠
+        // 这些字段保住正在用水的设备上下文，清了用户就找不到停止入口了。
+        if (!preserveActiveRecovery) {
+            lastDeviceName = ""
+            lastDeviceMac = ""
+            lastDeviceSnCode = ""
+            lastDeviceEmoji = "🚿"
+        }
         PrefsHelper.clear(preserveActiveRecovery)
         if (preserveActiveRecovery) appContext?.let(ShowerWatchService::stop)
     }
@@ -1031,7 +1506,15 @@ class MainViewModel : ViewModel() {
                 if (kickedOut) break
                 try {
                     val resp = NetworkModule.apiService.getWalletSafe()
-                    if (!resp.success) checkKick(resp.displayMessage)
+                    if (resp.success) {
+                        // 顺手把钱包余额刷新了。这条心跳本来就在跑，
+                        // 不额外增加请求量，却让余额每 25 秒自己跟上——
+                        // 洗完澡余额会变，不用等用户手动下拉刷新。
+                        resp.data?.money?.toDoubleOrNull()?.let {
+                            walletBalance = it
+                            PrefsHelper.walletBalance = it.toString()
+                        }
+                    } else checkKick(resp.displayMessage)
                 } catch (e: Exception) {
                     // 网络异常不算挤号，checkKickEx 只认 401/403
                     checkKickEx(e)
@@ -1111,8 +1594,20 @@ class MainViewModel : ViewModel() {
         sessionScope().launch {
             try { 
                 val resp = NetworkModule.apiService.getWalletSafe()
-                if (resp.success) walletInfo = resp.data else checkKick(resp.displayMessage) 
-            } catch (e: Exception) { 
+                if (resp.success) {
+                    walletInfo = resp.data
+                    // 钱包余额落盘：一卡通拿不到时它就是真实余额
+                    // （见 BalanceEstimator 的三档优先级）。
+                    // ⚠️ 用 `money` 字符串字段而不是 `accountRealMoney` 数字：
+                    //    `money` / `accountRealMoneyStr` 已经是**元**（如 "55.460"），
+                    //    而 `accountRealMoney` 是厘（55460），单位得自己除 1000——
+                    //    服务端万一换单位就会静默错 1000 倍，字符串字段没这个风险。
+                    resp.data?.money?.toDoubleOrNull()?.let {
+                        walletBalance = it
+                        PrefsHelper.walletBalance = it.toString()
+                    }
+                } else checkKick(resp.displayMessage)
+            } catch (e: Exception) {
                 checkKickEx(e)
                 val msg = e.message ?: ""
                 if (msg.contains("Unable to resolve host", ignoreCase = true) ||
@@ -1463,6 +1958,15 @@ class MainViewModel : ViewModel() {
     companion object {
         /** 被另一个代扣挡住时给用户的说法 */
         const val BUSY_MESSAGE = "正在处理另一笔代扣，请稍候"
+
+        /**
+         * 事后对账补发通知的时间窗。
+         *
+         * 结算当时可能因为服务端还没算完而误判成「无消费」，账单下来后对账能拿到
+         * 真金额。但那可能是几小时之后——那时用户早就不在等这条通知了，
+         * 凭空弹一条「消费 ¥x.xx」只会吓人一跳。所以只补最近 30 分钟内的。
+         */
+        private const val SETTLEMENT_NOTIFY_GRACE_MS = 30 * 60 * 1000L
     }
 
     /** 关掉开阀失败弹窗 */
@@ -1549,7 +2053,7 @@ class MainViewModel : ViewModel() {
     private fun fetchInfo(mac: String) {
         sessionScope().launch {
             try {
-                val resp = NetworkModule.apiService.getDeviceInfoSafe(mac)
+                val resp = DeviceInfoCache.load(mac)
                 if (resp.success && resp.data != null) {
                     val info = resp.data; val i = nearbyDevices.indexOfFirst { it.mac == mac }
                     if (i >= 0) nearbyDevices[i] = nearbyDevices[i].copy(deviceInfo = info)
@@ -1597,12 +2101,32 @@ class MainViewModel : ViewModel() {
                 billList = all.take(20)
                 billsLoaded = true
                 if (allRequestsSucceeded) PrefsHelper.saveCachedBills(cacheKey, all)
-                val reconciliation = SettlementReconciler.reconcile(
-                    PrefsHelper.getPendingSettlements(),
-                    all
-                )
+                val pendingBefore = PrefsHelper.getPendingSettlements()
+                val reconciliation = SettlementReconciler.reconcile(pendingBefore, all)
+                val pendingBySn = pendingBefore.associateBy { it.snCode }
                 reconciliation.updates.forEach { update ->
                     PrefsHelper.recordConsume(update.snCode, update.amount)
+
+                    // 结算那会儿要是误判成了「无消费」，这条通知现在还挂着错误金额——
+                    // 拿到了真金额就得把它改成对的，否则用户看到的一直是错的。
+                    //
+                    // ⚠️ 只补最近 [SETTLEMENT_NOTIFY_GRACE_MS] 内的。超过这个时间
+                    // 用户早就不在等这条通知了，凭空弹一条「消费 ¥x.xx」只会吓人一跳。
+                    val p = pendingBySn[update.snCode] ?: return@forEach
+                    val ageMs = System.currentTimeMillis() - p.createdAt
+                    if (ageMs <= SETTLEMENT_NOTIFY_GRACE_MS) {
+                        appContext?.let { ctx ->
+                            Notifier.showFinished(
+                                ctx,
+                                p.deviceName.ifEmpty { "热水器" },
+                                p.elapsedSec,
+                                update.amount
+                            )
+                        }
+                        AppLogger.i(
+                            "结算对账补发通知：${p.snCode} ¥${update.amount}（延迟 ${ageMs / 1000}s）"
+                        )
+                    }
                 }
                 PrefsHelper.savePendingSettlements(reconciliation.remaining)
                 // 顺手把最近一笔消费记给桌面小组件。账单按月倒序拉取，第一条就是最新的。

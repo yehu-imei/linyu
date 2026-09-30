@@ -37,6 +37,8 @@ import com.hualala.linyu.utils.BackgroundState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.LaunchedEffect
+import com.hualala.linyu.utils.PrefsHelper
 
 /**
  * 自定义背景设置页（全屏）。
@@ -52,7 +54,11 @@ fun CustomBackgroundScreen(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var bgScope by remember { mutableStateOf(BackgroundManager.SCOPE_HOME) }
+    // 记住上次在看哪个范围（home / shower），退出重进不再复位到「主页」
+    var bgScope by remember {
+        mutableStateOf(PrefsHelper.backgroundScope.ifEmpty { BackgroundManager.SCOPE_HOME })
+    }
+    LaunchedEffect(bgScope) { PrefsHelper.backgroundScope = bgScope }
     val cfg = BackgroundState.config(bgScope)
 
     var preview by remember(bgScope, BackgroundState.imageVersion) {

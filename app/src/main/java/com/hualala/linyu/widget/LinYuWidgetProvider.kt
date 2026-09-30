@@ -15,6 +15,7 @@ import com.hualala.linyu.data.PickResult
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.service.ShowerWatchService
+import com.hualala.linyu.service.WidgetBleService
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
@@ -219,6 +220,15 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
 
         when (action) {
             ACTION_START -> {
+            // 蓝牙表：RemoteViews 自己开不了 BLE，转交 WidgetBleService
+            // （它走的是与 App 内完全相同的 BleShowerController 流程）
+            if (PrefsHelper.isBleDevice(snCode)) {
+                AppLogger.i("Widget 检测到蓝牙表，转交 WidgetBleService 开阀 $snCode")
+                WidgetBridge.markBusy(WidgetRenderer.DisabledReason.STARTING)
+                WidgetBridge.renderAll(context)
+                WidgetBleService.open(context, snCode, PrefsHelper.lastDeviceMac)
+                return
+            }
             // ⚠️ `openValve` 的**第一步**就是网络请求（`queryUsing`），而它自己没有
             // try/catch——断网时异常会一路冒到 `onReceive` 的 catch 里，
             // 那里只落一条日志、然后 `finishAction` 把 busy 清掉重绘。
@@ -329,7 +339,12 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                 // 广播是立刻返回的，清了 busy 卡片会先弹回「使用中」再变空闲，
                 // 中间闪一下很难看。busy 交给服务完成后自己清。
                 WidgetBridge.markDelegated()
-                ShowerWatchService.finishShower(context, snCode)
+                if (PrefsHelper.isBleDevice(snCode)) {
+                    // 蓝牙表：走 BLE 关阀 + 结算（用持久化会话，不依赖 App 进程）
+                    WidgetBleService.close(context, snCode)
+                } else {
+                    ShowerWatchService.finishShower(context, snCode)
+                }
             }
 
             // 「状态未知」状态下用户点按钮：按一次服务端真实状态，把本地对齐

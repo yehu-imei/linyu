@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.ui.theme.AppColors
+import com.hualala.linyu.utils.MoneyFormat
 
 @Composable
 fun DeviceDetailDialog(
@@ -31,6 +32,10 @@ fun DeviceDetailDialog(
     }
     val location = device.displayName
     val startText = if (device.isDrinkingWater) "开始接水" else "开始使用"
+    // 蓝牙表：App 内**已支持**，走 BleShowerController。
+    // 只是要多提醒一句「手机是网关、别走远」——这是这类设备固有的限制，
+    // 用户不知道的话很容易开了水然后就关不上了。
+    val isBle = device.needsBluetoothControl
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -54,13 +59,27 @@ fun DeviceDetailDialog(
                 DetailRow("类型", device.typeName)
                 DetailRow("SN 码", device.snCode)
                 DetailRow("MAC 地址", device.macAddress)
-                DetailRow("预扣金额", "¥ ${device.withholdMoney}")
+                DetailRow("预扣金额", MoneyFormat.withSymbol(device.withholdMoney))
                 DetailRow("状态", if (isActive) "使用中" else "空闲")
+                if (isBle) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "此设备通过手机蓝牙直连控制：开启后请留在设备旁，" +
+                            "走远会断开连接、无法关闭。",
+                        fontSize = 13.sp,
+                        color = AppColors.TextSecondary,
+                        lineHeight = 18.sp
+                    )
+                }
             }
         },
         confirmButton = {
             val canUse = !isActive || isOwner
-            val txt = if (isActive && !isOwner) "他人使用中" else if (isActive) "恢复使用" else startText
+            val txt = when {
+                isActive && !isOwner -> "他人使用中"
+                isActive -> "恢复使用"
+                else -> startText
+            }
             Button(onClick = { if (canUse) { onConfirm(); onDismiss() } },
                 enabled = canUse,
                 colors = ButtonDefaults.buttonColors(

@@ -69,7 +69,8 @@ object AuthRepository {
                 NetworkModule.updateAuth(data.loginCode, data.userId.toString(),
                     data.userAccount.accountId.toString(), data.userAccount.projectId.toString(), phone)
                 PrefsHelper.saveAuth(data.loginCode, data.userId.toString(),
-                    data.userAccount.accountId.toString(), data.userAccount.projectId.toString(), phone, data.userAccount.name)
+                    data.userAccount.accountId.toString(), data.userAccount.projectId.toString(), phone,
+                    data.userAccount.name)
                 Result.success(data)
             } else {
                 Result.failure(Exception(response.displayMessage ?: "登录失败"))

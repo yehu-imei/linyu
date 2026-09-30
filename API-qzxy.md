@@ -281,9 +281,9 @@ xfModel=0&snCode=QZXY20230001&loginCode=xxx&userId=xxx&...
 >
 > ```json
 > {"success":true,"errorCode":0,"errorMessage":"成功","data":{
->   "deviceSnCode":"C47F0EDCBCC7",
+>   "deviceSnCode":"AABBCCDDEEFF",
 >   "consumeDate":"20260918150627",
->   "orderNo":"13202609181506275230",
+>   "orderNo":"13200000000000000000",
 >   "preDeductMoney":0,"accountType":2,"consumeSceneType":4,
 >   "state":1,"result":0,"createTime":"1789715217", ...}}
 > ```
@@ -310,10 +310,10 @@ snCode=QZXY20230001&loginCode=xxx&userId=xxx&...
   "errorMessage": "成功",
   "data": {
     "projectId": null,
-    "accountId": 41681,
-    "deviceSnCode": "C47F0EDCBCC7",
+    "accountId": 10001,
+    "deviceSnCode": "AABBCCDDEEFF",
     "consumeDate": "20260918150655",
-    "orderNo": "13202609181506558872",
+    "orderNo": "13200000000000000001",
     "preDeductMoney": 0,
     "accountType": 2,
     "consumeSceneType": 4,
@@ -373,7 +373,7 @@ snCode=QZXY20230001&orderNo=1234567&loginCode=xxx&userId=xxx&...
 POST /order/tcpDevice/closeOrder/result/query
 Content-Type: application/x-www-form-urlencoded
 
-snCode=QZXY20230001&orderNo=13202609181506558872&loginCode=xxx&...
+snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&...
 ```
 
 **响应（实测，每次都是这样）**：
@@ -624,7 +624,7 @@ GET /user/verification/code/get?telephone={手机号}&typeId=3&platform=1&secret
 secret = MD5( 手机号前3位 + 手机号后4位 + "klcx" )      // 32 位小写十六进制
 ```
 
-以 `18582613960` 为例：
+以 `13800000000` 为例：
 
 ```
 MD5("185" + "3960" + "klcx")
@@ -683,12 +683,12 @@ GET /account/info
   "success": true,
   "data": {
     "projectId": 905,
-    "accountId": 41681,
-    "userId": 18981460,
-    "telephone": "19182692082",
-    "name": "郑豪",
+    "accountId": 10001,
+    "userId": 10000001,
+    "telephone": "13800000001",
+    "name": "张三",
     "genderName": "未知",
-    "idCardNumber": "202410101080040",
+    "idCardNumber": "202400000000000",
     "isCard": 0,
     "cardStatus": -1,
     "cardStatusName": "未绑定"
@@ -712,8 +712,8 @@ GET /settlement/campus/userInfo?projectId=905&telPhone={手机号}&userId=xxx&ac
 {
   "success": true,
   "data": {
-    "studentNumber": "202410101080040",
-    "studentName": "郑豪",
+    "studentNumber": "202400000000000",
+    "studentName": "张三",
     "amount": "16.76",
     "signStatus": 1
   }
@@ -759,7 +759,7 @@ GET /project/info/triple
 ```
 
 ```json
-{"success": true, "data": {"projectId": 905, "projectName": "金华职业技术大学", ...}}
+{"success": true, "data": {"projectId": 905, "projectName": "某职业技术大学", ...}}
 ```
 
 `projectName` 就是学校名，`projectDescription` 是学院名。
@@ -786,7 +786,7 @@ GET /user/verification/code/get?typeId=5&telephone={新号}&secret={secret}&...
 POST /user/phone/update
 Content-Type: application/x-www-form-urlencoded
 
-newTelephone=19182692082&code=396948&loginCode=xxx&telephone={旧号}&telPhone={旧号}&...
+newTelephone=13800000001&code=396948&loginCode=xxx&telephone={旧号}&telPhone={旧号}&...
 ```
 
 > ⚠️ 验证码发到**新**号，旧号只出现在认证参数（`telephone` / `telPhone`）里。
@@ -829,7 +829,7 @@ password=0AB7065F1C&code=198871&loginCode=xxx&...
 POST /order/consumeOrder/result/query
 Content-Type: application/x-www-form-urlencoded
 
-snCode=QZXY20230001&orderNo=13202609181506558872&loginCode=xxx&userId=xxx&...
+snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&userId=xxx&...
 ```
 
 **响应**：
@@ -845,9 +845,9 @@ snCode=QZXY20230001&orderNo=13202609181506558872&loginCode=xxx&userId=xxx&...
     "consumeMoney": 0,
     "preDeductMoney": 0,
     "preDeductMoneyAfter": 0,
-    "orderNo": "13202609181506275230",
-    "deviceSnCode": "C47F0EDCBCC7",
-    "orderAccountId": 41681,
+    "orderNo": "13200000000000000000",
+    "deviceSnCode": "AABBCCDDEEFF",
+    "orderAccountId": 10001,
     "createTime": "1789715194",
     "modeName": null,
     "liquidModeName": null,

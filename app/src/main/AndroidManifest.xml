@@ -146,6 +146,17 @@
                 android:value="用水期间监控订单状态，以便设备超时自动关停或被外部关闭时及时清理界面状态并提醒用户" />
         </service>
 
+        <!-- 小组件的蓝牙表开/关阀：RemoteViews 自身做不了 BLE，交给这个前台服务 -->
+        <service
+            android:name=".service.WidgetBleService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="在桌面小组件上直接开/关蓝牙水表：连接设备并下发费率或关阀指令，完成后同步状态" />
+        </service>
+
         <!-- 日志导出用 FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"

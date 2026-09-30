@@ -11,17 +11,91 @@ data class DeviceInfo(
     val onlineStatusId: Int,
     // 服务器返回的设备大类（饮水机 = 5），用于精确识别；缺失时回退到名称判断
     val bigTypeId: Int? = null,
-    val bigTypeName: String? = null
+    val bigTypeName: String? = null,
+    /**
+     * 服务端的小类 id。`=1`（名称通常是「热水表」）那类是**只能靠手机蓝牙直连**
+     * 控制的水表，本项目未实现该通道。见 [needsBluetoothControl]。
+     */
+    val smallTypeId: Int? = null,
+    val smallTypeName: String? = null,
+    /**
+     * **服务端直接标记的蓝牙设备**——判断蓝牙表最可靠的字段。
+     *
+     * 比 [smallTypeId] 靠谱：那是我们自己从样本里归纳的规律（样本仅 2 校），
+     * 而这个字段是服务端的明确标记。
+     *
+     * ⚠️ 可空：旧接口或某些学校可能不返回它。**取不到时不能当成 false**
+     * （会漏判），所以 [needsBluetoothControl] 里是和 [smallTypeId] 取「或」。
+     */
+    val isBle: Boolean? = null,
+    /** 通信类型 id（服务端字段 `communicationTypeId`），暂未使用，留作诊断 */
+    val communicationTypeId: Int? = null,
+    /** 真实 MAC。部分设备 `macAddress` 是虚拟的，优先用这个 */
+    val realMac: String? = null
 ) {
+    /**
+     * 是否属于「只能靠手机蓝牙直连控制」的水表。
+     *
+     * ## ⚠️ 这里踩过一个**严重**的坑，别退回老写法
+     *
+     * 最初写成 `isBle == true || smallTypeId == 1`，结果**把整个学校的 4G 表都误判了**：
+     * `smallTypeId == 1` 的含义是「热水表」这个**通用类型名**，不是蓝牙特征——
+     * 实测某校（projectId=905）的 162 条设备记录**全是 `smallTypeId == 1`**，
+     * 而它们是能正常云端开阀的 4G 表。判错之后所有设备都走蓝牙通道、全部开阀失败。
+     *
+     * ## 现在只用 `isBle`
+     *
+     * ⚠️ 但要注意：**服务端目前并不下发这个字段**（实测某校的日志里 `isBle` 出现 0 次），
+     * 所以这个判据在当前数据下**恒为 false**——也就是蓝牙表暂时识别不出来，
+     * 会退回「走云端通道 → 服务端回 306」的原有表现。
+     *
+     * **这是刻意的保守取舍**：
+     * - 漏判的代价 = 回到改之前的样子（提示「设备不在线」），用户只是少一个功能
+     * - 误判的代价 = **全校设备都开不了**（已经真实发生过一次）
+     *
+     * 两者完全不对称，所以宁可漏判。
+     *
+     * ## 要让蓝牙表真正可识别，需要
+     *
+     * 找到服务端**确实会返回**的区分依据（比如某些学校的 `communicationTypeId`
+     * 或设备名规则），并且**先在多个学校验证过再启用**。
+     * 在那之前，蓝牙表的入口应当由用户手动指定，而不是靠猜。
+     */
+    val needsBluetoothControl: Boolean get() = isBle == true
+
     val displayName: String get() = formatDeviceName(deviceName)
     val locationOnly: String get() = displayName
 
-    /** 是否直饮水机：bigTypeId == 5，或设备名含相关关键词 */
+    /**
+     * 是否直饮水机。
+     *
+     * ⚠️ **判据必须「正向」——只有明确指向饮水机的证据才算**，
+     * 不能靠"排除掉已知的淋浴前缀，剩下的就是饮水机"。
+     *
+     * 这里踩过一个坑：原先最后一个条件是
+     * `contains("热水") && !startsWith("热水器") && !startsWith("热水表")`，
+     * 即**枚举两种淋浴前缀，把其余所有「热水X」都当饮水机**。
+     *
+     * 某林业大学的表叫「**热水变**--1栋宿舍-11层-1001」——
+     * 既不以「热水器」也不以「热水表」开头，于是被这条规则捞成饮水机：
+     * 界面显示绿色 ♨️「饮水机 · 热水」「正在接热水」，而它明明是淋浴用的热水表。
+     *
+     * 根本问题在于**淋浴设备的名字天然就含「热水」**（热水表 / 热水器 / 热水变 /
+     * 热水机 / 热水源…），用「含热水且不是某某」来判饮水机，
+     * 等于**每遇到一种新命名就要补一次白名单**——这是打地鼠，不是判据。
+     * 所以这里改成：只要没有饮水机**独有**的特征词，就不算饮水机。
+     */
     val isDrinkingWater: Boolean get() =
-        bigTypeId == 5 ||
+        // ① 服务端的大类字段是权威判据，优先信它
+        bigTypeId == 5 || bigTypeName?.contains("饮") == true ||
+            // ② 名称兜底：必须是饮水机独有的词。
+            //    「饮水」「直饮」不会出现在淋浴设备上；
+            //    「开水机 / 开水器」也是饮水机专用叫法。
             deviceName.contains("饮水") || deviceName.contains("直饮") ||
-            deviceName.contains("冷水") ||
-            (deviceName.contains("热水") && !deviceName.startsWith("热水器") && !deviceName.startsWith("热水表"))
+            deviceName.contains("开水机") || deviceName.contains("开水器") ||
+            // ③ 「冷水」保留：淋浴设备不会叫这个名字
+            //    （「直饮冷水」已被 ② 的「直饮」覆盖，这里是给只叫「冷水-xxx」的学校兜底）
+            deviceName.contains("冷水")
 
     /** 饮水机是否出热水（否则为冷水） */
     val isHotWater: Boolean get() =
@@ -65,9 +139,13 @@ data class DeviceInfo(
     companion object {
         fun formatDeviceName(name: String): String {
             val formatted = name
-                // 1. 必须先处理「热水器 / 热水表」——否则下面按"热水"开头的规则会先吃掉"热水"，
-                //    导致「热水表-xxx」被处理成「表 xxx」
-                .replace(Regex("^热水[器表][- ]*"), "")
+                // 1. 必须先处理「热水器 / 热水表 / 热水变」——否则下面按"热水"开头的规则
+                //    会先吃掉"热水"，导致「热水表-xxx」被处理成「表 xxx」。
+                //    「热水变」是某林业大学的命名（`热水变--1栋宿舍-11层-1001`），
+                //    漏了它的话显示名会残留「热水变  1栋宿舍 1001」。
+                //    ⚠️ 若将来又出现新的「热水X」命名，在这里补的同时**务必确认
+                //    [isDrinkingWater] 不会把它误判成饮水机**——那边是正向判据，已经不会了。
+                .replace(Regex("^热水[器表变][- ]*"), "")
                 // 2. 饮水机前缀（直饮冷水 / 直饮热水 等）
                 .replace(Regex("^直饮[- ]*(开水|冷水|热水|温水)[- ]*"), "")
                 .replace(Regex("^(开水|冷水|温水)[- ]*"), "")
@@ -83,9 +161,15 @@ data class DeviceInfo(
             return formatted.ifEmpty { name }
         }
 
-        /** 开头的设备类型：`热水表-` / `洗手台54-` / `直饮冷水-` … */
+        /**
+         * 开头的设备类型：`热水表-` / `热水变-` / `洗手台54-` / `直饮冷水-` …
+         *
+         * ⚠️ 这个正则必须和 [formatDeviceName] 的第 1 条保持一致。
+         * 少剥一种前缀，那台设备的 [roomKey] 就会和同寝室另一台设备对不上，
+         * 表现为**绑定寝室后那台设备被筛掉、列表里看不到**。
+         */
         private val ROOM_PREFIX = Regex(
-            "^(热水[器表]|洗手台\\d*|直饮(?:开水|冷水|热水|温水)|开水机?|冷水|温水|平衡|直饮水?机?)[- ]*"
+            "^(热水[器表变]|洗手台\\d*|直饮(?:开水|冷水|热水|温水)|开水机?|冷水|温水|平衡|直饮水?机?)[- ]*"
         )
 
         /** 结尾的设备类型：`…-320洗手台` / `…-320热水表` */

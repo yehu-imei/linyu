@@ -8,7 +8,7 @@
 |---|---|
 | 应用名称 | 淋浴 |
 | 包名 | `com.hualala.linyu` |
-| 版本 | v3.0.4 |
+| 版本 | v3.1.0 |
 | 技术栈 | Kotlin + Jetpack Compose + Material 3 |
 | 最低 Android 版本 | Android 8.0 (API 26) |
 | 目标 Android 版本 | Android 16 (API 36) |
@@ -28,6 +28,8 @@
 | 密码登录/登出 | 手机号 + 密码登录，MD5 加密，loginCode 加密持久化，挤号检测 |
 | 短信验证码登录 | v2.1.0 通用化：`secret = MD5(前3位+后4位+"klcx")` 由手机号推导，任何手机号可用 |
 | 蓝牙扫描设备 | BLE 低功耗蓝牙扫描附近设备，按信号强度显示（强/中/弱） |
+| 蓝牙水表直连 | v3.1.0：部分学校的表不联网，手机通过 BLE 直连设备开阀 / 关阀 / 结算（下发费率、采集消费、上传结算） |
+| 蓝牙水表体验 | 关阀即结清、遗留订单自动补结算、App 被杀重开能恢复用水；通知栏「结束使用」与桌面小组件都能走蓝牙关阀（App 被杀也能关） |
 | 扫码绑定设备 | 扫描设备二维码，直接弹出设备详情（无需蓝牙） |
 | 绑定寝室 | 在「选择附近」里选一间寝室（**没有手工输入**）。寝室键从设备名「掐头去尾」得到，同一间寝室的热水器和洗手台收敛成同一条。首页**和桌面小组件**三处都按它筛 |
 | 开始洗澡 | 调用 downRate API 开启设备，并轮询确认开阀成功 |
@@ -112,7 +114,17 @@ app/src/main/
 │   │   ├── AuthRepository.kt              # 登录认证逻辑（密码 / 短信）
 │   │   ├── ShowerController.kt            # 开阀 / 关阀 / 结算共享层（App 与小组件共用）
 │   │   ├── ShowerEvents.kt                # 服务 → 界面的进程内事件（无 replay，App 不在就丢）
-│   │   └── BalanceEstimator.kt            # 余额口径（真实值优先，拿不到才本地估算，三处共用）
+│   │   ├── BalanceEstimator.kt            # 余额口径（真实值优先，拿不到才本地估算，三处共用）
+│   │   ├── SettlementEngine.kt            # 结算查询引擎（结算结果回退、订单补写、金额换算）
+│   │   ├── BleShowerController.kt         # 蓝牙表开阀 / 关阀 / 结算（BLE 直连设备）
+│   │   ├── BleArbiter.kt                  # App 与小组件蓝牙操作互斥
+│   │   ├── DeviceInfoCache.kt             # 设备信息缓存（60 秒 TTL + LRU）
+│   │   ├── ActiveOrderRepository.kt       # 活跃订单读写（锁 + 原子化，消除并发丢失）
+│   │   └── BleSignBuilder.kt              # 蓝牙指令签名构建
+│   │
+│   ├── ble/                               # BLE 直连控制
+│   │   ├── BleController.kt               # BLE 连接 / 写指令 / 读响应
+│   │   └── BleFrame.kt                    # 蓝牙帧解析
 │   │
 │   ├── model/                             # 数据模型
 │   │   ├── LoginModels.kt                 # BaseResponse<T>、LoginData、UserAccount、
@@ -123,10 +135,12 @@ app/src/main/
 │   │   │                                  # 设备名格式化、类型 emoji / 颜色）
 │   │   ├── WidgetCache.kt                 # 小组件离线快照（附近设备 / 账单）
 │   │   ├── ActiveOrder.kt                 # 活跃订单模型
-│   │   └── MqttModels.kt                  # MQTT 消息模型
+│   │   ├── MqttModels.kt                  # MQTT 消息模型
+│   │   └── BleModels.kt                   # 蓝牙数据模型（指令 / 响应 / 会话）
 │   │
 │   ├── service/                           # 前台服务
-│   │   └── ShowerWatchService.kt           # 用水监控（超时自动关停 / 订单轮询，脱离界面）
+│   │   ├── ShowerWatchService.kt           # 用水监控（超时自动关停 / 订单轮询，脱离界面）
+│   │   └── WidgetBleService.kt             # 小组件蓝牙关阀（App 被杀也能关）
 │   │
 │   ├── ui/                                # UI 层
 │   │   ├── LoginScreen.kt                 # 登录页面（密码 / 短信双模式）
@@ -137,6 +151,8 @@ app/src/main/
 │   │   ├── ShowerScreen.kt                # 洗澡中界面（计时器、自动关停倒计时）
 │   │   ├── WalletScreen.kt                # 钱包页面（真实余额、账单列表、请求代扣、下拉刷新）
 │   │   ├── UserScreen.kt                  # 我的页面（可排序卡片 + 进程级缓存）
+│   │   ├── UseCodeSection.kt              # 使用码卡片 + 兑换弹窗
+│   │   ├── UserSettingsCards.kt           # 设置卡片（通知 / 背景 / 应用信息 / 关于）
 │   │   ├── FloatingPillNavBar.kt          # 悬浮胶囊导航栏（弹簧滑块，点击无波纹）
 │   │   ├── AppBackgroundLayer.kt          # 自定义背景渲染层（透明度/模糊/亮度）
 │   │   ├── CustomBackgroundScreen.kt      # 背景装扮设置页（主页 / 使用页切换）
@@ -150,7 +166,8 @@ app/src/main/
 │   │
 │   ├── widget/                            # 桌面小组件
 │   │   ├── LinYuWidgetProvider.kt         # Provider 基类（1x1 / 2x2 / 2x4 共用）+ 状态推送
-│   │   └── WidgetRenderer.kt              # 状态推断 + RemoteViews 渲染（无反射调用）
+│   │   ├── WidgetRenderer.kt              # 状态推断 + RemoteViews 渲染（无反射调用）
+│   │   └── WidgetActions.kt               # 小组件点击动作（PendingIntent + 布局映射）
 │   │
 │   └── utils/                             # 工具层
 │       ├── PrefsHelper.kt                 # 加密存储（EncryptedSharedPreferences，认证、
@@ -164,6 +181,9 @@ app/src/main/
 │       ├── BackgroundManager.kt           # 背景图存取（主页 / 使用页两套配置）
 │       ├── BackgroundState.kt             # 背景配置状态（Compose State）
 │       ├── ScanPermission.kt              # 蓝牙扫描权限（按系统版本分流）
+│       ├── KlcxkjCrypto.kt                # 蓝牙指令加解密（AES）
+│       ├── KlcxkjSigner.kt                # 蓝牙指令签名（HMAC）
+│       ├── MoneyFormat.kt                 # 金额格式化（3 位小数，厘→元）
 │       └── ApkUpdater.kt                  # 更新包下载 + 调起系统安装器
 │
 └── res/

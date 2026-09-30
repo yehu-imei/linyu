@@ -56,4 +56,18 @@ object ShowerEvents {
     fun notifyOrdersRestored() {
         _ordersRestored.tryEmit(Unit)
     }
+
+    /**
+     * 服务请求 App 停止**蓝牙表**用水（通知栏「结束使用」按钮）。
+     *
+     * 蓝牙表的关阀要靠 App 内存里的 BLE 连接（云端 `closeOrder` 对它不适用，
+     * orderNo 为空会报「订单号不能为空」）。服务没有这条连接，只能发事件让
+     * App（若进程还活着）走 `stopBleShower`。
+     */
+    private val _stopBleRequest = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val stopBleRequest: SharedFlow<String> = _stopBleRequest
+
+    fun notifyStopBleRequest(snCode: String) {
+        _stopBleRequest.tryEmit(snCode)
+    }
 }

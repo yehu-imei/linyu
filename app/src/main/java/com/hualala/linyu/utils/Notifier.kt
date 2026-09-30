@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.hualala.linyu.MainActivity
 import com.hualala.linyu.R
+import com.hualala.linyu.utils.MoneyFormat
 
 /**
  * 系统通知。
@@ -257,7 +258,7 @@ object Notifier {
         val timeText = formatDuration(elapsedSec)
         return when {
             money == null -> "用时 $timeText · 结算中"
-            money > 0 -> "用时 $timeText · 消费 ¥%.2f".format(money)
+            money > 0 -> "用时 $timeText · 消费 ${MoneyFormat.withSymbol(money)}"
             else -> "用时 $timeText · 无消费"
         }
     }
@@ -418,7 +419,8 @@ object Notifier {
             putExtra(com.hualala.linyu.service.ShowerWatchService.EXTRA_SNCODE, snCode)
         }
         val pi = PendingIntent.getService(
-            context, 7100 + snCode.hashCode(), intent,
+            // ⚠️ 用按 snCode 稳定分配的 id，不能是 hashCode()——碰撞会停错设备（见 PrefsHelper）
+            context, PrefsHelper.notifyRequestCode(snCode), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Action.Builder(

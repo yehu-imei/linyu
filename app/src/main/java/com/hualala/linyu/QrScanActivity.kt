@@ -93,7 +93,7 @@ import androidx.compose.ui.graphics.Color as ComposeColor
 /**
  * 扫码绑定热水器。
  *
- * 趣智校园热水器上的二维码形如：KLCXKJ-Water,M,C47F0EDA85D8
+ * 趣智校园热水器上的二维码形如：KLCXKJ-Water,M,AABBCCDDEEFF
  * 解析最后一个字段（冒号去掉后为 12 位十六进制）作为设备 snCode。
  *
  * 返回：RESULT_OK + extra [EXTRA_SN_CODE]；失败时 RESULT_CANCELED + [EXTRA_ERROR]

@@ -52,6 +52,9 @@ import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import com.hualala.linyu.utils.MoneyFormat
+import com.hualala.linyu.utils.PrefsHelper
+import androidx.compose.runtime.LaunchedEffect
 
 enum class TrendChartType(val label: String) {
     BAR("柱形图"),
@@ -64,9 +67,25 @@ fun SpendingTrendCard(
     loading: Boolean,
     modifier: Modifier = Modifier
 ) {
-    var range by remember { mutableStateOf(TrendRange.LAST_7_DAYS) }
-    var chartType by remember { mutableStateOf(TrendChartType.LINE) }
-    var collapsed by remember { mutableStateOf(true) }
+    // ⚠️ 这三个要**跨会话保留**：原来用 `remember` 存在 Composable 里，退出「我的」页
+    // 再进来就复位成「7 天 / 折线 / 折叠」，用户每次都得重新点一遍。
+    // 初始化从 Prefs 读，变化时用 LaunchedEffect 写回。
+    var range by remember {
+        mutableStateOf(
+            runCatching { TrendRange.valueOf(PrefsHelper.trendRange) }
+                .getOrDefault(TrendRange.LAST_7_DAYS)
+        )
+    }
+    var chartType by remember {
+        mutableStateOf(
+            runCatching { TrendChartType.valueOf(PrefsHelper.trendChartType) }
+                .getOrDefault(TrendChartType.LINE)
+        )
+    }
+    var collapsed by remember { mutableStateOf(PrefsHelper.trendCollapsed) }
+    LaunchedEffect(range) { PrefsHelper.trendRange = range.name }
+    LaunchedEffect(chartType) { PrefsHelper.trendChartType = chartType.name }
+    LaunchedEffect(collapsed) { PrefsHelper.trendCollapsed = collapsed }
     var selectedIndex by remember(range) { mutableIntStateOf(-1) }
     val today = remember { LocalDate.now() }
     val summary = remember(bills, range, today) {
@@ -105,9 +124,9 @@ fun SpendingTrendCard(
             if (!collapsed) {
                 Spacer(Modifier.height(18.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    TrendMetric("总消费", "¥ %.2f".format(summary.total), Modifier.weight(1f))
+                    TrendMetric("总消费", MoneyFormat.withSymbol(summary.total), Modifier.weight(1f))
                     TrendMetric("消费次数", "${summary.count} 次", Modifier.weight(1f))
-                    TrendMetric("单次平均", "¥ %.2f".format(summary.average), Modifier.weight(1f))
+                    TrendMetric("单次平均", MoneyFormat.withSymbol(summary.average), Modifier.weight(1f))
                 }
 
                 Spacer(Modifier.height(18.dp))
@@ -123,7 +142,7 @@ fun SpendingTrendCard(
                     ) {
                         Text(
                             selected?.let {
-                                "${it.date.format(SHORT_DATE)}  ¥%.2f · ${it.count}次".format(it.amount)
+                                "${it.date.format(SHORT_DATE)}  ${MoneyFormat.withSymbol(it.amount)} · ${it.count}次"
                             } ?: "每日明细",
                             color = if (selected == null) AppColors.TextSecondary else AppColors.TextPrimary,
                             fontSize = 12.sp,

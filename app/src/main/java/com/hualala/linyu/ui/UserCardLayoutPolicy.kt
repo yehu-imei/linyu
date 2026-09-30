@@ -14,6 +14,7 @@ internal object UserCardLayoutPolicy {
 
     val settingsDefaults = listOf(
         UserCardType.NOTIFY,
+        UserCardType.TREND,
         UserCardType.BACKGROUND,
         UserCardType.LOG,
         UserCardType.ABOUT,

@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import java.util.concurrent.atomic.AtomicInteger
+import com.hualala.linyu.data.SettlementEngine
 
 /**
  * 用水监控（前台服务）。
@@ -129,7 +130,15 @@ class ShowerWatchService : Service() {
 
             if (!PrefsHelper.isLoggedIn) break
 
-            when (orderRunning(snCode)) {
+            // ⚠️ 蓝牙表**不能**用云端订单判断：它没有 4G，服务端 tcpDevice 通道
+            // 里根本没有它的订单，queryUsing 永远回 data=null → 会被当成
+            // 「订单没了」误触发自动结算（水其实还在流）。
+            // 蓝牙表的结束只来自用户主动停止（App / 通知栏按钮），看本地状态即可。
+            val running: Boolean? =
+                if (PrefsHelper.isBleDevice(snCode)) ShowerController.isRunning(snCode)
+                else orderRunning(snCode)
+
+            when (running) {
                 true -> Unit                    // 还在用，继续
                 false -> {                      // 订单没了 → 结束
                     finish(snCode)
@@ -185,7 +194,7 @@ class ShowerWatchService : Service() {
         Notifier.showSettling(this, Notifier.ID_AUTO_CLOSED, "设备已自动关停 · $deviceName", elapsed)
 
         val money = try {
-            ShowerController.settleAmount(orderNo, startedAt, snCode, deviceName)
+            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName)
         } catch (_: Exception) { null }
         LinYuWidget.refreshAll(this)
 
@@ -222,6 +231,17 @@ class ShowerWatchService : Service() {
         val startedAt = PrefsHelper.getStartedAt(snCode)
         val elapsed = elapsedSec(startedAt)
         val deviceName = deviceNameFor(snCode)
+
+        // 蓝牙表：云端 `closeOrder` 对它不适用（orderNo 为空会报「订单号不能为空」），
+        // 关阀要靠 App 内存里的 BLE 连接。服务没有这条连接，只能发事件让 App 走
+        // stopBleShower。App 进程不在（连接已丢）时，App 也关不了，如实提示用户。
+        if (PrefsHelper.isBleDevice(snCode)) {
+            AppLogger.i("ShowerWatch 检测到蓝牙表 $snCode，转发给 App 走 BLE 关阀")
+            WidgetBridge.clearBusy()
+            LinYuWidget.refreshAll(this)
+            ShowerEvents.notifyStopBleRequest(snCode)
+            return
+        }
 
         // ⚠️ orderNo 必须在**关阀之前**敲定，所以它在 `markFinished` 之前读——
         // 本地清理会把活跃订单删掉，之后就再也读不到（`queryUsing` 也问不出来了，
@@ -282,7 +302,7 @@ class ShowerWatchService : Service() {
         Notifier.showSettling(this, Notifier.ID_FINISHED, "使用结束 · $deviceName", elapsed)
 
         val money = try {
-            ShowerController.settleAmount(orderNo, startedAt, snCode, deviceName)
+            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName)
         } catch (_: Exception) { null }
         LinYuWidget.refreshAll(this)
 
@@ -342,7 +362,17 @@ class ShowerWatchService : Service() {
 
     private fun inUseNotification(orders: List<com.hualala.linyu.model.ActiveOrder>): android.app.Notification {
         if (orders.size > 1) return Notifier.showInUseSummary(this, orders.size)
-        val order = orders.first()
+        // ⚠️ 绝不能 `first()`：这里是前台服务的主线程，抛异常 = 整个进程死掉，
+        // BLE 连接、计时、结算监控全部陪葬（09-29 实测过一次：蓝牙开阀成功后
+        // 活跃订单没落盘，列表为空，进程当场崩掉，水关不了）。
+        // 列表为空说明本地状态丢了，用「上次设备」兜底出一条通知，保住服务。
+        val order = orders.firstOrNull()
+            ?: return Notifier.showInUse(
+                this,
+                PrefsHelper.lastDeviceSnCode,
+                PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
+                PrefsHelper.getStartedAt(PrefsHelper.lastDeviceSnCode)
+            )
         return Notifier.showInUse(
             this,
             order.snCode,

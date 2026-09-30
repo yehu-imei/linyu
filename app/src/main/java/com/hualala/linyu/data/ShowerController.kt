@@ -33,7 +33,14 @@ sealed interface OpenOutcome {
     }
 
     /** 明确失败 */
-    data class Failed(val message: String) : OpenOutcome {
+    /**
+     * 明确失败。
+     *
+     * @param errorCode 服务端业务错误码；**本地原因（参数不全、设备类型不支持等）为 null**。
+     *   上层判断「是不是设备不在线（306）」要靠它，别再匹配文案——
+     *   文案会随学校/服务端版本变，而且中文措辞各地不一。
+     */
+    data class Failed(val message: String, val errorCode: Int? = null) : OpenOutcome {
         override val kickHint: String? get() = message
     }
 
@@ -115,34 +122,6 @@ sealed interface CloseOutcome {
     val kickHint: String?
 }
 
-/**
- * 「这一单花了多少钱」的一次探询结果。
- *
- * 三态是必需的，`Double?` 表达不了：**「字段不存在」和「字段就是 0」必须分开**。
- * 前者是「服务端还没算完，继续等」，后者是「确实没花钱，可以收工」。
- * 混成一个 `null` 的话，开完水马上停这种零消费的单子会一直等不到金额，
- * 通知就永远停在「结算中」。
- */
-private sealed interface MoneyProbe {
-    /** 拿到了一个大于 0 的金额 */
-    data class Found(val value: Double) : MoneyProbe
-
-    /**
-     * `consumeMoney` 字段在、值就是 0：这一单确实没花钱。
-     *
-     * 实测支持这个判断（09-18 15:06 那次 5 秒的启停）：接口回 `consumeMoney: 0`，
-     * 同时账单列表里也**始终没有**这一单的账单——两边对得上。
-     * 而中午真正用了水的 12:43 那单，账单列表里是有记录的（`0.41`）。
-     *
-     * ⚠️ 仍要留意一种情况：服务端**结算未完成时也许同样报 0**。
-     * 所以它不单独作数——只有五轮都是 0、**且**账单列表也查不到时，才按 0 收尾
-     * （见 [settleAmount]）。账单就是这里的旁证。
-     */
-    data object KnownZero : MoneyProbe
-
-    /** 没拿到（网络失败 / 字段名不认识 / 还没结算）——继续等或走回退 */
-    data object Unknown : MoneyProbe
-}
 
 /**
  * 洗澡（开阀 / 关阀）的共享业务层。
@@ -168,8 +147,7 @@ object ShowerController {
     // ════════════════════════════════════════════
 
     /** 该设备当前是否有进行中的订单 */
-    fun isRunning(snCode: String): Boolean =
-        snCode.isNotEmpty() && PrefsHelper.getActiveOrders().any { it.snCode == snCode }
+    fun isRunning(snCode: String): Boolean = ActiveOrderRepository.isRunning(snCode)
 
     /** 已用时长（秒），按开阀时间戳算；没开始过则为 0 */
     fun elapsedSeconds(snCode: String): Int {
@@ -183,8 +161,7 @@ object ShowerController {
     /** 自动关停剩余秒数，0 表示未知/无倒计时 */
     fun autoDisconRemain(snCode: String): Int = PrefsHelper.getAutoDisconRemain(snCode)
 
-    fun activeOrderFor(snCode: String): ActiveOrder? =
-        PrefsHelper.getActiveOrders().find { it.snCode == snCode }
+    fun activeOrderFor(snCode: String): ActiveOrder? = ActiveOrderRepository.find(snCode)
 
     fun lastDeviceSnCode(): String = PrefsHelper.lastDeviceSnCode
     fun lastDeviceName(): String = PrefsHelper.lastDeviceName
@@ -192,6 +169,17 @@ object ShowerController {
     // ════════════════════════════════════════════
     //  动作
     // ════════════════════════════════════════════
+
+    /**
+     * 蓝牙表走到**云端通道**时的兜底文案。
+     *
+     * 蓝牙表已由 `BleShowerController` 支持，App 内的开阀入口会先分流过去，
+     * 正常不会看到这句。留着是为了挡住**没有设备类型信息的入口**——
+     * 最典型的是桌面小组件（它只有 `snCode`，拿不到 `isBle`），
+     * 那种情况下不给提示的话，用户只会看到服务端的「设备不在线」。
+     */
+    const val UNSUPPORTED_DEVICE_MESSAGE =
+        "该设备需通过手机蓝牙开启，请在本 App 内操作（桌面小组件暂不支持）"
 
     /**
      * 开阀。
@@ -206,6 +194,20 @@ object ShowerController {
         budgetMs: Long = 6_000L
     ): OpenOutcome {
         require(snCode.isNotBlank()) { "snCode 不能为空" }
+
+        // ⚠️ 只能靠手机蓝牙直连的水表（`smallTypeId == 1`），云端下发必然回 306。
+        //
+        // 在这里就拦住，别让用户白等一次网络往返、再看到一句「设备不在线」——
+        // 那句话既不解释原因，也不告诉他能做什么，他只会以为是网络问题反复试。
+        //
+        // 覆盖范围：App 内（`MainViewModel` 传了 device）。
+        // 小组件那条路径传的是 `null`（它只有 snCode，拿不到设备类型），拦不到，
+        // 仍会走 306 分支并显示已有的错误提示。
+        if (device?.needsBluetoothControl == true) {
+            AppLogger.i("开阀被拦：$snCode 是需要蓝牙直连的水表（smallTypeId=${device.smallTypeId}）")
+            return OpenOutcome.Failed(UNSUPPORTED_DEVICE_MESSAGE)
+        }
+
         val deadline = System.currentTimeMillis() + budgetMs
 
         // 1. 设备上已经有订单 → 直接恢复，不再发 downRate
@@ -227,7 +229,14 @@ object ShowerController {
         val resp = NetworkModule.apiService.downRateSafe(
             snCode = snCode, auth = NetworkModule.authFields()
         )
-        if (!resp.success) return OpenOutcome.Failed(resp.displayMessage ?: "开始失败")
+        // ⚠️ errorCode 必须带上：上层要用它判断「是不是 306 设备不在线」，
+        // 从而决定要不要引导用户改用蓝牙。丢掉它就只能去匹配文案了。
+        if (!resp.success) {
+            return OpenOutcome.Failed(
+                resp.displayMessage ?: "开始失败",
+                resp.errorCode
+            )
+        }
 
         // 3. 轮询确认开阀（最多 9 次 × 700ms，与 App 内一致）
         var opened = false
@@ -242,7 +251,7 @@ object ShowerController {
         //
         // 实测日志（09-18 15:06:28）：
         //   downRateResult resp = {"...","consumeDate":"20260918150627",
-        //                          "orderNo":"13202609181506275230","state":1,"result":0,...}
+        //                          "orderNo":"13200000000000000000","state":1,"result":0,...}
         // 服务端第一次确认开阀时就把 orderNo 给了，白白再问一趟没有任何道理。
         var confirmedOrderNo = ""
         for (i in 0..8) {
@@ -423,7 +432,7 @@ object ShowerController {
     suspend fun pickDevice(mac: String): PickResult {
         if (mac.isBlank()) return PickResult.DeviceNotFound
         return try {
-            val resp = NetworkModule.apiService.getDeviceInfoSafe(mac)
+            val resp = DeviceInfoCache.load(mac)
             if (resp.success && resp.data != null) {
                 rememberDevice(resp.data)
                 PickResult.Ok
@@ -472,394 +481,45 @@ object ShowerController {
         val fresh = queryOrderNo(snCode)
         if (fresh.isNotEmpty()) {
             // 回填进 Prefs：别的路径（小组件、通知栏按钮）随后读到的就是真的了
-            val list = PrefsHelper.getActiveOrders()
-            val i = list.indexOfFirst { it.snCode == snCode }
-            if (i >= 0) {
-                list[i] = list[i].copy(orderNo = fresh)
-                PrefsHelper.saveActiveOrders(list)
+            ActiveOrderRepository.update { list ->
+                val i = list.indexOfFirst { it.snCode == snCode }
+                if (i >= 0) list[i] = list[i].copy(orderNo = fresh)
             }
             AppLogger.i("orderNo 本地缺失，已从服务端回填：$fresh")
         }
         return fresh
     }
 
-    /**
-     * 查出本次消费金额。
-     *
-     * ## 为什么几乎不用等
-     *
-     * 早先这里是「拉账单列表 + 自己按时间窗猜」，那套注定慢也注定不准。
-     * 现在主路径是一次 [queryConsumeResult]——直接问「这一单结算了多少钱」。
-     *
-     * 实测（09-18 一整天、27 次调用的日志）：
-     * **每一次的第 1 轮返回就是最终值，从来没有变过。**
-     * 非零的例子（`17:16` 那单）第 1 轮直接给 `40`；零消费的那几单第 1 轮到第 5 轮
-     * 全是 `0`。也就是说原来那 5 轮 + 3 轮的固定重试**纯属白等**：
-     * 零消费的单子硬生生拖了 8.4 秒才把通知从「结算中」改成「无消费」。
-     *
-     * 所以现在只留**一轮确认**：拿到 0 时多问一次（万一是结算竞态），
-     * 不是 0 就直接收工。见 [SETTLE_CONFIRM_DELAY_MS]。
-     *
-     * @param snCode 设备序列号。查到金额后会**按设备**记一笔「上次消费」给桌面小组件——
-     *               必须带上，否则换设备后小组件会拿上一台的金额冒充当前这台。
-     * @return 金额（元）；`0.0` = 确实没花钱；`null` = 没查出来（和 0.0 不是一回事）
-     */
-    suspend fun settleAmount(
-        orderNo: String,
-        startTimeMs: Long,
-        snCode: String,
-        deviceName: String = ""
-    ): Double? {
-        var sawDefiniteZero = false
-        if (orderNo.isNotEmpty()) {
-            for (attempt in 0 until SETTLE_PROBE_ROUNDS) {
-                when (val probe = queryConsumeResult(orderNo, snCode)) {
-                    is MoneyProbe.Found -> {
-                        PrefsHelper.recordConsume(snCode, probe.value)
-                        PrefsHelper.clearPendingSettlement(snCode)
-                        AppLogger.i("结算命中（consumeOrder/result，第 ${attempt + 1} 轮）：¥${probe.value}")
-                        return probe.value
-                    }
-                    // 字段在、值是 0。多问一轮再下结论——万一刚好撞上结算窗口，
-                    // 下一轮就会给出真金额（而不是把「还没算完」当成「没花钱」）
-                    MoneyProbe.KnownZero -> sawDefiniteZero = true
-                    MoneyProbe.Unknown -> Unit
-                }
-                if (attempt < SETTLE_PROBE_ROUNDS - 1) delay(SETTLE_CONFIRM_DELAY_MS)
-            }
-            AppLogger.w("consumeOrder/result ${SETTLE_PROBE_ROUNDS} 轮没给金额（见过明确的 0：$sawDefiniteZero），回退到账单列表")
-        }
-
-        // ② 回退：拉账单列表自己匹配
-        val fromBills = settleFromBillList(orderNo, startTimeMs, snCode)
-
-        // 账单列表也没查到，但直答接口**明确说了是 0** —— 那就是真的没花钱
-        // （比如开完水马上停，一滴热水都没放）。
-        //
-        // ⚠️ 这一条必须补。不补的话 [settleFromBillList] 返回 null → 通知上一句
-        // 「结算中」，而金额**永远不会再来**（压根没有那笔账单），用户看到的是
-        // 一条永远停在「结算中」的通知——比直接说「无消费」还糟。
-        val resolved = if (fromBills == null && sawDefiniteZero) 0.0 else fromBills
-        if (resolved == null) {
-            PrefsHelper.recordPendingSettlement(
-                PendingSettlement(
-                    snCode = snCode,
-                    orderNo = orderNo,
-                    startedAt = startTimeMs,
-                    deviceName = deviceName,
-                    createdAt = System.currentTimeMillis()
-                )
-            )
-        } else {
-            PrefsHelper.clearPendingSettlement(snCode)
-        }
-        return resolved
-    }
-
-    /** 上次记进日志的原始响应体。只在**变了**的时候再记，避免 5 轮刷屏 */
-    @Volatile private var lastRawLogged: String? = null
-
-    /**
-     * 直接问「这一单结算了多少钱」。
-     *
-     * ## 真实响应结构（09-18 真机抓到，金华职业技术大学）
-     *
-     * ```json
-     * {"success":true,"errorCode":0,"errorMessage":"成功","data":{
-     *   "consumeTime":"2026-09-18 15:06:27",
-     *   "consumeDate":"2026-09-18 15:06:27",
-     *   "consumeMoney":0,            ← 数字，不是字符串
-     *   "preDeductMoney":0, "preDeductMoneyAfter":0,
-     *   "orderNo":"13202609181506275230",
-     *   "deviceSnCode":"C47F0EDCBCC7", "orderAccountId":41681,
-     *   "createTime":"1789715194",   ← 服务端当前时间（每次请求都在变），不是下单时间
-     *   "telephone":"1xxxxxxxxxx", "clData":null,
-     *   "modeName":null, "liquidModeName":null, "liquidConsumeMoney":null,
-     *   "leftModeMoney":null, "rightModeMoney":null,
-     *   "leftModeName":null, "rightModeName":null}}
-     * ```
-     *
-     * ⚠️ 注意两件事：
-     * - **没有** `consumeMoneyStr`，也**没有** `state` / `result` / `status`
-     *   ——那几个是 `downRateResult` 的字段，别混。
-     * - `consumeMoney` 在这里是**数字**，而账单列表里同名字段是**字符串**（`"0.41"`）。
-     *
-     * 至于为什么明知结构还是走原始串解析，见
-     * [com.hualala.linyu.api.consumeOrderResultRaw] 的说明。
-     */
-    private suspend fun queryConsumeResult(orderNo: String, snCode: String): MoneyProbe = try {
-        val raw = NetworkModule.apiService
-            .consumeOrderResultRaw(snCode, orderNo, NetworkModule.authFields())
-
-        // 只在内容变化时记一次：5 轮响应通常一模一样，记 5 遍只是噪音；
-        // 但金额从不结算变成结算会改内容，那一版必须留下
-        if (raw != lastRawLogged) {
-            lastRawLogged = raw
-            AppLogger.i("结算原始响应 consumeOrder/result/query: $raw")
-        }
-        extractMoney(raw)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (_: Exception) {
-        MoneyProbe.Unknown
-    }
-
-    /**
-     * 从响应 JSON 里挖出消费金额，并**换算成元**。
-     *
-     * 两步：
-     * 1. 先认已知的字段名（`consumeMoney` 等，数字和字符串两种）
-     * 2. 认不出来就在 `data` 里**按名字找**——凡是键名像金额的数值字段都算候选
-     *
-     * ⚠️ 第 2 步必须**排除**余额类字段（`balance` / `account` / `wallet` /
-     * `pre` / `give` / `remain`）。拿钱包余额当消费金额是这里最危险的错法：
-     * 金额会大得离谱，而且看着还挺像个正常数字，不会有人发现不对。
-     *
-     * ⚠️ **单位不是元，是厘**，必须过一遍 [toYuan]，见那里的说明。
-     *
-     * ⚠️ 返回三态而不是 `Double?`：**「没这个字段」和「字段是 0」是两回事**。
-     * 前者是「还不知道」，得继续等；后者是「确实没花钱」，可以收工了。
-     * 用 `Double?` 表达不了这个区别——0.0 和 null 都会被当成「没查到」，
-     * 于是零消费的单子会一直卡在「结算中」。
-     */
-    private fun extractMoney(raw: String): MoneyProbe {
-        val root = try {
-            com.google.gson.JsonParser().parse(raw)
-        } catch (_: Exception) {
-            return MoneyProbe.Unknown
-        }
-        if (!root.isJsonObject) return MoneyProbe.Unknown
-        val obj = root.asJsonObject
-
-        // 金额可能在 data 里，也可能直接铺在顶层，两处都看
-        val scopes = listOfNotNull(
-            obj.getAsJsonObject("data"),
-            obj
-        )
-
-        // ① 已知字段名。字段**在**就采信，哪怕值是 0
-        for (scope in scopes) {
-            for (key in listOf("consumeMoney", "consumeMoneyStr", "money", "consumeAmount")) {
-                val el = scope.get(key) ?: continue
-                if (el.isJsonNull || !el.isJsonPrimitive) continue
-                val raw = el.asString.toDoubleOrNull() ?: continue
-                val v = toYuan(raw)
-                if (v > 0) {
-                    // 原始值和换算后都记：万一某个学校不是按厘返回的，
-                    // 日志里「原始 40 → ¥0.04」这种对照一眼就能看出单位对不对
-                    AppLogger.i("结算：`$key` 原始值 $raw → ¥$v（按 ${MILLI_PER_YUAN.toInt()} 厘/元 换算）")
-                    return MoneyProbe.Found(v)
-                }
-                return MoneyProbe.KnownZero
-            }
-        }
-
-        // ② 兜底：按名字找像金额的数值字段。
-        // ⚠️ 这里**只认正数**——字段名是猜的，猜出来的 0 不敢当「确实没花钱」用，
-        // 宁可算 Unknown 让它走账单列表那条路复核一遍
-        for (scope in scopes) {
-            for ((key, el) in scope.entrySet()) {
-                if (!el.isJsonPrimitive) continue
-                val k = key.lowercase()
-                if (!AMOUNT_KEY_HINT.containsMatchIn(k)) continue
-                if (AMOUNT_KEY_EXCLUDE.containsMatchIn(k)) continue
-                val raw = el.asString.toDoubleOrNull() ?: continue
-                val v = toYuan(raw)
-                if (v > 0) {
-                    AppLogger.w("结算：字段名不在预期内，按名字兜底命中 `$key` = $raw（原始值）→ ¥$v")
-                    return MoneyProbe.Found(v)
-                }
-            }
-        }
-
-        // 成功但没金额：可能这单还没结算，也可能结构完全不同——
-        // 原始响应上面已经记进日志了，看得出来是哪种
-        if (obj.get("success")?.asBoolean == true && obj.get("data")?.isJsonNull != false) {
-            AppLogger.i("结算：接口返回成功但 data 为空，这单可能还没结算")
-        }
-        return MoneyProbe.Unknown
-    }
-
-    /** 回退路径：拉账单列表，挑出本次这一单 */
-    private suspend fun settleFromBillList(orderNo: String, startTimeMs: Long, snCode: String): Double? {
-        val month = java.time.YearMonth.now().toString()
-
-        // ⚠️ 兜底时间窗必须**往前放宽**，不能拿 `>= startTimeMs` 卡。
-        //
-        // 账单里的 `consumeDate` 是**下单那一刻**（发 downRate 的时候），
-        // 而 `startTimeMs`（startedAt）是**开阀确认成功之后**才写的——开阀要轮询
-        // `downRateResult` 一两轮才确认，所以天然晚 1~2 秒。
-        // 实测：下单 12:43:37.6 → 账单打的是 12:43:38 → 开阀确认 12:43:39.3，
-        // 用 `>=` 判就把**这一单自己**滤掉了，6 轮全空、返回 0，
-        // 通知永远显示「无消费」。
-        val windowStart = if (startTimeMs > 0) startTimeMs - SETTLE_WINDOW_SLACK_MS else 0L
-
-        // 有没有匹配到过账单——用来区分「压根没查到」和「查到了但金额就是 0」
-        var sawBill = false
-
-        for (attempt in 0 until BILL_LIST_ROUNDS) {
-            try {
-                val resp = NetworkModule.apiService.getBillListSafe(month = month)
-                val bills = resp.data ?: return null
-
-                val matched = matchBill(bills, orderNo, windowStart)
-                if (matched != null) {
-                    sawBill = true
-                    val dto = matched.consumeBillDTO
-                    // ⚠️ 这里的 `consumeMoney` 是**字符串**、单位是**元**
-                    // （和主路径那个数字型的差 1000 倍，见 [MILLI_PER_YUAN]）
-                    val m = dto.consumeMoney.toDoubleOrNull()
-                    if (m != null && m > 0) {
-                        PrefsHelper.recordConsume(snCode, m)   // 供桌面小组件显示「上次消费」
-                        AppLogger.i(
-                            "结算命中（账单列表，第 ${attempt + 1} 轮）：orderNo=${dto.orderNo} " +
-                                "orderId=${dto.orderId} 金额=$m 账单时间=${dto.consumeDate}"
-                        )
-                        return m
-                    }
-                    // 账单先以 "0.0" 占位出现、结算完才填金额（12:47:36 实测），
-                    // 所以这里不能拿 0 当结论，只能记下"见到过账单"继续下一轮
-                    AppLogger.i("结算：已匹配到账单但金额还是 ${dto.consumeMoney}（可能是占位值）")
-                }
-            } catch (_: Exception) {
-                // 网络抖动，继续重试
-            }
-            if (attempt < BILL_LIST_ROUNDS - 1) delay(1200)
-        }
-
-        AppLogger.w("结算超时：orderNo=$orderNo 两条路都没拿到金额（sawBill=$sawBill）")
-        // 匹配到过账单、金额一直是 0 → 确实没有消费；
-        // **一次都没匹配到 → 结果未知**，调用方不能把「未知」说成「无消费」
-        return if (sawBill) 0.0 else null
-    }
-
-    /**
-     * 从账单列表里找出「本次这一单」。
-     *
-     * ⚠️ 顺序和字段都不能想当然：
-     *
-     * - `orderNo`（20 位，如 `13202609172359167875`）才是**关阀时用的那个**，先拿它精确匹配
-     * - `orderId`（7 位，如 `9564403`）是账单**序号**，和 orderNo 不是一个东西。
-     *   以前代码写的是 `it.orderId == orderNo`，**永远不成立**——这是结束后
-     *   通知一直显示「无消费」的根因。这里保留它只作兜底（万一某校真用同一个值）
-     * - 都对不上才退回时间窗，且窗口要**往前放宽**（见 [SETTLE_WINDOW_SLACK_MS]）
-     */
-    private fun matchBill(bills: List<BillItem>, orderNo: String, windowStartMs: Long): BillItem? {
-        if (orderNo.isNotEmpty()) {
-            bills.firstOrNull { it.consumeBillDTO.orderNo == orderNo }?.let { return it }
-            bills.firstOrNull { it.consumeBillDTO.orderId == orderNo }?.let { return it }
-        }
-        return bills
-            .filter { bill ->
-                // 没有开阀时间就**没法判断哪笔是本次的**，一笔都不能算。
-                // （这里以前写的是 `return@filter true`，会把所有历史账单都当成
-                // 本次的，于是「用时 0 秒 · 消费 ¥上一次的金额」）
-                if (windowStartMs <= 0) return@filter false
-                billTimeMs(bill.consumeBillDTO.consumeDate) >= windowStartMs
-            }
-            .maxByOrNull { it.consumeBillDTO.consumeDate }
-    }
-
-    /** 账单里的日期 → 毫秒；解析不了返回 0（会被当成早于窗口而排除） */
-    private fun billTimeMs(consumeDate: String): Long = BillDateParser.toEpochMillis(consumeDate)
-
-    /**
-     * 兜底时间窗往前放宽多久。
-     *
-     * 账单 `consumeDate` 是**下单时刻**，比本地的 `startedAt`（开阀确认成功）早
-     * 1~2 秒，所以必须往前留余量，否则会把自己这一单滤掉。
-     * 给 3 分钟足够宽——两单之间不可能挨这么近。
-     */
-    private const val SETTLE_WINDOW_SLACK_MS = 3 * 60 * 1000L
-
-    /**
-     * `/order/consumeOrder/result/query` 里金额的单位是**厘**，1 元 = 1000 厘。
-     *
-     * ⚠️ 这个接口和账单列表**单位不一样**，这是个纯粹的坑：
-     *
-     * | 接口 | 字段 | 同样一笔 0.04 元的账返回什么 |
-     * |---|---|---|
-     * | `consumeOrder/result/query` | `consumeMoney`（数字） | `40` |
-     * | `query/account/bill/list`   | `consumeMoney`（**字符串**） | `"0.04"` |
-     *
-     * 字段名一模一样、类型却一个数字一个字符串、单位还差 1000 倍。
-     * 忘了换算的后果不是报错而是**静默错 1000 倍**：用了 0.04 元，
-     * 通知上写「消费 ¥40.00」。
-     *
-     * 实测证据（09-18 两笔独立订单，用 `dealDate` 对齐同一个订单）：
-     * - `dealDate 2026-09-18 17:16:28` → 本接口 `40`，账单列表 `"0.04"`
-     * - `dealDate 2026-09-18 17:16:56` → 本接口 `80`，账单列表 `"0.08"`
-     *
-     * ⚠️ 目前只有**一个学校**（金华职业技术大学）的样本。别的学校万一按元返回，
-     * 这里就会反向错 1000 倍——而且是**静默**错的，不报错、数字看着还挺正常。
-     *
-     * 所以每次换算都同时把**原始值**和**换算后**打进日志（见 [extractMoney] 和
-     * [queryConsumeResult]）。哪个学校不对，导出日志一眼就能看出来，
-     * 不用再抓包。真要再稳妥些，可以拿账单列表对一次——
-     * 但那个接口在结算完成前会返回占位的 `"0.0"`（12:47:36 实测），
-     * 拿它当准绳反而会把真金额覆盖成 0，所以没有默认走那条路。
-     */
-    private const val MILLI_PER_YUAN = 1000.0
-
-    /** 厘 → 元 */
-    private fun toYuan(raw: Double): Double = raw / MILLI_PER_YUAN
-
-    /**
-     * 主路径问几轮。
-     *
-     * 实测 27 次调用**第 1 轮就是最终值**，所以两轮足够：一轮拿正数直接收工，
-     * 一轮是 0 时再确认一次（防结算竞态）。
-     */
-    private const val SETTLE_PROBE_ROUNDS = 2
-
-    /** 两轮之间的间隔。第 1 轮命中时根本不会走到这儿 */
-    private const val SETTLE_CONFIRM_DELAY_MS = 1000L
-
-    /**
-     * 回退路径（账单列表）问几轮。
-     *
-     * 只留一轮。这条路现在**只是主路径整个失败时的兜底**（网络不通 / 字段名不认识），
-     * 而它本来就慢：账单要多等一会儿才带金额出现。再多问几轮只是白白拖长
-     * 那条「结算中」通知的停留时间，收益极低。
-     */
-    private const val BILL_LIST_ROUNDS = 1
-
-    /** 键名像金额的（[extractMoney] 兜底用） */
-    private val AMOUNT_KEY_HINT =
-        Regex("(consume|money|amount|fee|cost|pay|charge|price)", RegexOption.IGNORE_CASE)
-
-    /**
-     * 键名像金额、但**绝不能**当消费金额的。
-     *
-     * `balance` / `remain` / `account` / `wallet` 是余额，`pre` / `give` 是预扣和赠送，
-     * 拿它们当消费金额会报出一个大得离谱的数——而且看着像正常数字，不会有人发现。
-     */
-    private val AMOUNT_KEY_EXCLUDE = Regex(
-        "(balance|remain|surplus|account|wallet|pre|give|given|total|sum|count|id|no\\b|time|date|status|state)",
-        RegexOption.IGNORE_CASE
-    )
 
     // ════════════════════════════════════════════
     //  内部：持久化
     // ════════════════════════════════════════════
 
-    /** 活跃订单里没有该设备就补一条（已有则不动，避免覆盖已解析到的 orderNo） */
-    private fun ensureActiveOrder(snCode: String, orderNo: String, device: DeviceInfo?) {
-        val list = PrefsHelper.getActiveOrders()
-        if (list.any { it.snCode == snCode }) return
-        list.add(
-            ActiveOrder(
-                snCode = snCode,
-                orderNo = orderNo,
-                deviceName = device?.displayName ?: PrefsHelper.lastDeviceName,
-                deviceMac = device?.macAddress ?: PrefsHelper.lastDeviceMac,
-                deviceEmoji = device?.typeEmoji ?: PrefsHelper.lastDeviceEmoji,
-                // 小组件调用时 device 为 null，回落到上次记下的金额，
-                // 否则卡片上的「预扣」会一直是 ¥0.00
-                preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble()
+    /**
+     * 活跃订单里没有该设备就补一条（已有则不动，避免覆盖已解析到的 orderNo）。
+     *
+     * ⚠️ **必须在启动 [ShowerWatchService] 之前调用**——服务启动时会把活跃订单
+     * 读出来构建「使用中」通知，列表为空会直接崩（`first()`）。
+     * 4G 表路径在 [openValve] 里落盘；蓝牙表路径在 `BleShowerController.openValve`
+     * 成功后调用这里，两条路径都得保证「先落盘、再启服务」。
+     */
+    fun ensureActiveOrder(snCode: String, orderNo: String, device: DeviceInfo?) {
+        // 原子地「有则不动、无则加入」——并发时不会重复也不会互相覆盖
+        ActiveOrderRepository.update { list ->
+            if (list.any { it.snCode == snCode }) return@update
+            list.add(
+                ActiveOrder(
+                    snCode = snCode,
+                    orderNo = orderNo,
+                    deviceName = device?.displayName ?: PrefsHelper.lastDeviceName,
+                    deviceMac = device?.macAddress ?: PrefsHelper.lastDeviceMac,
+                    deviceEmoji = device?.typeEmoji ?: PrefsHelper.lastDeviceEmoji,
+                    // 小组件调用时 device 为 null，回落到上次记下的金额，
+                    // 否则卡片上的「预扣」会一直是 ¥0.00
+                    preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble()
+                )
             )
-        )
-        PrefsHelper.saveActiveOrders(list)
+        }
     }
 
     /**
@@ -912,7 +572,7 @@ object ShowerController {
 
     /** 清掉该设备的本地使用状态 */
     private fun clearDeviceState(snCode: String) {
-        PrefsHelper.saveActiveOrders(PrefsHelper.getActiveOrders().filterNot { it.snCode == snCode })
+        ActiveOrderRepository.remove(snCode)
         PrefsHelper.setStartedAt(snCode, 0L)
         PrefsHelper.clearAutoDiscon(snCode)
     }

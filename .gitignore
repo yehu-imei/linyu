@@ -23,3 +23,12 @@ local.properties
 *.keystore
 *.apk
 *.aab
+
+# ── WorkBuddy 工作目录（含蓝牙密钥算法等，不能进仓库）──
+.workbuddy/
+
+# ── 本地打包产物 ──
+linyu.zip
+
+# ── 开发过程文档（调研/草稿/清单，不进仓库）──
+docs/

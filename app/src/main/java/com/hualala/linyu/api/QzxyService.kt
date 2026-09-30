@@ -20,7 +20,7 @@ interface QzxyService {
         @Field("password") password: String,
         @Field("phoneSystem") phoneSystem: String = "android",
         @Field("type") type: Int = 0,
-        @Field("version") version: String = "6.5.24"
+        @Field("version") version: String = "6.5.28"
     ): Call<ResponseBody>
 
     @GET("/account/wallet")
@@ -242,7 +242,73 @@ interface QzxyService {
         @Field("smsCode") smsCode: String,
         @Field("type") type: Int = 5,
         @Field("phoneSystem") phoneSystem: String = "android",
-        @Field("version") version: String = "6.5.24"
+        @Field("version") version: String = "6.5.28"
+    ): Call<ResponseBody>
+
+    // ════════════════════════════════════════════
+    //  蓝牙水表通道
+    //
+    //  和上面的 tcpDevice/* 是**两条完全独立的通道**：
+    //  · tcpDevice：云端把指令推给设备（要求设备自带 4G）——本项目原有实现
+    //  · bluetooth：**手机当网关**，服务端只下发费率包，阀由手机蓝牙写进设备
+    //
+    //  后者对应的设备在服务端 `isBle` 为真（或 smallTypeId == 1），
+    //  对它们调 tcpDevice 必然回 `306 设备不在线`。
+    //  详见 docs/蓝牙表适配调研.md
+    // ════════════════════════════════════════════
+
+    /**
+     * 蓝牙表：下发费率。
+     *
+     * ⚠️ 响应里的 `downData` 是**要写进设备的费率包原文**（HEX 字符串），
+     * 必须原样交给 BLE 层；`consumeDate` 留着失败上报时用。
+     *
+     * @param macType 由 `type` 和 `a1` 两个字节拼成：`%02x%02x`（见 BleSignBuilder）
+     * @param signature 由 [com.hualala.linyu.utils.KlcxkjSigner] 算出
+     */
+    @FormUrlEncoded
+    @POST("/order/downRate/bluetooth/rateOrder")
+    fun bluetoothRateOrder(
+        @Field("deviceId") deviceId: String,
+        @Field("macAddress") macAddress: String,
+        @Field("macType") macType: String,
+        @Field("bigTypeId") bigTypeId: String,
+        @Field("smallTypeId") smallTypeId: String,
+        @Field("protocolType") protocolType: String,
+        @Field("randomNumber") randomNumber: String,
+        @Field("xfModel") xfModel: String,
+        @Field("signature") signature: String,
+        @FieldMap auth: Map<String, String>
+    ): Call<ResponseBody>
+
+    /**
+     * 蓝牙表：上传消费数据（结算）。
+     *
+     * @param xfData 从设备采集到的消费数据（HEX）
+     */
+    @FormUrlEncoded
+    @POST("/order/upload/bluetooth/data")
+    fun bluetoothUploadData(
+        @Field("protocolType") protocolType: String,
+        @Field("randomNumber") randomNumber: String,
+        @Field("xfData") xfData: String,
+        @Field("signature") signature: String,
+        @FieldMap auth: Map<String, String>
+    ): Call<ResponseBody>
+
+    /**
+     * 蓝牙表：上报失败订单。
+     *
+     * ⚠️ 这个是**必须实现**的，不是可选项：蓝牙开阀没有服务端兜底，
+     * 费率包下发后如果没能正常结算（断连、采集失败、用户走远），
+     * 设备侧可能停在「开了但没记账」的状态，得靠它告诉服务端这一单作废。
+     */
+    @FormUrlEncoded
+    @POST("/order/upload/bluetooth/fail")
+    fun bluetoothFailOrder(
+        @Field("consumeDate") consumeDate: String,
+        @Field("signature") signature: String,
+        @FieldMap auth: Map<String, String>
     ): Call<ResponseBody>
 
     companion object {

@@ -152,18 +152,29 @@ fun LogViewerDialog(onDismiss: () -> Unit) {
     }
 }
 
+/**
+ * 导出时最多写这么多行。
+ *
+ * ⚠️ 以前直接把**整个文件**分享出去，而文件上限 2MB——实测累积几天就有
+ * **1.4 万行**。排查问题基本只看最后几百行，整份导出又慢又难读。
+ */
+private const val EXPORT_MAX_LINES = 500
+
 /** 通过 FileProvider 导出日志，调起系统分享（微信/QQ 等） */
 fun exportLogs(context: Context) {
     try {
-        val file = AppLogger.logFile()
-        if (file != null && file.exists()) {
-            shareFile(context, file)
-        } else {
-            // 文件不存在时用内存日志兜底
-            val tmp = File(context.cacheDir, "linyu_log_${System.currentTimeMillis()}.txt")
-            tmp.writeText(AppLogger.getLogs().joinToString("\n"))
-            shareFile(context, tmp)
+        // 优先取**文件末尾**若干行——那才是包含最新崩溃/报错的部分。
+        // 取不到（文件不存在）时退回内存缓冲。
+        val lines = AppLogger.tailLines(EXPORT_MAX_LINES)
+            .ifEmpty { AppLogger.getLogs() }
+        if (lines.isEmpty()) {
+            AppLogger.w("没有可导出的日志")
+            return
         }
+        // 写成临时文件再分享，避免把原始日志文件本身暴露出去
+        val tmp = File(context.cacheDir, "linyu_log_${System.currentTimeMillis()}.txt")
+        tmp.writeText(lines.joinToString("\n"))
+        shareFile(context, tmp)
     } catch (e: Exception) {
         AppLogger.e("导出日志失败", e)
     }

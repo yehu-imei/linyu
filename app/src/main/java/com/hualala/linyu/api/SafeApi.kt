@@ -6,6 +6,8 @@ import com.hualala.linyu.model.AccountInfo
 import com.hualala.linyu.model.BaseResponse
 import com.hualala.linyu.model.BillDetail
 import com.hualala.linyu.model.BillItem
+import com.hualala.linyu.model.BleDownRateData
+import com.hualala.linyu.model.BleUploadData
 import com.hualala.linyu.model.CampusUserInfo
 import com.hualala.linyu.model.CloseOrderResult
 import com.hualala.linyu.model.DownRateResult
@@ -88,7 +90,7 @@ suspend fun QzxyService.loginSafe(
     password: String,
     phoneSystem: String = "android",
     type: Int = 0,
-    version: String = "6.5.24"
+    version: String = "6.5.28"
 ): BaseResponse<LoginData> = parse(login(telephone, password, phoneSystem, type, version).awaitString(), LoginData::class.java)
 
 suspend fun QzxyService.getWalletSafe(): BaseResponse<WalletData> =
@@ -136,7 +138,7 @@ suspend fun QzxyService.consumeOrderResultSafe(
  * 09-18 真机跑通后已经拿到真实结构（见下方 `ConsumeOrderResult`），
  * 但**解析仍然走原始串**，理由有两条：
  *
- * 1. **字段名可能因学校而异**。目前只有一个学校（金华职业技术大学）的样本，
+ * 1. **字段名可能因学校而异**。目前只有一个学校（某职业技术大学）的样本，
  *    而服务端在别的接口上确实有过按学校改字段名的先例（见 `CloseOrderResult` 的注释）。
  *    按名字找金额比死认一个字段名耐操。
  * 2. **出问题时日志里得有官方原话**。用户报「结算金额不对」，让他导出日志，
@@ -272,3 +274,61 @@ suspend fun QzxyService.updatePasswordSafe(
     auth: Map<String, String>
 ): BaseResponse<Unit> =
     parse(updatePassword(oldPassword, newPassword, auth).awaitString(), Unit::class.java)
+
+// ── 蓝牙水表通道 ──
+//
+// 走这三个接口的设备**没有 4G**，手机是网关：服务端只下发费率包（downData），
+// 阀由手机通过 BLE 写进设备。详见 docs/蓝牙表适配调研.md
+
+suspend fun QzxyService.bluetoothRateOrderSafe(
+    deviceId: String,
+    macAddress: String,
+    macType: String,
+    bigTypeId: String,
+    smallTypeId: String,
+    protocolType: String,
+    randomNumber: String,
+    xfModel: String,
+    signature: String,
+    auth: Map<String, String>
+): BaseResponse<BleDownRateData> = parse(
+    bluetoothRateOrder(
+        deviceId = deviceId,
+        macAddress = macAddress,
+        macType = macType,
+        bigTypeId = bigTypeId,
+        smallTypeId = smallTypeId,
+        protocolType = protocolType,
+        randomNumber = randomNumber,
+        xfModel = xfModel,
+        signature = signature,
+        auth = auth
+    ).awaitString(),
+    BleDownRateData::class.java
+)
+
+suspend fun QzxyService.bluetoothUploadDataSafe(
+    protocolType: String,
+    randomNumber: String,
+    xfData: String,
+    signature: String,
+    auth: Map<String, String>
+): BaseResponse<BleUploadData> = parse(
+    bluetoothUploadData(
+        protocolType = protocolType,
+        randomNumber = randomNumber,
+        xfData = xfData,
+        signature = signature,
+        auth = auth
+    ).awaitString(),
+    BleUploadData::class.java
+)
+
+suspend fun QzxyService.bluetoothFailOrderSafe(
+    consumeDate: String,
+    signature: String,
+    auth: Map<String, String>
+): BaseResponse<Unit> = parse(
+    bluetoothFailOrder(consumeDate, signature, auth).awaitString(),
+    Unit::class.java
+)
