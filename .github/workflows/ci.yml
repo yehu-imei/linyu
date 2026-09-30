@@ -31,8 +31,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # ubuntu-latest 镜像自带 Android SDK，直接用即可；
+      # android-actions/setup-android@v3 已停止维护，会因下载 SDK 组件失败导致整条 CI 挂掉
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          # 预先接受 SDK 许可证，避免 Gradle 补下缺失组件（如 compileSdk 36）时卡在许可证交互
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
       - name: Cache Gradle
         uses: actions/cache@v4
