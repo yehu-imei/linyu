@@ -178,7 +178,8 @@ class WidgetBleService : Service() {
         }
 
         // ⚠️ App 还活着（MainViewModel 存活）时，它握着内存里那条 BLE 连接；
-        // 小组件再 connectGatt 会和它抢。转交 App 用它的连接关阀更稳。
+        // 小组件再 connectGatt 会和它抢。转交 App 用它的连接关阀更稳
+        // （App 若没有这条连接，它会自己重连设备重建会话再关，见 reconnectAndStopBle）。
         if (BleArbiter.appAlive) {
             AppLogger.i("小组件蓝牙关阀：App 存活，转交 App 处理 $snCode")
             ShowerEvents.notifyStopBleRequest(snCode)

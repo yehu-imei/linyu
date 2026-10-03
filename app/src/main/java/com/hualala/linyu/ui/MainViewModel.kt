@@ -256,14 +256,25 @@ class MainViewModel : ViewModel() {
                 refreshWidgets()
             }
         }
-        // 通知栏「结束使用」按钮对蓝牙表：服务发来请求，App 若还持有 BLE 连接就关阀结算
+        // 通知栏「结束使用」按钮 / 小组件的「关闭」对蓝牙表：服务发来请求，
+        // App 若还持有这台设备的 BLE 连接就用自己的连接关阀（更稳），否则**重连设备**再关。
         viewModelScope.launch {
             ShowerEvents.stopBleRequest.collect { snCode ->
                 AppLogger.i("收到服务请求停止蓝牙用水 $snCode")
-                if (bleSession?.snCode == snCode) {
+                // ⚠️ App 能直接关的前提是**这一进程亲手开过这台设备的阀**——
+                // 只有那时它才同时握着 [bleSession]（会话）和 [bleController]（活的 GATT 连接）。
+                //
+                // 小组件开的阀（会话在 WidgetBleService 那边）、或 App 进程被系统回收过
+                // （内存里的会话/连接都没了，但 [BleArbiter.appAlive] 仍为真，因为
+                // MainViewModel 一建起来就把它置 true），这两种情况下都**不能**直接关。
+                //
+                // 这时必须走 [reconnectAndStopBle]：重连设备 → 用状态帧重建会话 → 关阀。
+                // 少了这个分支，请求就停在这里（老代码只弹一句提示），
+                // 卡片闪一下「正在关闭…」又恢复原状，阀一直开着——用户看到的就是「关闭按钮失效」。
+                if (bleSession?.snCode == snCode && bleController != null) {
                     stopBleShower()
                 } else {
-                    toastMessage = "蓝牙连接已断开，请打开设备页重新连接后再关闭"
+                    reconnectAndStopBle(snCode)
                 }
             }
         }
