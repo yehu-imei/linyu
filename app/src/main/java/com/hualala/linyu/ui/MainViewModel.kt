@@ -63,6 +63,8 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.data.DeviceInfoCache
+import com.hualala.linyu.widget.WidgetBridge
+import com.hualala.linyu.data.MacFormat
 import com.hualala.linyu.data.SettlementEngine
 
 /**
@@ -214,7 +216,8 @@ class MainViewModel : ViewModel() {
 
     private var currentOrderNo: String? = null
     private var activeDeviceSnCodes = mutableSetOf<String>()
-    private val fetchingMacs = mutableSetOf<String>()
+    /** 本轮扫描里已经发起过设备信息查询的 MAC（见 [addDevice]）；[startScan] 时清空 */
+    private val queriedThisScan = mutableSetOf<String>()
     private val gson = Gson()
     private var scanner: BluetoothScanner? = null
     private var mqttManager: MqttManager? = null
@@ -254,14 +257,25 @@ class MainViewModel : ViewModel() {
                 refreshWidgets()
             }
         }
-        // 通知栏「结束使用」按钮对蓝牙表：服务发来请求，App 若还持有 BLE 连接就关阀结算
+        // 通知栏「结束使用」按钮 / 小组件的「关闭」对蓝牙表：服务发来请求，
+        // App 若还持有这台设备的 BLE 连接就用自己的连接关阀（更稳），否则**重连设备**再关。
         viewModelScope.launch {
             ShowerEvents.stopBleRequest.collect { snCode ->
                 AppLogger.i("收到服务请求停止蓝牙用水 $snCode")
-                if (bleSession?.snCode == snCode) {
+                // ⚠️ App 能直接关的前提是**这一进程亲手开过这台设备的阀**——
+                // 只有那时它才同时握着 [bleSession]（会话）和 [bleController]（活的 GATT 连接）。
+                //
+                // 小组件开的阀（会话在 WidgetBleService 那边）、或 App 进程被系统回收过
+                // （内存里的会话/连接都没了，但 [BleArbiter.appAlive] 仍为真，因为
+                // MainViewModel 一建起来就把它置 true），这两种情况下都**不能**直接关。
+                //
+                // 这时必须走 [reconnectAndStopBle]：重连设备 → 用状态帧重建会话 → 关阀。
+                // 少了这个分支，请求就停在这里（老代码只弹一句提示），
+                // 卡片闪一下「正在关闭…」又恢复原状，阀一直开着——用户看到的就是「关闭按钮失效」。
+                if (bleSession?.snCode == snCode && bleController != null) {
                     stopBleShower()
                 } else {
-                    toastMessage = "蓝牙连接已断开，请打开设备页重新连接后再关闭"
+                    reconnectAndStopBle(snCode)
                 }
             }
         }
@@ -373,6 +387,8 @@ class MainViewModel : ViewModel() {
 
     fun startScan() {
         nearbyDevices.clear(); activeDeviceSnCodes.clear()
+        // 新一轮扫描 = 允许对每台设备再查一次（见 addDevice）
+        queriedThisScan.clear()
         isScanning = true; scanStartTime = System.currentTimeMillis(); scanner?.startScan()
     }
     /**
@@ -446,6 +462,18 @@ class MainViewModel : ViewModel() {
     }
 
     // ── 点击设备 ──
+    //
+    // ⚠️ 这条路径**不能静默失败**。
+    //
+    // `/device/info/mac` 查不到设备时返回的是
+    // `success=true, errorCode=0, errorMessage="成功", data=null`——它既不是网络错误，
+    // 也不是"报错"，只是服务端说"没有这台设备"。而老代码的失败分支只调了 [checkKick]，
+    // 它只认「登录 / token / 失效 / 过期 / 认证」这类词，"成功"一个都不匹配，
+    // 于是**既不弹窗、也不提示、也没有日志**：用户点一次设备卡片，屏幕上什么都不发生。
+    // 用户报的「点击热水器卡片跳不到开关页面」就是这个观感。
+    //
+    // 现在三种结果分开说：查到了 → 弹详情；服务端说没有这台设备 → 明说；
+    // 服务端明确报错 → 把原话转给用户。
     fun fetchDeviceInfo(mac: String) {
         val cached = nearbyDevices.find { it.mac == mac }?.deviceInfo
         if (cached != null) {
@@ -459,15 +487,26 @@ class MainViewModel : ViewModel() {
                 if (resp.success && resp.data != null) {
                     selectedDevice = resp.data; showDeviceDetail = true
                     refreshDeviceStatus(resp.data.snCode)
-                } else checkKick(resp.displayMessage)
+                } else {
+                    checkKick(resp.displayMessage)
+                    toastMessage = when {
+                        // 服务端明确报错（被挤下线由上面的 checkKick 负责），照原话说
+                        !resp.success -> resp.displayMessage ?: "获取设备信息失败，请稍后重试"
+                        // success=true 但 data=null：服务端确认没有登记这台设备
+                        else -> "服务端没有这台设备的记录（$mac）"
+                    }
+                }
             } catch (e: Exception) {
                 checkKickEx(e)
                 val msg = e.message ?: ""
-                if (msg.contains("Unable to resolve host", ignoreCase = true) ||
+                toastMessage = if (msg.contains("Unable to resolve host", ignoreCase = true) ||
                     msg.contains("No address associated", ignoreCase = true) ||
                     msg.contains("Network is unreachable", ignoreCase = true) ||
                     msg.contains("Failed to connect", ignoreCase = true)) {
-                    toastMessage = "网络连接失败，请检查网络设置"
+                    "网络连接失败，请检查网络设置"
+                } else {
+                    // 以前这里什么都不说，异常被整个吞掉，同样是"点了没反应"
+                    "获取设备信息失败，请稍后重试"
                 }
             }
         }
@@ -1174,6 +1213,7 @@ class MainViewModel : ViewModel() {
         if (ctx == null) {
             toastMessage = "应用上下文丢失，请重试"
             isStopping = false
+            endStopAttempt()
             return
         }
         isStopping = true
@@ -1188,13 +1228,18 @@ class MainViewModel : ViewModel() {
                 AppLogger.w("蓝牙补救关阀中止：MAC 无效（$mac）")
                 toastMessage = "设备地址丢失，无法关闭，请重新进入设备页面后重试"
                 isStopping = false
+                endStopAttempt()
                 return@launch
             }
 
             val ble = bleController ?: BleController(ctx).also { bleController = it }
             bleProgress = "正在重新连接设备…"
+            // ⚠️ 这里存的是**台账 MAC**，而蓝牙连接要的是手机扫描到的**空口广播地址**，
+            // 两个对部分设备不是一个字符串（见 MacFormat）。只有台账 MAC 时按规范反推；
+            // 推不出来说明本来就是个广播地址，原样返回。
+            val connectAddress = MacFormat.connectAddressFor(mac)
             val st: DeviceQueryState? = try {
-                when (val cr = ble.connect(mac)) {
+                when (val cr = ble.connect(connectAddress)) {
                     is BleConnectResult.Ready -> ble.query()
                     is BleConnectResult.NoService -> null
                     is BleConnectResult.Failed -> {
@@ -1210,13 +1255,17 @@ class MainViewModel : ViewModel() {
             if (st == null) {
                 toastMessage = "蓝牙连接失败，请靠近设备后重试"
                 isStopping = false
+                endStopAttempt()
                 return@launch
             }
 
             AppLogger.i("蓝牙会话已重建：protocol=${st.protocolType} random=${st.randomNumber}")
             bleSession = BleShowerController.Session(
                 snCode = snCode,
-                mac = mac,
+                // ⚠️ 必须是**连接地址**（上面那个 connectAddress），不能是台账 MAC：
+                // closeAndSettle 会拿 session.mac 再连一次设备（设备只在新连接里
+                // 给出可结算的记录），存错了就永远连不上、关阀失败。
+                mac = connectAddress,
                 protocolType = st.protocolType,
                 randomNumber = st.randomNumber,
                 consumeDate = "",   // 进程死亡后拿不到了；只有失败上报用，先留空
@@ -1228,12 +1277,14 @@ class MainViewModel : ViewModel() {
     }
 
     private fun stopBleShower(@Suppress("UNUSED_PARAMETER") skipNetwork: Boolean = false) {
+        // 小组件转交过来的关阀：busy 已由服务标记为「托管给 App」，所有出口都要 endStopAttempt
         val session = bleSession ?: return
         val ble = bleController
         if (ble == null) {
             // 连接已经没了，阀关不了——如实告诉用户，别假装成功
             toastMessage = "蓝牙连接已断开，请重新连接该设备后再关闭"
             isStopping = false
+            endStopAttempt()
             return
         }
 
@@ -1241,6 +1292,7 @@ class MainViewModel : ViewModel() {
         if (!BleArbiter.begin(session.snCode, "app")) {
             toastMessage = "该设备正在处理其他蓝牙操作，请稍候再试"
             isStopping = false
+            endStopAttempt()
             return
         }
 
@@ -1297,17 +1349,37 @@ class MainViewModel : ViewModel() {
                     toastMessage = outcome.message
                     AppLogger.w("蓝牙关阀失败，保留使用页以便重试")
                     isStopping = false
+                    endStopAttempt()   // 卡片从「正在关闭…」回到「使用中」，水确实还在流
                 }
 
                 null -> {
                     toastMessage = "停止失败，请重试"
                     isStopping = false
+                    endStopAttempt()
                 }
             }
         }
     }
 
     /** 完成停止流程：退出洗澡界面，清理状态，显示结算结果 */
+    /**
+     * 一次停止尝试结束（**成败都算**）：收掉小组件托管过来的「正在关闭…」并重绘桌面。
+     *
+     * 小组件的关阀有两种走法，busy 的归属跟着操作走：
+     *
+     * | 走法 | busy 谁清 |
+     * |---|---|
+     * | 服务自己关（App 进程不在） | `WidgetBleService` 的 finally |
+     * | 转交 App 关（App 握着连接） | **本方法**——转交时 busy 被保留，一直显示「正在关闭…」直到真正关完 |
+     *
+     * 少了这里的收尾，转交路径的卡片会在关阀中途弹回「使用中」继续计时，
+     * 过一两秒才变空闲——用户看到的就是「闪一下正在关闭、又接着计时」。
+     */
+    private fun endStopAttempt() {
+        WidgetBridge.clearBusy()
+        refreshWidgets()
+    }
+
     private fun finishShower(snCode: String, consumed: Double?) {
         isShowering = false
         isStopping = false
@@ -1331,7 +1403,10 @@ class MainViewModel : ViewModel() {
         PrefsHelper.clearAutoDiscon(snCode)  // 清除自动关停倒计时
         showerSnCode = null; timerJob?.cancel(); orderPollJob?.cancel()
         try { mqttManager?.disconnect() } catch (_: Exception) {}
-        refreshWidgets()  // 桌面小组件跟着变回「空闲」
+        // ⚠️ 小组件的「正在关闭…」由本进程收尾：转交过来的关阀（见 WidgetBleService），
+        // busy 一直保留到这里，清掉后卡片才落到「空闲」。
+        WidgetBridge.clearBusy()
+        refreshWidgets()
     }
 
     fun logout(preserveActiveRecovery: Boolean = false) {
@@ -2041,13 +2116,17 @@ class MainViewModel : ViewModel() {
         val idx = nearbyDevices.indexOfFirst { it.mac == device.mac }
         if (idx >= 0) {
             val e = nearbyDevices[idx]
-            if (abs(e.rssi - device.rssi) > 5 || e.deviceInfo == null) {
-                nearbyDevices[idx] = e.copy(rssi = device.rssi)
-                if (e.deviceInfo == null && fetchingMacs.add(device.mac)) fetchInfo(device.mac)
-            }
+            if (abs(e.rssi - device.rssi) > 5) nearbyDevices[idx] = e.copy(rssi = device.rssi)
         } else {
-            nearbyDevices.add(device); if (fetchingMacs.add(device.mac)) fetchInfo(device.mac)
+            nearbyDevices.add(device)
         }
+
+        // ⚠️ 每台设备**每轮扫描只查一次**。
+        //
+        // 扫描回调对同一台设备每 ~200ms 就来一条，而"只要这台还没有 deviceInfo 就再查一次"
+        // 会让**查不到**的设备被无限重查（实测日志里 13 秒对同一个 MAC 发了 35 次）。
+        // 设备信息在一轮扫描内不会变，想重试交给下拉刷新（会重新 startScan 并清空本集合）。
+        if (queriedThisScan.add(device.mac)) fetchInfo(device.mac)
     }
 
     private fun fetchInfo(mac: String) {
@@ -2070,7 +2149,6 @@ class MainViewModel : ViewModel() {
                     } catch (_: Exception) {}
                 } else checkKick(resp.displayMessage)
             } catch (e: Exception) { checkKickEx(e) }
-            finally { fetchingMacs.remove(mac) }
         }
     }
 

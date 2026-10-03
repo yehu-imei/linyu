@@ -158,9 +158,24 @@ object BleShowerController {
             return OpenOutcome.Failed("设备缺少有效的 MAC 地址，无法蓝牙连接")
         }
 
+        // ⚠️ 连接用的地址**不等于**上面那个（服务端接口要的）地址，别把它俩"统一"成一个。
+        //
+        // | 用途 | 用哪个 | 实测值（projectId=71 某台） |
+        // |---|---|---|
+        // | 服务端接口的 `macAddress` | `mac` | `00:15:83:04:D3:00`（台账里的） |
+        // | 蓝牙 `getRemoteDevice()` | `connectAddress` | `C0:15:83:04:D3:00`（空口广播地址） |
+        //
+        // 两者只差首字节最高两位，换算见 [MacFormat]。手机的蓝牙控制器只认扫描时看到的
+        // 那个地址，拿台账 MAC 去连是**连不上**的——老代码只有一个 `mac` 变量同时喂两边，
+        // 所以这类设备在"查得到设备"之后依然开不了阀。
+        //
+        // [Session.mac] 也必须存连接地址：断开后重连（`ble.connect(session.mac)`）用它。
+        val connectAddress = device.realMac?.takeIf { it.isNotBlank() }
+            ?: MacFormat.connectAddressFor(device.macAddress)
+
         // ① 连接
-        AppLogger.i("蓝牙开阀：连接 $mac")
-        when (val cr = ble.connect(mac)) {
+        AppLogger.i("蓝牙开阀：连接 $connectAddress")
+        when (val cr = ble.connect(connectAddress)) {
             is BleConnectResult.Ready -> Unit
             is BleConnectResult.NoService ->
                 return OpenOutcome.NotBleDevice("这台设备不支持蓝牙控制")
@@ -197,7 +212,7 @@ object BleShowerController {
                     return OpenOutcome.Resumed(
                         Session(
                             snCode = device.snCode,
-                            mac = mac,
+                            mac = connectAddress,
                             protocolType = st.protocolType,
                             randomNumber = st.randomNumber,
                             consumeDate = "",   // 恢复没重新走 rateOrder，拿不到；只有失败上报才用
@@ -249,7 +264,7 @@ object BleShowerController {
             val written = ble.writeRate(downBytes)
             val session = Session(
                 snCode = device.snCode,
-                mac = mac,
+                mac = connectAddress,
                 protocolType = st.protocolType,
                 randomNumber = st.randomNumber,
                 consumeDate = consumeDate,
