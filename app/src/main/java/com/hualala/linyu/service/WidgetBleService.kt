@@ -19,6 +19,7 @@ import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
 import com.hualala.linyu.widget.LinYuWidget
+import com.hualala.linyu.widget.WidgetBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -79,6 +80,15 @@ class WidgetBleService : Service() {
             } catch (t: Throwable) {
                 AppLogger.e("小组件蓝牙操作异常（$action）", t)
             } finally {
+                // ⚠️ 桌面上的「正在开启…/正在关闭…」由**服务**负责收尾。
+                //
+                // 小组件那边只 `markDelegated()`（它自己的收尾流程会跳过 busy），
+                // 所以所有出口都必须在这里清掉。少了这一句，关阀其实已经成功了，
+                // 卡片却会**一直转圈**停在「正在关闭…」——这条路径以前一次都没清过。
+                //
+                // 清 busy 要在 refreshAll **之前**：doClose 里已经 `markFinished()` 过，
+                // 此时重绘会直接落到「空闲」，不会先闪一下「使用中」。
+                WidgetBridge.clearBusy()
                 LinYuWidget.refreshAll(this@WidgetBleService)
                 stopSelf()
             }
