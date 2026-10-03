@@ -63,6 +63,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.data.DeviceInfoCache
+import com.hualala.linyu.data.MacFormat
 import com.hualala.linyu.data.SettlementEngine
 
 /**
@@ -214,7 +215,8 @@ class MainViewModel : ViewModel() {
 
     private var currentOrderNo: String? = null
     private var activeDeviceSnCodes = mutableSetOf<String>()
-    private val fetchingMacs = mutableSetOf<String>()
+    /** 本轮扫描里已经发起过设备信息查询的 MAC（见 [addDevice]）；[startScan] 时清空 */
+    private val queriedThisScan = mutableSetOf<String>()
     private val gson = Gson()
     private var scanner: BluetoothScanner? = null
     private var mqttManager: MqttManager? = null
@@ -373,6 +375,8 @@ class MainViewModel : ViewModel() {
 
     fun startScan() {
         nearbyDevices.clear(); activeDeviceSnCodes.clear()
+        // 新一轮扫描 = 允许对每台设备再查一次（见 addDevice）
+        queriedThisScan.clear()
         isScanning = true; scanStartTime = System.currentTimeMillis(); scanner?.startScan()
     }
     /**
@@ -1193,8 +1197,12 @@ class MainViewModel : ViewModel() {
 
             val ble = bleController ?: BleController(ctx).also { bleController = it }
             bleProgress = "正在重新连接设备…"
+            // ⚠️ 这里存的是**台账 MAC**，而蓝牙连接要的是手机扫描到的**空口广播地址**，
+            // 两个对部分设备不是一个字符串（见 MacFormat）。只有台账 MAC 时按规范反推；
+            // 推不出来说明本来就是个广播地址，原样返回。
+            val connectAddress = MacFormat.connectAddressFor(mac)
             val st: DeviceQueryState? = try {
-                when (val cr = ble.connect(mac)) {
+                when (val cr = ble.connect(connectAddress)) {
                     is BleConnectResult.Ready -> ble.query()
                     is BleConnectResult.NoService -> null
                     is BleConnectResult.Failed -> {
@@ -1216,7 +1224,10 @@ class MainViewModel : ViewModel() {
             AppLogger.i("蓝牙会话已重建：protocol=${st.protocolType} random=${st.randomNumber}")
             bleSession = BleShowerController.Session(
                 snCode = snCode,
-                mac = mac,
+                // ⚠️ 必须是**连接地址**（上面那个 connectAddress），不能是台账 MAC：
+                // closeAndSettle 会拿 session.mac 再连一次设备（设备只在新连接里
+                // 给出可结算的记录），存错了就永远连不上、关阀失败。
+                mac = connectAddress,
                 protocolType = st.protocolType,
                 randomNumber = st.randomNumber,
                 consumeDate = "",   // 进程死亡后拿不到了；只有失败上报用，先留空
@@ -2041,13 +2052,17 @@ class MainViewModel : ViewModel() {
         val idx = nearbyDevices.indexOfFirst { it.mac == device.mac }
         if (idx >= 0) {
             val e = nearbyDevices[idx]
-            if (abs(e.rssi - device.rssi) > 5 || e.deviceInfo == null) {
-                nearbyDevices[idx] = e.copy(rssi = device.rssi)
-                if (e.deviceInfo == null && fetchingMacs.add(device.mac)) fetchInfo(device.mac)
-            }
+            if (abs(e.rssi - device.rssi) > 5) nearbyDevices[idx] = e.copy(rssi = device.rssi)
         } else {
-            nearbyDevices.add(device); if (fetchingMacs.add(device.mac)) fetchInfo(device.mac)
+            nearbyDevices.add(device)
         }
+
+        // ⚠️ 每台设备**每轮扫描只查一次**。
+        //
+        // 扫描回调对同一台设备每 ~200ms 就来一条，而"只要这台还没有 deviceInfo 就再查一次"
+        // 会让**查不到**的设备被无限重查（实测日志里 13 秒对同一个 MAC 发了 35 次）。
+        // 设备信息在一轮扫描内不会变，想重试交给下拉刷新（会重新 startScan 并清空本集合）。
+        if (queriedThisScan.add(device.mac)) fetchInfo(device.mac)
     }
 
     private fun fetchInfo(mac: String) {
@@ -2070,7 +2085,6 @@ class MainViewModel : ViewModel() {
                     } catch (_: Exception) {}
                 } else checkKick(resp.displayMessage)
             } catch (e: Exception) { checkKickEx(e) }
-            finally { fetchingMacs.remove(mac) }
         }
     }
 
