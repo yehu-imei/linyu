@@ -63,6 +63,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.data.DeviceInfoCache
+import com.hualala.linyu.widget.WidgetBridge
 import com.hualala.linyu.data.MacFormat
 import com.hualala.linyu.data.SettlementEngine
 
@@ -1212,6 +1213,7 @@ class MainViewModel : ViewModel() {
         if (ctx == null) {
             toastMessage = "应用上下文丢失，请重试"
             isStopping = false
+            endStopAttempt()
             return
         }
         isStopping = true
@@ -1226,6 +1228,7 @@ class MainViewModel : ViewModel() {
                 AppLogger.w("蓝牙补救关阀中止：MAC 无效（$mac）")
                 toastMessage = "设备地址丢失，无法关闭，请重新进入设备页面后重试"
                 isStopping = false
+                endStopAttempt()
                 return@launch
             }
 
@@ -1252,6 +1255,7 @@ class MainViewModel : ViewModel() {
             if (st == null) {
                 toastMessage = "蓝牙连接失败，请靠近设备后重试"
                 isStopping = false
+                endStopAttempt()
                 return@launch
             }
 
@@ -1273,12 +1277,14 @@ class MainViewModel : ViewModel() {
     }
 
     private fun stopBleShower(@Suppress("UNUSED_PARAMETER") skipNetwork: Boolean = false) {
+        // 小组件转交过来的关阀：busy 已由服务标记为「托管给 App」，所有出口都要 endStopAttempt
         val session = bleSession ?: return
         val ble = bleController
         if (ble == null) {
             // 连接已经没了，阀关不了——如实告诉用户，别假装成功
             toastMessage = "蓝牙连接已断开，请重新连接该设备后再关闭"
             isStopping = false
+            endStopAttempt()
             return
         }
 
@@ -1286,6 +1292,7 @@ class MainViewModel : ViewModel() {
         if (!BleArbiter.begin(session.snCode, "app")) {
             toastMessage = "该设备正在处理其他蓝牙操作，请稍候再试"
             isStopping = false
+            endStopAttempt()
             return
         }
 
@@ -1342,17 +1349,37 @@ class MainViewModel : ViewModel() {
                     toastMessage = outcome.message
                     AppLogger.w("蓝牙关阀失败，保留使用页以便重试")
                     isStopping = false
+                    endStopAttempt()   // 卡片从「正在关闭…」回到「使用中」，水确实还在流
                 }
 
                 null -> {
                     toastMessage = "停止失败，请重试"
                     isStopping = false
+                    endStopAttempt()
                 }
             }
         }
     }
 
     /** 完成停止流程：退出洗澡界面，清理状态，显示结算结果 */
+    /**
+     * 一次停止尝试结束（**成败都算**）：收掉小组件托管过来的「正在关闭…」并重绘桌面。
+     *
+     * 小组件的关阀有两种走法，busy 的归属跟着操作走：
+     *
+     * | 走法 | busy 谁清 |
+     * |---|---|
+     * | 服务自己关（App 进程不在） | `WidgetBleService` 的 finally |
+     * | 转交 App 关（App 握着连接） | **本方法**——转交时 busy 被保留，一直显示「正在关闭…」直到真正关完 |
+     *
+     * 少了这里的收尾，转交路径的卡片会在关阀中途弹回「使用中」继续计时，
+     * 过一两秒才变空闲——用户看到的就是「闪一下正在关闭、又接着计时」。
+     */
+    private fun endStopAttempt() {
+        WidgetBridge.clearBusy()
+        refreshWidgets()
+    }
+
     private fun finishShower(snCode: String, consumed: Double?) {
         isShowering = false
         isStopping = false
@@ -1376,7 +1403,10 @@ class MainViewModel : ViewModel() {
         PrefsHelper.clearAutoDiscon(snCode)  // 清除自动关停倒计时
         showerSnCode = null; timerJob?.cancel(); orderPollJob?.cancel()
         try { mqttManager?.disconnect() } catch (_: Exception) {}
-        refreshWidgets()  // 桌面小组件跟着变回「空闲」
+        // ⚠️ 小组件的「正在关闭…」由本进程收尾：转交过来的关阀（见 WidgetBleService），
+        // busy 一直保留到这里，清掉后卡片才落到「空闲」。
+        WidgetBridge.clearBusy()
+        refreshWidgets()
     }
 
     fun logout(preserveActiveRecovery: Boolean = false) {

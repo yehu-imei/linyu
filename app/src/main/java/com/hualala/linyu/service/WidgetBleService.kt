@@ -86,9 +86,13 @@ class WidgetBleService : Service() {
                 // 所以所有出口都必须在这里清掉。少了这一句，关阀其实已经成功了，
                 // 卡片却会**一直转圈**停在「正在关闭…」——这条路径以前一次都没清过。
                 //
-                // 清 busy 要在 refreshAll **之前**：doClose 里已经 `markFinished()` 过，
+                // 例外：这次操作**又转交给了 App**（App 接手用它的连接关阀）——
+                // busy 由 App 在停止尝试结束时清（MainViewModel.endStopAttempt），
+                // 这里再清的话卡片会在关阀中途弹回「使用中」，看着像关闭被取消了。
+                //
+                // 清 busy 要在 refreshAll **之前**：自己关的路径 doClose 里已经 `markFinished()` 过，
                 // 此时重绘会直接落到「空闲」，不会先闪一下「使用中」。
-                WidgetBridge.clearBusy()
+                if (!WidgetBridge.consumeDelegated()) WidgetBridge.clearBusy()
                 LinYuWidget.refreshAll(this@WidgetBleService)
                 stopSelf()
             }
@@ -182,6 +186,11 @@ class WidgetBleService : Service() {
         // （App 若没有这条连接，它会自己重连设备重建会话再关，见 reconnectAndStopBle）。
         if (BleArbiter.appAlive) {
             AppLogger.i("小组件蓝牙关阀：App 存活，转交 App 处理 $snCode")
+            // ⚠️ 转交不等于结束：busy 继续**保留**（再标一次 delegated，让下面 finally 跳过清理），
+            // 卡片会一直显示「正在关闭…」直到 App 把阀关掉。否则这里一返回 busy 就被清掉，
+            // 卡片弹回「使用中」继续计时、过一两秒才变空闲——看着就像关闭被取消了。
+            // App 那边在停止尝试结束时收尾（见 MainViewModel.endStopAttempt）。
+            WidgetBridge.markDelegated()
             ShowerEvents.notifyStopBleRequest(snCode)
             return
         }
