@@ -450,6 +450,18 @@ class MainViewModel : ViewModel() {
     }
 
     // ── 点击设备 ──
+    //
+    // ⚠️ 这条路径**不能静默失败**。
+    //
+    // `/device/info/mac` 查不到设备时返回的是
+    // `success=true, errorCode=0, errorMessage="成功", data=null`——它既不是网络错误，
+    // 也不是"报错"，只是服务端说"没有这台设备"。而老代码的失败分支只调了 [checkKick]，
+    // 它只认「登录 / token / 失效 / 过期 / 认证」这类词，"成功"一个都不匹配，
+    // 于是**既不弹窗、也不提示、也没有日志**：用户点一次设备卡片，屏幕上什么都不发生。
+    // 用户报的「点击热水器卡片跳不到开关页面」就是这个观感。
+    //
+    // 现在三种结果分开说：查到了 → 弹详情；服务端说没有这台设备 → 明说；
+    // 服务端明确报错 → 把原话转给用户。
     fun fetchDeviceInfo(mac: String) {
         val cached = nearbyDevices.find { it.mac == mac }?.deviceInfo
         if (cached != null) {
@@ -463,15 +475,26 @@ class MainViewModel : ViewModel() {
                 if (resp.success && resp.data != null) {
                     selectedDevice = resp.data; showDeviceDetail = true
                     refreshDeviceStatus(resp.data.snCode)
-                } else checkKick(resp.displayMessage)
+                } else {
+                    checkKick(resp.displayMessage)
+                    toastMessage = when {
+                        // 服务端明确报错（被挤下线由上面的 checkKick 负责），照原话说
+                        !resp.success -> resp.displayMessage ?: "获取设备信息失败，请稍后重试"
+                        // success=true 但 data=null：服务端确认没有登记这台设备
+                        else -> "服务端没有这台设备的记录（$mac）"
+                    }
+                }
             } catch (e: Exception) {
                 checkKickEx(e)
                 val msg = e.message ?: ""
-                if (msg.contains("Unable to resolve host", ignoreCase = true) ||
+                toastMessage = if (msg.contains("Unable to resolve host", ignoreCase = true) ||
                     msg.contains("No address associated", ignoreCase = true) ||
                     msg.contains("Network is unreachable", ignoreCase = true) ||
                     msg.contains("Failed to connect", ignoreCase = true)) {
-                    toastMessage = "网络连接失败，请检查网络设置"
+                    "网络连接失败，请检查网络设置"
+                } else {
+                    // 以前这里什么都不说，异常被整个吞掉，同样是"点了没反应"
+                    "获取设备信息失败，请稍后重试"
                 }
             }
         }
