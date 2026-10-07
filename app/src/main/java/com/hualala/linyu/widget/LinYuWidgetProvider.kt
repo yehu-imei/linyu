@@ -224,8 +224,16 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
             // （它走的是与 App 内完全相同的 BleShowerController 流程）
             if (PrefsHelper.isBleDevice(snCode)) {
                 AppLogger.i("Widget 检测到蓝牙表，转交 WidgetBleService 开阀 $snCode")
-                WidgetBridge.markBusy(WidgetRenderer.DisabledReason.STARTING)
-                WidgetBridge.renderAll(context)
+                // ⚠️ 必须 markDelegated —— 和下面「停止」同理：这次操作交给服务了，
+                // 广播收尾时**不能**清 busy。
+                //
+                // 少了这一句，`finishAction` 会把刚刚画出来的「正在开启…」立刻抹掉，
+                // 而蓝牙开阀要好 4~6 秒（连接 → 读状态帧 → 向服务端要费率 → 写费率包），
+                // 这几秒里卡片看起来毫无反应——用户以为没开成功。
+                // busy 由 [WidgetBleService] 完成后自己清（它那条 finally 是唯一出口）。
+                //
+                // 上面通用分支已经 markBusy(STARTING) + renderAll 过了，这里不必重复画。
+                WidgetBridge.markDelegated()
                 WidgetBleService.open(context, snCode, PrefsHelper.lastDeviceMac)
                 return
             }

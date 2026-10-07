@@ -19,6 +19,7 @@ import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
 import com.hualala.linyu.widget.LinYuWidget
+import com.hualala.linyu.widget.WidgetBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -79,6 +80,19 @@ class WidgetBleService : Service() {
             } catch (t: Throwable) {
                 AppLogger.e("小组件蓝牙操作异常（$action）", t)
             } finally {
+                // ⚠️ 桌面上的「正在开启…/正在关闭…」由**服务**负责收尾。
+                //
+                // 小组件那边只 `markDelegated()`（它自己的收尾流程会跳过 busy），
+                // 所以所有出口都必须在这里清掉。少了这一句，关阀其实已经成功了，
+                // 卡片却会**一直转圈**停在「正在关闭…」——这条路径以前一次都没清过。
+                //
+                // 例外：这次操作**又转交给了 App**（App 接手用它的连接关阀）——
+                // busy 由 App 在停止尝试结束时清（MainViewModel.endStopAttempt），
+                // 这里再清的话卡片会在关阀中途弹回「使用中」，看着像关闭被取消了。
+                //
+                // 清 busy 要在 refreshAll **之前**：自己关的路径 doClose 里已经 `markFinished()` 过，
+                // 此时重绘会直接落到「空闲」，不会先闪一下「使用中」。
+                if (!WidgetBridge.consumeDelegated()) WidgetBridge.clearBusy()
                 LinYuWidget.refreshAll(this@WidgetBleService)
                 stopSelf()
             }
@@ -168,9 +182,15 @@ class WidgetBleService : Service() {
         }
 
         // ⚠️ App 还活着（MainViewModel 存活）时，它握着内存里那条 BLE 连接；
-        // 小组件再 connectGatt 会和它抢。转交 App 用它的连接关阀更稳。
+        // 小组件再 connectGatt 会和它抢。转交 App 用它的连接关阀更稳
+        // （App 若没有这条连接，它会自己重连设备重建会话再关，见 reconnectAndStopBle）。
         if (BleArbiter.appAlive) {
             AppLogger.i("小组件蓝牙关阀：App 存活，转交 App 处理 $snCode")
+            // ⚠️ 转交不等于结束：busy 继续**保留**（再标一次 delegated，让下面 finally 跳过清理），
+            // 卡片会一直显示「正在关闭…」直到 App 把阀关掉。否则这里一返回 busy 就被清掉，
+            // 卡片弹回「使用中」继续计时、过一两秒才变空闲——看着就像关闭被取消了。
+            // App 那边在停止尝试结束时收尾（见 MainViewModel.endStopAttempt）。
+            WidgetBridge.markDelegated()
             ShowerEvents.notifyStopBleRequest(snCode)
             return
         }

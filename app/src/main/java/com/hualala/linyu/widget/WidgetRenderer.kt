@@ -234,6 +234,7 @@ object WidgetRenderer {
                     runningText = "预扣 · ${MoneyFormat.withSymbol(state.preDeduct)}",
                     timerText = null,
                     chronometerBase = chronometerBase(state.startedAtMs),
+                    chronometerRunning = state.startedAtMs > 0L,
                     busyText = noticeText
                 )
                 bindAct(running = true, disabled = disabled, action = LinYuWidgetProvider.ACTION_STOP)
@@ -400,6 +401,8 @@ object WidgetRenderer {
         runningText: String?,
         timerText: String? = null,
         chronometerBase: Long = 0L,
+        /** 计时器要不要**走秒**（见下面对 startedAt 的说明）；拿不到开阀时间时必须是 false */
+        chronometerRunning: Boolean = true,
         busyText: String? = null
     ) {
         // 三种面板叠在同一位置，切 visibility。
@@ -439,7 +442,14 @@ object WidgetRenderer {
                 views.setChronometer(R.id.widget_timer, 0L, null, false)
                 views.setTextViewText(R.id.widget_timer, timerText)
             } else {
-                views.setChronometer(R.id.widget_timer, chronometerBase, null, true)
+                // ⚠️ 只有拿到**有效**的开阀时间才让它走秒。
+                //
+                // "设备是否在用"（订单列表）和"开阀时间"（`startedAt` 键）是**两处独立读取**，
+                // 关阀 / 回滚的瞬间两者可能不一致。而 [chronometerBase] 在 `startedAt <= 0` 时
+                // 返回的是"现在"，一旦以 running=true 启动，卡片就从 00:00 往上计数——
+                // 用户看到的是「计时器跳一下清零、又重新开始计时」。
+                // 拿不到起始时间时保持静止的 00:00（与空闲态同一处理），不要让它假装在走。
+                views.setChronometer(R.id.widget_timer, chronometerBase, null, chronometerRunning)
             }
             // 使用中点卡片 = 关阀（正在操作时不响应，避免重复触发）
             views.setOnClickPendingIntent(

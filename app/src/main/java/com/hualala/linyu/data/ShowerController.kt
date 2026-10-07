@@ -543,8 +543,14 @@ object ShowerController {
      */
     fun restoreActiveOrder(snCode: String, orderNo: String, startedAtMs: Long) {
         if (snCode.isEmpty()) return
-        ensureActiveOrder(snCode, orderNo, null)
+        // ⚠️ 顺序：**先把计时写回去，再把订单放回来**。
+        //
+        // 反过来做会出现一个中间态「订单在、计时为 0」，而小组件的卡片是按订单判断"在用"、
+        // 按 `startedAt` 画计时器的——那个中间态会让卡片显示 00:00 并从零开始走秒
+        // （用户看到「计时器清零又重新计时」）。写在这个顺序上，中间态是"空闲"，
+        // 不会画出错误的状态。
         if (startedAtMs > 0L) PrefsHelper.setStartedAt(snCode, startedAtMs)
+        ensureActiveOrder(snCode, orderNo, null)
     }
 
     /**
