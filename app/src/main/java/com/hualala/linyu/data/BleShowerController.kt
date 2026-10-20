@@ -119,6 +119,12 @@ object BleShowerController {
      */
     private const val ERROR_SIGNATURE_REJECTED = 170
 
+    /** 消费体重载的最小长度：官方 SDK 的基础记录是 42 字节（扩展记录 63 字节） */
+    private const val CONSUMPTION_MIN_BYTES = 42
+
+    /** 设备应答里的成功标记字节 */
+    private const val ACK_OK = 0x80
+
     // ════════════════════════════════════════════
     //  开阀
     // ════════════════════════════════════════════
@@ -314,6 +320,17 @@ object BleShowerController {
         if (collectPayload == null || collectPayload.isEmpty()) {
             AppLogger.w("结算：采集消费数据失败")
             return SettleOutcome.PartialSettlement("未能读取消费数据")
+        }
+        // ⚠️ 设备回的不是账单就不能上传。
+        // 官方 SDK 的消费体是 42 字节起步（长格式 63 字节），首字节 `0x80` 是成功标记。
+        // 采集拿到错误应答（首字节非 0x80）或半截载荷时，若直接上传，服务端会把它当
+        // 一条消费记录处理——轻则报错，重则记错账。宁可在本地拦下、提示重试。
+        // 这里只做长度与标记校验，**不裁剪也不改写**载荷本身（原样作为 xfData 上传）。
+        if (collectPayload.size < CONSUMPTION_MIN_BYTES ||
+            collectPayload[0].toInt() and 0xFF != ACK_OK
+        ) {
+            AppLogger.w("结算：消费数据无效（${collectPayload.size}B，首字节 0x${String.format("%02X", collectPayload[0])}），放弃上传")
+            return SettleOutcome.PartialSettlement("设备返回的消费数据无效，请靠近后重试")
         }
         // ⚠️ xfData 必须**小写**：服务端对大小写敏感，签名用小写、上传字段也得用小写，
         // 否则重算签名对不上（2026-09-29 实测 170）。Funnyass_school 也是 upload 前 lowercase。

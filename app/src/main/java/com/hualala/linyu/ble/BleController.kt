@@ -20,27 +20,6 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
-/** 设备状态帧（`0x23` 的应答）里挖出来的关键值 */
-data class DeviceQueryState(
-    /** 协议版本，2 位大写 hex，如 `"20"`（取自 `p[19]`） */
-    val protocolType: String,
-    /** 设备给的随机数，8 位 hex（取自 `p[24..27]`）——**必须用它调 rateOrder**，不能本地生成 */
-    val randomNumber: String,
-    /**
-     * 设备状态字节（`p[28]`）。已观测值：
-     * - 0 = 空闲
-     * - 1 = 使用中（阀开着）
-     * - **6 = 已关阀但有遗留未结算的消费记录**（2026-09-29 实测：结算上传被 170 拒后，
-     *   设备停在 6，并会在下次被连上时主动推 0x22+0x85 把遗留记录给出来——这就是
-     *   官方「蓝牙重连自动结算」的设备侧机制）。本地有该设备活跃订单时按恢复处理。
-     */
-    val state: Int,
-    /** MAC 类型第 1 字节（`p[29]`）——`macType` 参数要用它，**不能自己猜** */
-    val devType: Int,
-    /** MAC 类型第 2 字节（`p[30]`）——同上 */
-    val a1: Int
-)
-
 /** 连接结果。**必须区分「连上了但不是水控设备」**——见 [NoService] */
 sealed interface BleConnectResult {
     /** 已就绪，可以发命令 */
@@ -279,22 +258,14 @@ class BleController(private val context: Context) {
         }
     }
 
-    /** 查询设备状态（`0x23`）。返回 null 表示设备没应答或帧太短 */
+    /** 查询设备状态（`0x23`）。返回 null 表示无有效应答或不支持该载荷格式。 */
     suspend fun query(timeoutMs: Long = DEFAULT_TIMEOUT_MS): DeviceQueryState? {
-        val p = sendAndAwait(CMD_QUERY, timeoutMs = timeoutMs) ?: return null
-        // 要读到 p[30]，所以至少 31 字节。实测应答更长，这里只是下限保护——
-        // 帧短了就去读下标，会拿到越界后的垃圾值，进而把错误的 macType 发给服务端
-        if (p.size < 31) {
-            AppLogger.w("状态应答过短：${p.size}B（需要 ≥31B），无法解析")
-            return null
+        val p = sendAndAwait(CMD_QUERY, data = DeviceQueryParser.requestData(), timeoutMs = timeoutMs)
+            ?: return null
+        return DeviceQueryParser.parse(p).also { state ->
+            // 打长度而不是内容：既够定位问题，也不把账号、MAC 之类写进日志。
+            if (state == null) AppLogger.w("无法解析状态应答：${p.size}B")
         }
-        return DeviceQueryState(
-            protocolType = String.format("%02X", p[19].toInt() and 0xFF),
-            randomNumber = BleFrame.toHex(p.copyOfRange(24, 28)),
-            state = p[28].toInt() and 0xFF,
-            devType = p[29].toInt() and 0xFF,
-            a1 = p[30].toInt() and 0xFF
-        )
     }
 
     /**
@@ -310,19 +281,19 @@ class BleController(private val context: Context) {
         return p.isNotEmpty() && (p[0].toInt() and 0xFF) == ACK_OK
     }
 
-    /** 关阀（`0x22`） */
+    /** 关阀（`0x22`）。与官方 SDK 一致，传**一个零字节**而不是空载荷。 */
     suspend fun closeValve(timeoutMs: Long = DEFAULT_TIMEOUT_MS): Boolean {
-        val p = sendAndAwait(CMD_CLOSE, timeoutMs = timeoutMs) ?: return false
+        val p = sendAndAwait(CMD_CLOSE, data = byteArrayOf(0), timeoutMs = timeoutMs) ?: return false
         return p.isNotEmpty() && (p[0].toInt() and 0xFF) == ACK_OK
     }
 
     /**
-     * 采集消费数据（`0x85`）。
+     * 采集消费数据（`0x85`）。与官方 SDK 一致，传**一个零字节**而不是空载荷。
      *
      * @return payload 即上传用的 `xfData`（hex 前需要自己转）
      */
     suspend fun collect(timeoutMs: Long = DEFAULT_TIMEOUT_MS): ByteArray? =
-        sendAndAwait(CMD_COLLECT, timeoutMs = timeoutMs)
+        sendAndAwait(CMD_COLLECT, data = byteArrayOf(0), timeoutMs = timeoutMs)
 
     /** 把结算结果写回设备存储（`0x86`） */
     suspend fun writeBack(data: ByteArray, timeoutMs: Long = DEFAULT_TIMEOUT_MS): Boolean {
