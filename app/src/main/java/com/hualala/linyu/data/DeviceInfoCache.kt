@@ -27,22 +27,22 @@ object DeviceInfoCache {
     private val map = LinkedHashMap<String, Entry>()
 
     @Synchronized
-    private fun cached(mac: String): DeviceInfo? {
-        val e = map[mac] ?: return null
+    private fun cached(key: String): DeviceInfo? {
+        val e = map[key] ?: return null
         if (System.currentTimeMillis() - e.at > TTL_MS) {
-            map.remove(mac)
+            map.remove(key)
             return null
         }
         return e.info
     }
 
     @Synchronized
-    private fun store(mac: String, info: DeviceInfo) {
+    private fun store(key: String, info: DeviceInfo) {
         // 简单 LRU：超限就丢最早插入的那个
         if (map.size >= MAX_ENTRIES) {
             map.keys.firstOrNull()?.let { map.remove(it) }
         }
-        map[mac] = Entry(System.currentTimeMillis(), info)
+        map[key] = Entry(System.currentTimeMillis(), info)
     }
 
     /**
@@ -67,14 +67,18 @@ object DeviceInfoCache {
      */
     suspend fun load(mac: String, force: Boolean = false): BaseResponse<DeviceInfo> {
         if (mac.isEmpty()) return BaseResponse(false, null)
-        if (!force) cached(mac)?.let { return BaseResponse(true, it) }
+        val projectId = NetworkModule.currentProjectId()
+        val cacheKey = "$projectId:$mac"
+        if (!force) cached(cacheKey)?.let { return BaseResponse(true, it) }
 
         var first: BaseResponse<DeviceInfo>? = null
         for ((index, candidate) in MacFormat.lookupVariants(mac).withIndex()) {
             val resp = NetworkModule.apiService.getDeviceInfoSafe(candidate)
             if (index == 0) first = resp
             resp.data?.let {
-                store(mac, it)
+                if (NetworkModule.currentProjectId() == projectId) {
+                    store(cacheKey, it)
+                }
                 return resp
             }
             // 服务端**明确报错**（如被挤下线）换写法也是同样的错，原样返回交给上层 checkKick；

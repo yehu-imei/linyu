@@ -254,7 +254,9 @@ class MainActivity : ComponentActivity() {
                     }
 
                     if (showLogoutConfirm) {
-                        val canLogout = canLogoutVoluntarily(PrefsHelper.getActiveOrders())
+                        val canLogout =
+                            canLogoutVoluntarily(PrefsHelper.getActiveOrders()) &&
+                                mainViewModel.activeWasherSession == null
                         AlertDialog(
                             onDismissRequest = { showLogoutConfirm = false },
                             title = { Text(if (canLogout) "确认退出" else "无法退出") },

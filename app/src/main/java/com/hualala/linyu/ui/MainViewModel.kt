@@ -27,6 +27,10 @@ import com.hualala.linyu.data.BalanceEstimator
 import com.hualala.linyu.data.BleArbiter
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
+import com.hualala.linyu.data.ProjectRepository
+import com.hualala.linyu.data.ProjectSwitchOutcome
+import com.hualala.linyu.data.ServiceProject
+import com.hualala.linyu.data.toServiceProject
 import com.hualala.linyu.ble.BleController
 import com.hualala.linyu.ble.BleConnectResult
 import com.hualala.linyu.ble.DeviceQueryState
@@ -34,6 +38,8 @@ import com.hualala.linyu.data.BleShowerController
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
 import com.hualala.linyu.data.SettlementReconciler
+import com.hualala.linyu.data.WasherController
+import com.hualala.linyu.data.WasherStartOutcome
 import com.hualala.linyu.service.ShowerWatchService
 import com.hualala.linyu.widget.LinYuWidget
 import com.hualala.linyu.model.AccountInfo
@@ -47,6 +53,10 @@ import com.hualala.linyu.model.MqttOrderMsg
 import com.hualala.linyu.model.NearbyDevice
 import com.hualala.linyu.model.UnpaidBill
 import com.hualala.linyu.model.WalletData
+import com.hualala.linyu.model.WasherMode
+import com.hualala.linyu.model.WasherSession
+import com.hualala.linyu.model.WasherStatus
+import com.hualala.linyu.model.washerMainModes
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.BluetoothScanner
 import com.hualala.linyu.utils.MqttManager
@@ -84,6 +94,8 @@ enum class ShowerErrorKind {
     NETWORK,
     /** 设备信息不完整 */
     BAD_DEVICE,
+
+    WASHER_REJECTED,
 }
 
 /** 开阀失败：[message] 给用户看，[kind] 决定界面要不要引导去补扣 */
@@ -189,9 +201,31 @@ class MainViewModel : ViewModel() {
     var lastDeviceMac by mutableStateOf("")
     var lastDeviceSnCode by mutableStateOf("")
     var lastDeviceEmoji by mutableStateOf("🚿")
+    var lastDeviceProjectId by mutableStateOf("")
 
     var selectedDevice by mutableStateOf<DeviceInfo?>(null)
     var showDeviceDetail by mutableStateOf(false)
+
+    var washerModePickerDevice by mutableStateOf<DeviceInfo?>(null)
+        private set
+
+    val washerModes = mutableStateListOf<WasherMode>()
+    var isLoadingWasherModes by mutableStateOf(false)
+        private set
+
+    var activeWasherSession by mutableStateOf<WasherSession?>(null)
+        private set
+
+    var washerStatus by mutableStateOf<WasherStatus?>(null)
+        private set
+
+    var washerStageText by mutableStateOf("")
+        private set
+
+    var washerRemainingSec by mutableStateOf(0)
+        private set
+
+    private var washerPollJob: Job? = null
 
     /**
      * 设备归属（按 snCode 索引）。
@@ -224,6 +258,7 @@ class MainViewModel : ViewModel() {
     private var timerJob: Job? = null
     private var orderPollJob: Job? = null
     private var kickWatchJob: Job? = null
+    private var billLoadSeq = 0
 
     /**
      * 会话级协程作用域。
@@ -240,6 +275,19 @@ class MainViewModel : ViewModel() {
     private fun sessionScope() = CoroutineScope(viewModelScope.coroutineContext + sessionJob)
 
     init {
+        runCatching {
+            gson.fromJson(PrefsHelper.washerSessionJson, WasherSession::class.java)
+        }.getOrNull()?.takeIf {
+            it.device.snCode.isNotBlank() && (it.orderId.isNotBlank() || it.mode.typeId > 0)
+        }?.let { session ->
+            activeWasherSession = session
+            selectedDevice = session.device
+            washerStageText = session.mode.displayName
+            showerElapsedSec = ((System.currentTimeMillis() - session.startedAtMs) / 1000)
+                .toInt().coerceAtLeast(0)
+            washerRemainingSec = (session.mode.times - showerElapsedSec).coerceAtLeast(0)
+            startWasherPoll(session.device.snCode)
+        }
         // 让小组件服务知道「App 还活着、可能握着 BLE 连接」（见 BleArbiter）
         BleArbiter.appAlive = true
         // 用水结束由 ShowerWatchService 检测（它会清理本地状态并发通知），
@@ -284,6 +332,8 @@ class MainViewModel : ViewModel() {
     // ── 账单 ──
     var billList by mutableStateOf<List<BillItem>>(emptyList())
     var billHistory by mutableStateOf<List<BillItem>>(emptyList())
+    var billsProjectId by mutableStateOf("")
+        private set
     var isLoadingBills by mutableStateOf(false)
 
     /**
@@ -356,6 +406,26 @@ class MainViewModel : ViewModel() {
     var schoolName by mutableStateOf(PrefsHelper.schoolName)
         private set
 
+    var currentProjectId by mutableStateOf(PrefsHelper.projectId)
+        private set
+
+    var currentProjectName by mutableStateOf(
+        PrefsHelper.schoolName.ifBlank { "当前项目" }
+    )
+        private set
+
+    var availableProjects by mutableStateOf<List<ServiceProject>>(emptyList())
+        private set
+
+    var projectsLoading by mutableStateOf(false)
+        private set
+
+    var projectSwitching by mutableStateOf(false)
+        private set
+
+    var projectRevision by mutableStateOf(0)
+        private set
+
     /** 存一份 AppContext 供刷新桌面小组件用（ViewModel 不应该长期持有 Activity） */
     private var appContext: Context? = null
 
@@ -368,6 +438,7 @@ class MainViewModel : ViewModel() {
         lastDeviceMac = PrefsHelper.lastDeviceMac
         lastDeviceSnCode = PrefsHelper.lastDeviceSnCode
         lastDeviceEmoji = PrefsHelper.lastDeviceEmoji
+        lastDeviceProjectId = PrefsHelper.lastDeviceProjectId
         boundRoom = PrefsHelper.boundRoom
 
         // 恢复所有活跃订单
@@ -375,6 +446,138 @@ class MainViewModel : ViewModel() {
         activeOrders.clear()
         activeOrders.addAll(saved)
         saved.forEach { activeDeviceSnCodes.add(it.snCode) }
+    }
+
+    fun loadAvailableProjects() {
+        if (projectsLoading) return
+        projectsLoading = true
+        sessionScope().launch {
+            try {
+                val resp = ProjectRepository.loadProjects()
+                if (!resp.success) {
+                    toastMessage = resp.displayMessage ?: "读取项目列表失败"
+                    return@launch
+                }
+                val projects = resp.data.orEmpty()
+                    .mapNotNull { it.toServiceProject() }
+                    .distinctBy { it.projectId }
+                    .sortedBy { it.displayName }
+                availableProjects = projects
+
+                projects.firstOrNull { it.projectId == currentProjectId }?.let {
+                    currentProjectName = it.displayName
+                    schoolName = it.displayName
+                    PrefsHelper.schoolName = it.displayName
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("读取项目列表失败", e)
+                toastMessage = "读取项目列表失败，请检查网络"
+            } finally {
+                projectsLoading = false
+            }
+        }
+    }
+
+    fun switchProject(project: ServiceProject) {
+        if (project.projectId == currentProjectId || projectSwitching) return
+        if (!canSwitchProject()) {
+            toastMessage = "设备运行中，请先结束当前订单再切换项目"
+            return
+        }
+
+        projectSwitching = true
+        sessionScope().launch {
+            try {
+                when (val outcome = ProjectRepository.switchTo(project)) {
+                    is ProjectSwitchOutcome.Success -> {
+                        currentProjectId = outcome.project.projectId
+                        currentProjectName = outcome.project.displayName
+                        schoolName = outcome.project.displayName
+                        phone = PrefsHelper.telephone
+                        PrefsHelper.projectId = outcome.project.projectId
+                        PrefsHelper.schoolName = outcome.project.displayName
+                        resetProjectScopedState()
+                        projectRevision++
+                        toastMessage = "已切换到「${outcome.project.displayName}」"
+
+                        refreshWallet()
+                        loadBills(forceRefresh = true)
+                        loadCampusBalance()
+                        loadUnpaidBills()
+                        loadSchoolName()
+                        loadAccountInfo()
+                        loadUseCode()
+                    }
+
+                    is ProjectSwitchOutcome.Failed -> {
+                        toastMessage = outcome.message
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("切换项目异常", e)
+                toastMessage = "切换项目失败，请稍后重试"
+            } finally {
+                projectSwitching = false
+            }
+        }
+    }
+
+    private fun canSwitchProject(): Boolean =
+        activeOrders.isEmpty() &&
+            activeWasherSession == null &&
+            !isShowering &&
+            !isStopping &&
+            bleSession == null
+
+    private fun resetProjectScopedState() {
+        scanner?.stopScan()
+        isScanning = false
+        nearbyDevices.clear()
+        queriedThisScan.clear()
+        activeDeviceSnCodes.clear()
+        selectedDevice = null
+        showDeviceDetail = false
+        bleRetryDevice = null
+
+        walletInfo = null
+        campusBalance = PrefsHelper.campusBalance.toDoubleOrNull()
+        walletBalance = PrefsHelper.walletBalance.toDoubleOrNull()
+        accountInfo = null
+        billList = emptyList()
+        billHistory = emptyList()
+        billsProjectId = ""
+        billsLoaded = false
+        unpaidBills = emptyList()
+        deductingConsumeDate = null
+        useCodeData = null
+        useCodeLoaded = false
+
+        lastDeviceName = ""
+        lastDeviceMac = ""
+        lastDeviceSnCode = ""
+        lastDeviceEmoji = "🚿"
+        lastDeviceProjectId = ""
+        boundRoom = ""
+        PrefsHelper.lastDeviceName = ""
+        PrefsHelper.lastDeviceMac = ""
+        PrefsHelper.lastDeviceSnCode = ""
+        PrefsHelper.lastDeviceEmoji = ""
+        PrefsHelper.lastDeviceProjectId = ""
+        PrefsHelper.lastDeviceRawName = ""
+        PrefsHelper.lastDeviceTypeName = ""
+        PrefsHelper.lastDeviceWithholdMoney = 0f
+        PrefsHelper.lastConsumeTime = 0L
+        PrefsHelper.boundRoom = ""
+        PrefsHelper.widgetNearbyJson = ""
+        PrefsHelper.widgetBillJson = ""
+        PrefsHelper.widgetNearbyTime = 0L
+        PrefsHelper.widgetBillTime = 0L
+        WidgetBridge.clearBusy()
+        appContext?.let { LinYuWidget.refreshAll(it) }
     }
 
     override fun onCleared() {
@@ -437,6 +640,7 @@ class MainViewModel : ViewModel() {
                     PrefsHelper.lastDeviceName = info.displayName
                     PrefsHelper.lastDeviceRawName = info.deviceName   // 寝室筛选用，见 PrefsHelper
                     PrefsHelper.lastDeviceEmoji = info.typeEmoji
+                    PrefsHelper.lastDeviceProjectId = currentProjectId
                     // 弹出设备详情
                     selectedDevice = info; showDeviceDetail = true
                     refreshDeviceStatus(info.snCode)
@@ -513,8 +717,22 @@ class MainViewModel : ViewModel() {
     }
 
     private suspend fun refreshDeviceStatus(snCode: String) {
+        val requestProject = NetworkModule.currentProjectId()
+        val known = nearbyDevices.firstOrNull { it.deviceInfo?.snCode == snCode }?.deviceInfo
+            ?: selectedDevice?.takeIf { it.snCode == snCode }
+        if (known?.isWasher == true) {
+            val st = WasherController.status(known) ?: return
+            if (NetworkModule.currentProjectId() != requestProject) return
+            ownerBySn[snCode] = st.isOwner
+            if (st.looksActive && st.isOwner) {
+                activeDeviceSnCodes.add(snCode)
+                clearOccupiedIfStale(snCode)
+            }
+            return
+        }
         try {
             val q = NetworkModule.apiService.queryUsingSafe(snCode = snCode, auth = NetworkModule.authFields())
+            if (NetworkModule.currentProjectId() != requestProject) return
             if (q.errorCode == 307 || (q.success && q.data?.orderNo != null)) {
                 activeDeviceSnCodes.add(snCode)
                 // ⚠️ 按 snCode 记录归属（不能写全局变量：异步响应会串到别的设备上）
@@ -558,6 +776,10 @@ class MainViewModel : ViewModel() {
     }
 
     fun startLastDevice(phone: String) {
+        if (lastDeviceProjectId != currentProjectId) {
+            toastMessage = "上次设备属于其他项目，请切换项目后使用"
+            return
+        }
         val sn = lastDeviceSnCode.ifEmpty { return }
         // 找对应的活跃订单
         val order = activeOrders.find { it.snCode == sn }
@@ -596,6 +818,15 @@ class MainViewModel : ViewModel() {
         val device = selectedDevice ?: return
         val snCode = device.snCode
         if (snCode.isNullOrBlank()) { showerError = ShowerError("设备信息不完整", ShowerErrorKind.BAD_DEVICE); return }
+
+        if (device.isLaundry) {
+            if (activeWasherSession?.device?.snCode == snCode) {
+                restoreWasherScreen()
+                return
+            }
+            loadWasherModes(device)
+            return
+        }
 
         isStartingShower = true
         sessionScope().launch {
@@ -671,6 +902,186 @@ class MainViewModel : ViewModel() {
                 }
             } finally { isStartingShower = false }
         }
+    }
+
+    fun loadWasherModes(device: DeviceInfo) {
+        showerError = null
+        washerModePickerDevice = device
+        washerModes.clear()
+        isLoadingWasherModes = true
+        sessionScope().launch {
+            try {
+                val resp = WasherController.loadModes(device)
+                if (!resp.success) {
+                    showerError = ShowerError(
+                        resp.displayMessage ?: "读取洗衣机模式失败",
+                        ShowerErrorKind.WASHER_REJECTED
+                    )
+                    washerModePickerDevice = null
+                    return@launch
+                }
+                washerModes.addAll(washerMainModes(resp.data.orEmpty()))
+                if (washerModes.isEmpty()) {
+                    showerError = ShowerError(
+                        "当前项目没有可用的洗衣机模式，请确认已切换到有洗衣业务的项目",
+                        ShowerErrorKind.WASHER_REJECTED
+                    )
+                    washerModePickerDevice = null
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("读取洗烘模式失败", e)
+                showerError = ShowerError(
+                    "读取洗衣机模式失败，请检查网络",
+                    ShowerErrorKind.WASHER_REJECTED
+                )
+                washerModePickerDevice = null
+            } finally {
+                isLoadingWasherModes = false
+            }
+        }
+    }
+
+    fun dismissWasherModes() {
+        washerModePickerDevice = null
+        washerModes.clear()
+        isLoadingWasherModes = false
+    }
+
+    fun startWasherMode(mode: WasherMode) {
+        val device = washerModePickerDevice ?: return
+        if (isStartingShower) return
+        showerError = null
+        isStartingShower = true
+        bleProgress = "正在启动「${mode.displayName}」…"
+        sessionScope().launch {
+            try {
+                when (val outcome = WasherController.start(device, mode)) {
+                    is WasherStartOutcome.Started -> {
+                        washerModePickerDevice = null
+                        washerModes.clear()
+                        enterWasherState(outcome.session, outcome.status)
+                        toastMessage = "设备已启动：${mode.displayName}"
+                    }
+
+                    is WasherStartOutcome.Resumed -> {
+                        washerModePickerDevice = null
+                        washerModes.clear()
+                        enterWasherState(outcome.session, outcome.status)
+                        toastMessage = "已恢复到当前洗衣订单"
+                    }
+
+                    is WasherStartOutcome.InUseByOthers -> {
+                        showerError = ShowerError(outcome.message, ShowerErrorKind.IN_USE_BY_OTHERS)
+                    }
+
+                    is WasherStartOutcome.Failed -> {
+                        showerError = ShowerError(
+                            outcome.message,
+                            ShowerErrorKind.WASHER_REJECTED
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("启动洗烘设备异常", e)
+                showerError = ShowerError(
+                    "启动洗衣机失败，请检查网络",
+                    ShowerErrorKind.WASHER_REJECTED
+                )
+            } finally {
+                isStartingShower = false
+                bleProgress = null
+            }
+        }
+    }
+
+    private fun enterWasherState(session: WasherSession, initialStatus: WasherStatus?) {
+        activeWasherSession = session
+        PrefsHelper.washerSessionJson = gson.toJson(session)
+        selectedDevice = session.device
+        isShowering = true
+        isStopping = false
+        showerElapsedSec = 0
+        showerPreDeduct = session.preDeductYuan.takeIf { it > 0 } ?: session.device.withholdMoney
+        showerRemaining = MoneyFormat.format(showerPreDeduct)
+        applyWasherStatus(initialStatus)
+
+        lastDeviceName = session.device.displayName
+        lastDeviceMac = session.device.macAddress
+        lastDeviceSnCode = session.device.snCode
+        lastDeviceEmoji = session.device.typeEmoji
+        lastDeviceProjectId = currentProjectId
+        PrefsHelper.lastDeviceName = session.device.displayName
+        PrefsHelper.lastDeviceMac = session.device.macAddress
+        PrefsHelper.lastDeviceSnCode = session.device.snCode
+        PrefsHelper.lastDeviceEmoji = session.device.typeEmoji
+        PrefsHelper.lastDeviceProjectId = currentProjectId
+        PrefsHelper.lastDeviceRawName = session.device.deviceName
+        PrefsHelper.lastDeviceTypeName = session.device.typeLabel
+        PrefsHelper.lastDeviceWithholdMoney = showerPreDeduct.toFloat()
+
+        timerJob?.cancel()
+        timerJob = sessionScope().launch {
+            while (activeWasherSession != null) {
+                delay(1000)
+                showerElapsedSec = ((System.currentTimeMillis() - session.startedAtMs) / 1000)
+                    .toInt().coerceAtLeast(0)
+                washerRemainingSec = washerRemainingSec
+                    .coerceAtLeast(0)
+            }
+        }
+        startWasherPoll(session.device.snCode)
+    }
+
+    private fun applyWasherStatus(status: WasherStatus?) {
+        if (status == null) {
+            washerStageText = activeWasherSession?.mode?.displayName ?: "设备运行中"
+            return
+        }
+        washerStatus = status
+        washerStageText = status.stageText
+        washerRemainingSec = when {
+            status.time > 0 -> status.time
+            status.modeTime > 0 -> {
+                val elapsed = activeWasherSession?.let {
+                    ((System.currentTimeMillis() - it.startedAtMs) / 1000).toInt()
+                } ?: 0
+                (status.modeTime - elapsed).coerceAtLeast(0)
+            }
+            else -> 0
+        }
+    }
+
+    private fun startWasherPoll(snCode: String) {
+        washerPollJob?.cancel()
+        washerPollJob = sessionScope().launch {
+            while (activeWasherSession != null) {
+                delay(3_000)
+                val snapshot = WasherController.status(activeWasherSession?.device ?: break) ?: continue
+                if (!snapshot.isOwner) {
+                    washerStageText = "订单归属已变化，请到官方 App 核对"
+                    continue
+                }
+                applyWasherStatus(snapshot)
+            }
+        }
+    }
+
+    private fun finishWasherState() {
+        washerPollJob?.cancel()
+        washerPollJob = null
+        timerJob?.cancel()
+        timerJob = null
+        activeWasherSession = null
+        PrefsHelper.washerSessionJson = ""
+        washerStatus = null
+        washerStageText = ""
+        washerRemainingSec = 0
+        isShowering = false
+        isStopping = false
     }
 
     /**
@@ -921,8 +1332,10 @@ class MainViewModel : ViewModel() {
         }
 
         lastDeviceName = device.displayName; lastDeviceMac = device.macAddress; lastDeviceSnCode = snCode; lastDeviceEmoji = device.typeEmoji
+        lastDeviceProjectId = currentProjectId
         PrefsHelper.lastDeviceName = device.displayName; PrefsHelper.lastDeviceMac = device.macAddress
         PrefsHelper.lastDeviceSnCode = snCode; PrefsHelper.lastDeviceEmoji = device.typeEmoji
+        PrefsHelper.lastDeviceProjectId = currentProjectId
         PrefsHelper.lastDeviceRawName = device.deviceName   // 寝室筛选用，见 PrefsHelper
 
         // 交给前台服务持续监控：超时自动关停、被外部关闭，都要能立刻发现。
@@ -986,6 +1399,14 @@ class MainViewModel : ViewModel() {
      */
     fun reconcileShowerOnResume() {
         if (!isShowering) return
+        activeWasherSession?.let { session ->
+            showerElapsedSec = ((System.currentTimeMillis() - session.startedAtMs) / 1000)
+                .toInt().coerceAtLeast(0)
+            sessionScope().launch {
+                WasherController.status(session.device)?.let(::applyWasherStatus)
+            }
+            return
+        }
         val sn = showerSnCode ?: return
         if (ShowerController.isRunning(sn)) {
             // 还在用，只是把界面上的数字拉正（切后台期间计时器没跑）
@@ -1050,11 +1471,30 @@ class MainViewModel : ViewModel() {
      */
     fun restoreShowerScreen(phone: String) {
         if (isShowering) return
+        if (activeWasherSession != null) {
+            restoreWasherScreen()
+            return
+        }
         syncActiveOrdersFromPrefs()
         val order = activeOrders.firstOrNull() ?: return
         lastDeviceSnCode = order.snCode
         lastDeviceMac = order.deviceMac
         startLastDevice(phone)
+    }
+
+    fun restoreWasherScreen() {
+        val session = activeWasherSession ?: return
+        if (isShowering) return
+        selectedDevice = session.device
+        isShowering = true
+        timerJob?.cancel()
+        timerJob = sessionScope().launch {
+            while (activeWasherSession != null && isShowering) {
+                delay(1000)
+                showerElapsedSec = ((System.currentTimeMillis() - session.startedAtMs) / 1000)
+                    .toInt().coerceAtLeast(0)
+            }
+        }
     }
 
     /**
@@ -1440,11 +1880,19 @@ class MainViewModel : ViewModel() {
         kickedOut = false
         selectedDevice = null
         showDeviceDetail = false
+        activeWasherSession = null
+        washerStatus = null
+        washerStageText = ""
+        washerRemainingSec = 0
+        washerModePickerDevice = null
+        washerModes.clear()
+        PrefsHelper.washerSessionJson = ""
         nearbyDevices.clear()
         activeOrders.clear()
         activeDeviceSnCodes.clear()
         billList = emptyList()
         billHistory = emptyList()
+        billsProjectId = ""
         // 一起复位：下一轮登录要重新等账单到位，不能沿用上一次的「已加载」
         billsLoaded = false
         useCodeData = null
@@ -1453,6 +1901,12 @@ class MainViewModel : ViewModel() {
         accountInfo = null
         campusBalance = null
         walletBalance = null
+        currentProjectId = ""
+        currentProjectName = "当前项目"
+        availableProjects = emptyList()
+        projectsLoading = false
+        projectSwitching = false
+        billLoadSeq++
         phone = ""
         useCodeLoaded = false
         // 未支付账单和代扣锁是**跟账号走的**：不清的话，换账号后开阀失败弹窗会列出
@@ -1477,6 +1931,8 @@ class MainViewModel : ViewModel() {
             lastDeviceMac = ""
             lastDeviceSnCode = ""
             lastDeviceEmoji = "🚿"
+            lastDeviceProjectId = ""
+            boundRoom = ""
         }
         PrefsHelper.clear(preserveActiveRecovery)
         if (preserveActiveRecovery) appContext?.let(ShowerWatchService::stop)
@@ -1484,7 +1940,11 @@ class MainViewModel : ViewModel() {
 
     private fun saveOrders() { PrefsHelper.saveActiveOrders(activeOrders.toList()) }
 
-    fun isDeviceActive(snCode: String) = snCode in activeDeviceSnCodes
+    fun isLastDeviceInCurrentProject(): Boolean =
+        lastDeviceMac.isNotEmpty() && lastDeviceProjectId == currentProjectId
+
+    fun isDeviceActive(snCode: String) =
+        snCode in activeDeviceSnCodes || activeWasherSession?.device?.snCode == snCode
 
     // ── 寝室绑定 / 设备筛选 ──
 
@@ -1554,10 +2014,12 @@ class MainViewModel : ViewModel() {
         PrefsHelper.lastDeviceRawName = ""
         PrefsHelper.lastDeviceMac = ""
         PrefsHelper.lastDeviceEmoji = "🚿"
+        PrefsHelper.lastDeviceProjectId = ""
         lastDeviceSnCode = ""
         lastDeviceName = ""
         lastDeviceMac = ""
         lastDeviceEmoji = "🚿"
+        lastDeviceProjectId = ""
         AppLogger.i("绑定寝室后清掉了寝室外的上次设备：$name")
         refreshWidgets()
     }
@@ -1644,6 +2106,7 @@ class MainViewModel : ViewModel() {
     private fun stopTimer() {
         timerJob?.cancel(); timerJob = null
         orderPollJob?.cancel(); orderPollJob = null
+        washerPollJob?.cancel(); washerPollJob = null
         stopKickWatch()
     }
 
@@ -1663,12 +2126,19 @@ class MainViewModel : ViewModel() {
         kickedOut = false
         // 换账号了，手机号跟着换（新会话的认证参数已经写进 Prefs，这里同步到界面状态）
         phone = PrefsHelper.telephone
+        currentProjectId = PrefsHelper.projectId
+        currentProjectName = PrefsHelper.schoolName.ifBlank { "当前项目" }
+        availableProjects = emptyList()
+        projectSwitching = false
+        projectsLoading = false
     }
 
     fun refreshWallet() {
+        val requestProject = NetworkModule.currentProjectId()
         sessionScope().launch {
             try { 
                 val resp = NetworkModule.apiService.getWalletSafe()
+                if (NetworkModule.currentProjectId() != requestProject) return@launch
                 if (resp.success) {
                     walletInfo = resp.data
                     // 钱包余额落盘：一卡通拿不到时它就是真实余额
@@ -1696,9 +2166,11 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadUseCode() {
+        val requestProject = NetworkModule.currentProjectId()
         sessionScope().launch {
             try {
                 val resp = NetworkModule.apiService.getUseCodeSafe()
+                if (NetworkModule.currentProjectId() != requestProject) return@launch
                 if (resp.success && resp.data != null) useCodeData = resp.data
                 // 无论成功与否都算「拉过了」——网络失败时停在「加载中」比显示
                 // 「尚未领取」更糟，用户会以为 App 卡住了，而重进页面就会重拉
@@ -1753,16 +2225,20 @@ class MainViewModel : ViewModel() {
      */
     fun loadAccountInfo() {
         if (!PrefsHelper.isLoggedIn) return
+        val requestProject = NetworkModule.currentProjectId()
         sessionScope().launch {
             try {
                 NetworkModule.apiService.getAccountInfoSafe().data?.let {
+                    if (NetworkModule.currentProjectId() != requestProject) return@launch
                     applyIdentity(it.name, it.idCardNumber, it)
                 }
+                if (NetworkModule.currentProjectId() != requestProject) return@launch
                 // 姓名靠学校同步学籍数据，没同步的账号 /account/info 返回的 name 就是 null
                 // （实测同学的两个号都是这样）。换个接口再要一次——绑定卡信息里也有姓名和学号，
                 // 两个接口数据来源不同，一个没有另一个可能有。
                 if (PrefsHelper.userName.isEmpty() || PrefsHelper.userStudentId.isEmpty()) {
                     NetworkModule.apiService.getBindCardInfoSafe().data?.let {
+                        if (NetworkModule.currentProjectId() != requestProject) return@launch
                         applyIdentity(it.name, it.idCardNumber, null)
                     }
                 }
@@ -1856,11 +2332,14 @@ class MainViewModel : ViewModel() {
     /** 拉未支付账单列表。**失败保持原样，不清空**——清空会让按钮凭空消失 */
     fun loadUnpaidBills() {
         if (!PrefsHelper.isLoggedIn) return
+        val requestProject = NetworkModule.currentProjectId()
         val seq = ++unpaidSeq
         sessionScope().launch {
             // 只接受最新一次请求的结果，见 [unpaidSeq]
             val list = fetchUnpaid() ?: return@launch
-            if (seq == unpaidSeq) unpaidBills = list
+            if (seq == unpaidSeq && NetworkModule.currentProjectId() == requestProject) {
+                unpaidBills = list
+            }
         }
     }
 
@@ -2056,9 +2535,11 @@ class MainViewModel : ViewModel() {
      */
     fun loadSchoolName() {
         if (!PrefsHelper.isLoggedIn) return
+        val requestProject = NetworkModule.currentProjectId()
         sessionScope().launch {
             try {
                 val n = NetworkModule.apiService.getProjectInfoSafe().data?.projectName
+                if (NetworkModule.currentProjectId() != requestProject) return@launch
                 if (!n.isNullOrBlank() && n != PrefsHelper.schoolName) {
                     PrefsHelper.schoolName = n
                     schoolName = n
@@ -2075,9 +2556,11 @@ class MainViewModel : ViewModel() {
      */
     fun loadCampusBalance() {
         if (!PrefsHelper.isLoggedIn) return
+        val requestProject = NetworkModule.currentProjectId()
         sessionScope().launch {
             try {
                 val d = NetworkModule.apiService.getCampusUserInfoSafe().data ?: return@launch
+                if (NetworkModule.currentProjectId() != requestProject) return@launch
                 val amount = d.amount?.toDoubleOrNull()
                 if (amount != null) {
                     campusBalance = amount
@@ -2130,38 +2613,36 @@ class MainViewModel : ViewModel() {
     }
 
     private fun fetchInfo(mac: String) {
+        val requestProject = NetworkModule.currentProjectId()
         sessionScope().launch {
             try {
                 val resp = DeviceInfoCache.load(mac)
+                if (NetworkModule.currentProjectId() != requestProject) return@launch
                 if (resp.success && resp.data != null) {
                     val info = resp.data; val i = nearbyDevices.indexOfFirst { it.mac == mac }
                     if (i >= 0) nearbyDevices[i] = nearbyDevices[i].copy(deviceInfo = info)
-                    try {
-                        val q = NetworkModule.apiService.queryUsingSafe(snCode = info.snCode, auth = NetworkModule.authFields())
-                        if (q.errorCode == 307 || (q.success && q.data?.orderNo != null)) {
-                            activeDeviceSnCodes.add(info.snCode)
-                            val owner = q.data?.isOwner ?: true
-                            if (owner && activeOrders.none { it.snCode == info.snCode }) {
-                                activeOrders.add(ActiveOrder(info.snCode, q.data?.orderNo ?: "", info.displayName, info.macAddress, info.typeEmoji, info.withholdMoney))
-                                saveOrders()
-                            }
-                        }
-                    } catch (_: Exception) {}
+                    refreshDeviceStatus(info.snCode)
                 } else checkKick(resp.displayMessage)
             } catch (e: Exception) { checkKickEx(e) }
         }
     }
 
     // ── 账单 ──
-    fun loadBills() {
+    fun loadBills(forceRefresh: Boolean = false) {
+        val requestProject = NetworkModule.currentProjectId()
+        val seq = ++billLoadSeq
         sessionScope().launch {
             isLoadingBills = true
-            val cacheKey = PrefsHelper.userId.ifEmpty { PrefsHelper.telephone }
-            val cached = PrefsHelper.getCachedBills(cacheKey)
-            if (cached.isNotEmpty()) {
-                billHistory = cached
-                billList = cached.take(20)
-                billsLoaded = true
+            val accountKey = PrefsHelper.userId.ifEmpty { PrefsHelper.telephone }
+            val cacheKey = "${accountKey}_project_$requestProject"
+            if (!forceRefresh) {
+                val cached = PrefsHelper.getCachedBills(cacheKey)
+                if (cached.isNotEmpty()) {
+                    billHistory = cached
+                    billList = cached.take(20)
+                    billsProjectId = requestProject
+                    billsLoaded = true
+                }
             }
             try {
                 val fmt = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.getDefault())
@@ -2175,8 +2656,12 @@ class MainViewModel : ViewModel() {
                     if (resp.success && !resp.data.isNullOrEmpty()) all.addAll(resp.data)
                     cal.add(java.util.Calendar.MONTH, -1)
                 }
+                if (seq != billLoadSeq || NetworkModule.currentProjectId() != requestProject) {
+                    return@launch
+                }
                 billHistory = all.toList()
                 billList = all.take(20)
+                billsProjectId = requestProject
                 billsLoaded = true
                 if (allRequestsSucceeded) PrefsHelper.saveCachedBills(cacheKey, all)
                 val pendingBefore = PrefsHelper.getPendingSettlements()
@@ -2234,7 +2719,9 @@ class MainViewModel : ViewModel() {
                     toastMessage = "网络连接失败，请检查网络设置"
                 }
             }
-            finally { isLoadingBills = false }
+            finally {
+                if (seq == billLoadSeq) isLoadingBills = false
+            }
         }
     }
 }

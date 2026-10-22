@@ -76,6 +76,33 @@ object PrefsHelper {
             // 日志脱敏只认手机号之类，这里只写一句「发生了降级」，不带任何凭证
             AppLogger.w("加密存储初始化失败，本次运行使用明文存储（$FILE_PLAIN）")
         }
+        migrateLegacyProjectScopedBalances()
+    }
+
+    private fun projectScopedKey(base: String): String {
+        val project = prefs.getString("projectId", "").orEmpty().ifBlank { "none" }
+        return "${base}__project_$project"
+    }
+
+    private fun migrateLegacyProjectScopedBalances() {
+        if (prefs.getBoolean("projectScopedBalancesV1", false)) return
+        val editor = prefs.edit()
+        listOf(
+            "campusBalance" to "string",
+            "campusBalanceTime" to "long",
+            "walletBalance" to "string",
+            "manualBalance" to "string",
+            "manualBalanceTime" to "long"
+        ).forEach { (base, type) ->
+            val scoped = projectScopedKey(base)
+            if (!prefs.contains(scoped) && prefs.contains(base)) {
+                when (type) {
+                    "long" -> editor.putLong(scoped, prefs.getLong(base, 0L))
+                    else -> editor.putString(scoped, prefs.getString(base, "").orEmpty())
+                }
+            }
+        }
+        editor.putBoolean("projectScopedBalancesV1", true).apply()
     }
 
     // ── Auth ──
@@ -101,11 +128,11 @@ object PrefsHelper {
      * 空串 = 拿不到，两种情况：学生没签约免密支付、或者压根还没拉过。
      * 这时界面回退到「初始余额 − 账单消费」的本地估算。
      */
-    var campusBalance: String get() = prefs.getString("campusBalance", "") ?: ""
-        set(v) = prefs.edit().putString("campusBalance", v).apply()
+    var campusBalance: String get() = prefs.getString(projectScopedKey("campusBalance"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("campusBalance"), v).apply()
 
-    var campusBalanceTime: Long get() = prefs.getLong("campusBalanceTime", 0L)
-        set(v) = prefs.edit().putLong("campusBalanceTime", v).apply()
+    var campusBalanceTime: Long get() = prefs.getLong(projectScopedKey("campusBalanceTime"), 0L)
+        set(v) = prefs.edit().putLong(projectScopedKey("campusBalanceTime"), v).apply()
 
     /**
      * 趣智校园**钱包**余额（`/account/wallet` 的 `money`，单位已是元）。
@@ -123,8 +150,8 @@ object PrefsHelper {
      *
      * 现在作为一卡通拿不到时的第二来源，见 [com.hualala.linyu.data.BalanceEstimator]。
      */
-    var walletBalance: String get() = prefs.getString("walletBalance", "") ?: ""
-        set(v) = prefs.edit().putString("walletBalance", v).apply()
+    var walletBalance: String get() = prefs.getString(projectScopedKey("walletBalance"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("walletBalance"), v).apply()
     var schoolName: String get() = prefs.getString("schoolName", "") ?: ""; set(v) = prefs.edit().putString("schoolName", v).apply()
     val isLoggedIn: Boolean get() = loginCode.isNotEmpty()
     fun saveAuth(lc: String, uid: String, aid: String, pid: String, phone: String, name: String?) {
@@ -154,6 +181,9 @@ object PrefsHelper {
                 .filter {
                     it.startsWith("consume_") ||
                         it.startsWith("billCache_") ||
+                        it.startsWith("campusBalance__project_") ||
+                        it.startsWith("campusBalanceTime__project_") ||
+                        it.startsWith("walletBalance__project_") ||
                         (!preserveActiveRecovery && shouldPreserveForRecovery(it))
                 }
                 .forEach { editor.remove(it) }
@@ -165,6 +195,8 @@ object PrefsHelper {
     }
 
     // ── Last device ──
+    var lastDeviceProjectId: String get() = prefs.getString("lastDeviceProjectId", "") ?: ""
+        set(v) = prefs.edit().putString("lastDeviceProjectId", v).apply()
     var lastDeviceName: String get() = prefs.getString("lastDeviceName", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceName", v).apply()
 
     /**
@@ -296,6 +328,9 @@ object PrefsHelper {
      */
     var bleSessionJson: String get() = prefs.getString("bleSessionJson", "") ?: ""
         set(v) = prefs.edit().putString("bleSessionJson", v).apply()
+
+    var washerSessionJson: String get() = prefs.getString("washerSessionJson", "") ?: ""
+        set(v) = prefs.edit().putString("washerSessionJson", v).apply()
 
     /**
      * 通知里「结束使用」按钮的 `PendingIntent` requestCode（按 snCode **稳定分配**）。
@@ -483,8 +518,10 @@ object PrefsHelper {
         prefs.edit().remove("occupiedSnCode").remove("occupiedAtMs").apply()
     }
 
-    var manualBalance: String get() = prefs.getString("manualBalance", "") ?: ""; set(v) = prefs.edit().putString("manualBalance", v).apply()
-    var manualBalanceTime: Long get() = prefs.getLong("manualBalanceTime", 0L); set(v) = prefs.edit().putLong("manualBalanceTime", v).apply()
+    var manualBalance: String get() = prefs.getString(projectScopedKey("manualBalance"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("manualBalance"), v).apply()
+    var manualBalanceTime: Long get() = prefs.getLong(projectScopedKey("manualBalanceTime"), 0L)
+        set(v) = prefs.edit().putLong(projectScopedKey("manualBalanceTime"), v).apply()
 
     /**
      * 上次使用设备的预扣金额。

@@ -51,6 +51,12 @@ object NetworkModule {
         "version" to "6.5.28"
     )
 
+    fun currentProjectId(): String = projectId
+
+    fun setProjectId(value: String) {
+        projectId = value
+    }
+
     /**
      * 官方 v3 API 固定要求的配置请求头。
      *
@@ -75,10 +81,13 @@ object NetworkModule {
 
         if (loginCode.isNotEmpty() && originalRequest.method == "GET" && !originalUrl.encodedPath.contains("verification")) {
             val urlBuilder = originalUrl.newBuilder()
+            if (urlBuilder.build().queryParameter("projectId").isNullOrEmpty()) {
+                urlBuilder.addQueryParameter("projectId", projectId)
+            }
+            urlBuilder
                 .addQueryParameter("loginCode", loginCode)
                 .addQueryParameter("userId", userId)
                 .addQueryParameter("accountId", accountId)
-                .addQueryParameter("projectId", projectId)
                 .addQueryParameter("telephone", telephone)
                 // ⚠️ `telPhone` 必须也带上。绝大多数 GET 接口只认 `telephone`，
                 // 但 `/settlement/campus/userInfo`（一卡通余额）要的是 `telPhone`，

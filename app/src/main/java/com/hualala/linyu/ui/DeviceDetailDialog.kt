@@ -27,15 +27,20 @@ fun DeviceDetailDialog(
     val emoji = device.typeEmoji
     val type = when {
         device.isDrinkingWater -> if (device.isHotWater) "饮水（热水）" else "饮水（冷水）"
+        device.isWasher -> "洗衣机"
         device.typeName == "洗手台" -> "洗漱"
         else -> "沐浴"
     }
     val location = device.displayName
-    val startText = if (device.isDrinkingWater) "开始接水" else "开始使用"
+    val startText = when {
+        device.isDrinkingWater -> "开始接水"
+        device.isLaundry -> "选择模式"
+        else -> "开始使用"
+    }
     // 蓝牙表：App 内**已支持**，走 BleShowerController。
     // 只是要多提醒一句「手机是网关、别走远」——这是这类设备固有的限制，
     // 用户不知道的话很容易开了水然后就关不上了。
-    val isBle = device.needsBluetoothControl
+    val isBle = device.needsBluetoothControl && !device.isLaundry
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -61,6 +66,16 @@ fun DeviceDetailDialog(
                 DetailRow("MAC 地址", device.macAddress)
                 DetailRow("预扣金额", MoneyFormat.withSymbol(device.withholdMoney))
                 DetailRow("状态", if (isActive) "使用中" else "空闲")
+                if (device.isLaundry) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "洗衣机需要先选择洗涤模式和时长。模式与价格由服务端下发，" +
+                            "启动后可查看洗涤、漂洗、脱水等实时阶段。",
+                        fontSize = 13.sp,
+                        color = AppColors.TextSecondary,
+                        lineHeight = 18.sp
+                    )
+                }
                 if (isBle) {
                     Spacer(Modifier.height(10.dp))
                     Text(
@@ -77,6 +92,7 @@ fun DeviceDetailDialog(
             val canUse = !isActive || isOwner
             val txt = when {
                 isActive && !isOwner -> "他人使用中"
+                isActive && device.isWasher -> "查看进行中"
                 isActive -> "恢复使用"
                 else -> startText
             }
