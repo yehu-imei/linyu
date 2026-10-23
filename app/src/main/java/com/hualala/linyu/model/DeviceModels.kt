@@ -31,7 +31,11 @@ data class DeviceInfo(
     /** 通信类型 id（服务端字段 `communicationTypeId`），暂未使用，留作诊断 */
     val communicationTypeId: Int? = null,
     /** 真实 MAC。部分设备 `macAddress` 是虚拟的，优先用这个 */
-    val realMac: String? = null
+    val realMac: String? = null,
+    val devTypeStatus: Int? = null,
+    val isOnline: Int? = null,
+    val childTypeId: Int? = null,
+    val bindDeviceSnCode: String? = null
 ) {
     /**
      * 是否属于「只能靠手机蓝牙直连控制」的水表。
@@ -62,6 +66,13 @@ data class DeviceInfo(
      * 在那之前，蓝牙表的入口应当由用户手动指定，而不是靠猜。
      */
     val needsBluetoothControl: Boolean get() = isBle == true
+
+    val isWasher: Boolean get() =
+        bigTypeId == 6 ||
+            deviceName.contains("洗衣机") ||
+            deviceName.contains("洗烘")
+
+    val isLaundry: Boolean get() = isWasher
 
     val displayName: String get() = formatDeviceName(deviceName)
     val locationOnly: String get() = displayName
@@ -104,12 +115,14 @@ data class DeviceInfo(
     /** 设备类型名称 */
     val typeName: String get() = when {
         isDrinkingWater -> "饮水机"
+        isWasher -> "洗衣机"
         deviceName.startsWith("洗手台") -> "洗手台"
         else -> "热水器"
     }
 
     val typeEmoji: String get() = when {
         isDrinkingWater -> if (isHotWater) "♨️" else "❄️"
+        isWasher -> "🧺"
         deviceName.startsWith("洗手台") -> "🪥"
         else -> "🚿"
     }
@@ -120,18 +133,21 @@ data class DeviceInfo(
      */
     val typeLabel: String get() = when {
         isDrinkingWater -> if (isHotWater) "直饮水机 · 热水" else "直饮水机 · 冷水"
+        isWasher -> "洗衣机"
         deviceName.startsWith("洗手台") -> "洗手台热水器"
         else -> "卫生间热水器"
     }
 
     val typeColor: Color get() = when {
         isDrinkingWater -> Color(0xFF10B981) // 饮水机：绿色
+        isWasher -> Color(0xFF7C3AED)
         deviceName.startsWith("洗手台") -> Color(0xFFFFCC80)
         else -> Color(0xFF2563EB)
     }
 
     val statusText: String get() = when {
         isDrinkingWater -> if (isHotWater) "正在接热水" else "正在接凉水"
+        isWasher -> "正在洗衣"
         deviceName.startsWith("洗手台") -> "正在洗漱中"
         else -> "正在沐浴中"
     }
@@ -152,7 +168,7 @@ data class DeviceInfo(
                 .replace(Regex("^(平衡|直饮水?机?)[- ]*"), "")
                 // 3. 洗手台前缀
                 .replace(Regex("^洗手台\\d*[- ]*"), "")
-                // 4. 去掉尾部的水类型
+                .replace(Regex("^(洗衣机|洗烘机)[- ]*"), "")
                 .replace(Regex("[- ](直饮)?(开水|冷水|热水|温水)$"), "")
                 .replace(Regex("-\\d+层-"), "-")
                 .replace(Regex("洗手台$"), "房")
@@ -169,13 +185,14 @@ data class DeviceInfo(
          * 表现为**绑定寝室后那台设备被筛掉、列表里看不到**。
          */
         private val ROOM_PREFIX = Regex(
-            "^(热水[器表变]|洗手台\\d*|直饮(?:开水|冷水|热水|温水)|开水机?|冷水|温水|平衡|直饮水?机?)[- ]*"
+            "^(热水[器表变]|洗手台\\d*|洗衣机|洗烘机|" +
+                "直饮(?:开水|冷水|热水|温水)|开水机?|冷水|温水|平衡|直饮水?机?)[- ]*"
         )
 
         /** 结尾的设备类型：`…-320洗手台` / `…-320热水表` */
         private val ROOM_SUFFIX = Regex(
             "[- ]*(?:热水器|热水表|洗手台|卫生间|洗漱台|浴室|淋浴间|淋浴" +
-                "|饮水机|直饮水|开水机|开水器|水龙头|水房)$"
+                "|饮水机|直饮水|开水机|开水器|水龙头|水房|洗衣机|洗烘机)$"
         )
 
         /**
@@ -219,6 +236,7 @@ data class DeviceInfo(
         fun roomKey(name: String): String? {
             var s = ROOM_PREFIX.replace(name, "")
             s = ROOM_SUFFIX.replace(s, "")
+            s = Regex("[- ]*\\d+号机$").replace(s, "")
             s = s.removeSuffix("房")
             s = s.trim(' ', '　', '-', '_').lowercase()
             s = Regex("[-_\\s　]+").replace(s, "-")

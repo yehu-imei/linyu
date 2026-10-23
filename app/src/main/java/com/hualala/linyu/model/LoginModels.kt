@@ -107,11 +107,29 @@ data class BillDTO(
     val isDrinkingWater: Boolean get() =
         description.contains("饮水") || description.contains("直饮") || description.contains("冷水")
 
-    /** 设备类型标签：饮水机 / 洗手台热水器 / 卫生间热水器 */
+    val isWasher: Boolean get() {
+        val prefix = description.substringBefore(":", description).trim()
+        val body = description.substringAfter(":", "").trim()
+
+        val waterDeviceWords = listOf(
+            "热水器", "热水表", "热水变", "洗手台", "直饮水",
+            "饮水机", "开水机", "开水器", "冷水"
+        )
+        if (waterDeviceWords.any { prefix.contains(it) }) return false
+
+        if (prefix.contains("洗衣") || prefix.contains("洗烘")) return true
+
+        val name = body.ifEmpty { description }
+        return name.startsWith("洗衣机") ||
+            name.startsWith("洗烘") ||
+            (name.contains("洗衣房") && name.contains("号机"))
+    }
+
     val deviceTypeLabel: String get() {
         val name = description.substringAfter(":")
         return when {
             isDrinkingWater -> "饮水机"
+            isWasher -> "洗衣机"
             name.startsWith("洗手台") || description.contains("洗手台", ignoreCase = true) -> "洗手台热水器"
             else -> "卫生间热水器"
         }
@@ -120,6 +138,7 @@ data class BillDTO(
     /** 设备类型 emoji：饮水机 🚰 / 洗手台 🪥 / 热水器 🚿 */
     val deviceEmoji: String get() = when {
         isDrinkingWater -> "🚰"
+        isWasher -> "🧺"
         description.contains("洗手台", ignoreCase = true) -> "🪥"
         else -> "🚿"
     }
@@ -148,7 +167,30 @@ data class UseCodeData(
 /** `GET /project/info/triple`——只取学校名，其余字段用不着 */
 data class ProjectInfo(
     val projectId: Int? = null,
-    val projectName: String? = null
+    val projectName: String? = null,
+    val projectDescript: String? = null,
+    val groupId: Int? = null
+)
+
+data class ProjectSwitchData(
+    val userId: Long? = null,
+    val accountId: Long? = null,
+    val projectId: Int? = null,
+    val projectName: String? = null,
+    val loginCode: String? = null,
+    val v3LoginCode: String? = null,
+    val telephone: String? = null,
+    val name: String? = null,
+    val userAccount: ProjectSwitchAccount? = null
+)
+
+data class ProjectSwitchAccount(
+    val projectId: Int? = null,
+    val projectName: String? = null,
+    val accountId: Long? = null,
+    val userId: Long? = null,
+    val name: String? = null,
+    val telephone: String? = null
 )
 
 /**

@@ -124,7 +124,7 @@ class QrScanActivity : AppCompatActivity() {
          */
         const val EXTRA_ERROR = "error"
 
-        private const val DEVICE_PREFIX = "KLCXKJ-Water"
+        private const val DEVICE_PREFIX = "KLCXKJ"
 
         fun parseSnCode(raw: String?): String? {
             if (raw.isNullOrBlank()) return null

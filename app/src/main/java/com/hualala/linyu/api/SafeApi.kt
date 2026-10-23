@@ -16,9 +16,13 @@ import com.hualala.linyu.model.GenerateUseCodeResult
 import com.hualala.linyu.model.LoginData
 import com.hualala.linyu.model.OrderStatus
 import com.hualala.linyu.model.ProjectInfo
+import com.hualala.linyu.model.ProjectSwitchData
 import com.hualala.linyu.model.UnpaidBill
 import com.hualala.linyu.model.UseCodeData
 import com.hualala.linyu.model.WalletData
+import com.hualala.linyu.model.WasherMode
+import com.hualala.linyu.model.WasherStartData
+import com.hualala.linyu.model.WasherStatus
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -214,6 +218,55 @@ suspend fun QzxyService.forgetPasswordSafe(
 
 suspend fun QzxyService.getProjectInfoSafe(): BaseResponse<ProjectInfo> =
     parse(getProjectInfo().awaitString(), ProjectInfo::class.java)
+
+suspend fun QzxyService.getProjectListSafe(): BaseResponse<List<ProjectInfo>> =
+    parseList(getProjectList().awaitString(), ProjectInfo::class.java)
+
+suspend fun QzxyService.switchProjectSafe(
+    projectId: String
+): BaseResponse<ProjectSwitchData> {
+    return parse(
+        switchProject(projectId).awaitString(),
+        ProjectSwitchData::class.java
+    )
+}
+
+suspend fun QzxyService.getWasherModesSafe(
+    smallTypeId: Int
+): BaseResponse<List<WasherMode>> =
+    parseList(getWasherModes(smallTypeId).awaitString(), WasherMode::class.java)
+
+suspend fun QzxyService.startWasherSafe(
+    snCode: String,
+    modeTypeId: Int,
+    auth: Map<String, String>,
+    isHaier: Boolean = false
+): BaseResponse<WasherStartData> {
+    val fields = linkedMapOf(
+        "snCode" to snCode,
+        "xfModel" to modeTypeId.toString(),
+        "isHaier" to if (isHaier) "1" else "0"
+    )
+    return parse(
+        startWasher(auth + fields).awaitString(),
+        WasherStartData::class.java
+    )
+}
+
+suspend fun QzxyService.queryWasherStatusSafe(
+    snCode: String,
+    auth: Map<String, String>,
+    isHaier: Boolean = false
+): BaseResponse<WasherStatus> {
+    val fields = linkedMapOf(
+        "snCode" to snCode,
+        "isHaier" to if (isHaier) "1" else "0"
+    )
+    return parse(
+        queryWasherStatus(auth + fields).awaitString(),
+        WasherStatus::class.java
+    )
+}
 
 // ── 残留账单的手动代扣 ──
 

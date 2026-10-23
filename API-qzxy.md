@@ -54,9 +54,95 @@
 | **一卡通真实余额** | GET | `/settlement/campus/userInfo` | ✅ | 真实校园卡余额，不需破签名（v3.0.0 新增） |
 | 一卡通签约状态 | GET | `/settlement/withhold/sign/status` | ✅ | 免密支付是否已签约 |
 | 项目信息 | GET | `/project/info/triple` | ✅ | 学校名 `projectName` 在这里（v3.0.0 新增） |
+| 项目列表 | GET | `/project/group/list/v2` | ✅ | 当前账号可访问的全部项目 |
+| 切换项目 | GET | `/user/info` | ✅ | 传目标 `projectId`，返回切换后的账号信息 |
 | 更换手机号 | POST | `/user/phone/update` | ✅ | 验证码发到**新**号（v3.0.0 新增） |
 | 修改密码 | POST | `/user/password/update` | ✅ | 需要旧密码（v3.0.0 新增） |
 | **重置密码** | POST | `/user/password/forget` | ✅ | 只需短信验证码，**不需要旧密码**（v3.0.0 新增） |
+| 洗衣机模式列表 | GET | `/device/mode/list` | ✅ | 按 `smallTypeId` 获取模式、价格和时长 |
+| 启动洗衣机 | POST | `/order/tcpDevice/downRate/modeOrder` | ✅ | `xfModel` 传模式 `typeId` |
+| 洗衣机状态 | POST | `/order/tcpDevice/washer/status` | ✅ | 获取订单标识和洗涤/漂洗/脱水阶段 |
+
+### 洗衣机接口（6.5.28 反编译确认）
+
+官方客户端用 `bigTypeId == 6` 进入洗衣机页面。本版只接入洗衣机，
+`bigTypeId == 7` 的烘干机不进入此流程。
+
+**模式列表**
+
+```http
+GET /device/mode/list?smallTypeId=1&telPhone=13800001111&loginCode=...
+```
+
+`data` 是数组。启动时真正用到的主要字段：
+
+| 字段 | 含义 |
+|---|---|
+| `typeId` | 模式编号，启动接口的 `xfModel` |
+| `typeName` | 模式名称（标准洗、快洗等） |
+| `money` / `modeMoneyYuan` | 价格；`money` 通常为厘 |
+| `times` / `modeTimeMinute` | 时长；`times` 通常为秒 |
+| `positionId` | 自动投放模块位置；主模式为 0 |
+
+客户端**不允许内置固定模式表**，因为各校配置的模式编号、价格和时长都可能不同。
+
+**启动**
+
+```http
+POST /order/tcpDevice/downRate/modeOrder
+Content-Type: application/x-www-form-urlencoded
+
+snCode=...
+&xfModel=17                  # 模式 typeId
+&isHaier=0
+&loginCode=...
+```
+
+返回 `data.timeIds` 是本次洗衣订单标识；`data.perMoney` 是预扣金额。
+已有订单时业务码可能为 `307`，仍要检查 `data.isOwner`，不能直接恢复别人的订单。
+
+**运行状态**
+
+```http
+POST /order/tcpDevice/washer/status
+
+snCode=...
+&isHaier=0
+&loginCode=...
+```
+
+关键返回字段：`modelName`、`modeTime`、`time`、`timeIds`、
+`liquidOrderStatus`、`liquidOrderStatusDisplay`。阶段文案以服务端为准。
+
+### 多项目切换
+
+部分学校会把同一账号的业务拆成多个项目，例如：
+
+| 项目名 | 说明 |
+|---|---|
+| `示例学校` | 洗澡、饮水等业务 |
+| `示例学校-洗衣` | 独立钱包和洗衣业务 |
+
+这不是固定规则。客户端必须使用 `/project/group/list/v2` 返回的项目列表，
+不得根据项目名硬编码“洗澡项目 / 洗衣项目”。
+
+**项目列表**
+
+```http
+GET /project/group/list/v2
+```
+
+`data` 是 `ProjectInfo` 数组，切换至少需要 `projectId`、`projectName`。
+
+**切换项目**
+
+```http
+GET /user/info?projectId=<目标项目>&loginCode=...&userId=...&accountId=...&telephone=...
+```
+
+不同项目的 `accountId` 可能不同，必须使用响应里的新账号字段更新本地认证信息。
+切换后钱包、账单、设备、使用码和未支付记录都应重新加载。
+设备运行期间不要切换项目，否则关阀请求可能发到错误项目。
 
 ---
 

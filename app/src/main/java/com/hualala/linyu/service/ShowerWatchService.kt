@@ -8,6 +8,7 @@ import androidx.core.content.ContextCompat
 import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.data.CloseDisposition
+import com.hualala.linyu.data.ActiveOrderRepository
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.KeyedTaskRegistry
 import com.hualala.linyu.data.ShowerController
@@ -81,7 +82,7 @@ class ShowerWatchService : Service() {
             watchJobs.remove(sn)?.cancel()
             // 先挂前台通知：用 startForegroundService 起的服务，5 秒内不挂就会被系统崩掉
             attachForeground(Notifier.showStopping(this, deviceNameFor(sn)))
-            scope.launch {
+            scope.launch(ActiveOrderRepository.sessionFor(sn).contextElement()) {
                 try {
                     doFinish(sn)
                 } finally {
@@ -337,7 +338,7 @@ class ShowerWatchService : Service() {
 
     private fun startWatching(snCode: String) {
         val job = watchJobs.getOrStart(snCode) {
-            scope.launch(start = CoroutineStart.LAZY) {
+            scope.launch(ActiveOrderRepository.sessionFor(snCode).contextElement(), start = CoroutineStart.LAZY) {
                 val self = currentCoroutineContext()[Job] ?: return@launch
                 try {
                     watch(snCode)

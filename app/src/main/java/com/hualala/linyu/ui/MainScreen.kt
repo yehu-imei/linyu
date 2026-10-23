@@ -61,6 +61,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var visible by remember { mutableStateOf(false) }
+    var showProjectPicker by remember { mutableStateOf(false) }
     // 是否已获得扫描权限。做成状态：用户授权后要立刻反映到界面上
     var hasScanPerm by remember { mutableStateOf(ScanPermission.granted(context)) }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -111,11 +112,16 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
         // 只在钱包页拉的话，冷启动直接开阀失败时列表是空的，
         // 弹窗会退化成只有「知道了」——正好把这个功能的主要场景漏掉
         viewModel.loadUnpaidBills()
+        viewModel.loadAvailableProjects()
         viewModel.initManagers(context)
         // 已授权就静默开始扫描（老用户无感知）；没授权不再自动弹窗，
         // 改由界面上的「开启扫描」按钮触发，避免登录完突然被要定位权限
         if (ScanPermission.granted(context)) viewModel.startScan()
         visible = true
+    }
+
+    LaunchedEffect(viewModel.projectRevision) {
+        if (viewModel.projectRevision > 0) scanWithPermission()
     }
 
     var pullRefreshing by remember { mutableStateOf(false) }
@@ -170,17 +176,29 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             containerColor = if (BackgroundState.config(BackgroundManager.SCOPE_HOME).enabled) Color.Transparent else AppColors.Background
         ) { padding ->
             if (viewModel.isShowering) {
-                ShowerScreen(
-                    emoji = viewModel.selectedDevice?.typeEmoji ?: "🚿",
-                    statusText = viewModel.selectedDevice?.statusText ?: "正在沐浴中",
-                    location = viewModel.selectedDevice?.locationOnly ?: "",
-                    remaining = viewModel.showerRemaining,
-                    elapsedSec = viewModel.showerElapsedSec,
-                    autoDisConSec = viewModel.autoDisConSec,
-                    isStopping = viewModel.isStopping,
-                    onStopClick = { viewModel.stopShower() },
-                    onMinimizeClick = { viewModel.minimizeShower() }
-                )
+                val washer = viewModel.activeWasherSession
+                if (washer != null) {
+                    WasherScreen(
+                        device = washer.device,
+                        mode = washer.mode,
+                        stageText = viewModel.washerStageText,
+                        elapsedSec = viewModel.showerElapsedSec,
+                        remainingSec = viewModel.washerRemainingSec,
+                        onMinimizeClick = { viewModel.minimizeShower() }
+                    )
+                } else {
+                    ShowerScreen(
+                        emoji = viewModel.selectedDevice?.typeEmoji ?: "🚿",
+                        statusText = viewModel.selectedDevice?.statusText ?: "正在沐浴中",
+                        location = viewModel.selectedDevice?.locationOnly ?: "",
+                        remaining = viewModel.showerRemaining,
+                        elapsedSec = viewModel.showerElapsedSec,
+                        autoDisConSec = viewModel.autoDisConSec,
+                        isStopping = viewModel.isStopping,
+                        onStopClick = { viewModel.stopShower() },
+                        onMinimizeClick = { viewModel.minimizeShower() }
+                    )
+                }
             } else {
                 Box(modifier = Modifier.padding(padding).fillMaxSize()) {
                     LazyColumn(
@@ -220,16 +238,36 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                             }
                         }
 
+                        item {
+                            ProjectSwitchCard(
+                                currentProjectName = viewModel.currentProjectName,
+                                switching = viewModel.projectSwitching,
+                                onClick = {
+                                    viewModel.loadAvailableProjects()
+                                    showProjectPicker = true
+                                }
+                            )
+                        }
+
                         // 使用中的设备（多个）
-                        if (viewModel.activeOrders.isNotEmpty()) {
+                        if (viewModel.activeOrders.isNotEmpty() || viewModel.activeWasherSession != null) {
                             item {
                                 Text("使用中的设备", fontWeight = FontWeight.Bold, fontSize = 18.sp,
                                     color = AppColors.TextPrimary)
                             }
+                            viewModel.activeWasherSession?.let { session ->
+                                item {
+                                    WasherActiveCard(
+                                        session = session,
+                                        stageText = viewModel.washerStageText,
+                                        onRestore = { viewModel.restoreWasherScreen() }
+                                    )
+                                }
+                            }
                             viewModel.activeOrders.forEach { order ->
                                 item { ActiveOrderCard(order, viewModel, phone) }
                             }
-                        } else if (viewModel.lastDeviceMac.isNotEmpty()) {
+                        } else if (viewModel.isLastDeviceInCurrentProject()) {
                             item {
                                 Text("上次使用设备", fontWeight = FontWeight.Bold, fontSize = 18.sp,
                                     color = AppColors.TextPrimary)
@@ -330,6 +368,32 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             onConfirm = { viewModel.startShower(phone) })
     }
 
+    viewModel.washerModePickerDevice?.let { device ->
+        WasherModeDialog(
+            device = device,
+            modes = viewModel.washerModes,
+            loading = viewModel.isLoadingWasherModes || viewModel.isStartingShower,
+            busyText = if (viewModel.isStartingShower) "正在启动洗衣机…" else "正在读取可用模式…",
+            onStart = { mode -> viewModel.startWasherMode(mode) },
+            onDismiss = { viewModel.dismissWasherModes() }
+        )
+    }
+
+    if (showProjectPicker) {
+        ProjectPickerDialog(
+            projects = viewModel.availableProjects,
+            currentProjectId = viewModel.currentProjectId,
+            loading = viewModel.projectsLoading,
+            switching = viewModel.projectSwitching,
+            onRetry = { viewModel.loadAvailableProjects() },
+            onSelect = { project ->
+                viewModel.switchProject(project)
+                showProjectPicker = false
+            },
+            onDismiss = { showProjectPicker = false }
+        )
+    }
+
     // ── 开阀失败 ──
     //
     // 以前 `showerError` 是**只写不读**的：失败时用户只看到「正在开启热水器…」消失，
@@ -354,7 +418,12 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             onDismissRequest = { viewModel.clearShowerError() },
             title = {
                 Text(
-                    if (bills.isEmpty()) "开阀失败" else "开阀失败 · 有未扣账单",
+                    when {
+                        err.kind == ShowerErrorKind.WASHER_REJECTED ||
+                            viewModel.washerModePickerDevice != null -> "洗衣机启动失败"
+                        bills.isEmpty() -> "开阀失败"
+                        else -> "开阀失败 · 有未扣账单"
+                    },
                     fontWeight = FontWeight.Bold
                 )
             },
@@ -421,10 +490,12 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     }
 
     // 开始使用中的加载提示（开阀确认需要几秒）
-    if (viewModel.isStartingShower) {
+    if (viewModel.isStartingShower && viewModel.washerModePickerDevice == null) {
         AlertDialog(
             onDismissRequest = {},
-            title = { Text("正在开启热水器...", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
+            title = { Text(
+                if (viewModel.washerModePickerDevice != null) "正在启动洗衣机..." else "正在开启热水器...",
+                fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()) },
             text = {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
@@ -530,6 +601,56 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             },
             dismissButton = {}
         )
+    }
+}
+
+@Composable
+private fun WasherActiveCard(
+    session: com.hualala.linyu.model.WasherSession,
+    stageText: String,
+    onRestore: () -> Unit
+) {
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = AppColors.ActiveBg),
+        border = BorderStroke(0.8.dp, AppColors.Border),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF7C3AED)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(session.device.typeEmoji, fontSize = 23.sp)
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                TailEllipsisText(
+                    text = session.device.displayName,
+                    modifier = Modifier.fillMaxWidth(),
+                    fontWeight = FontWeight.SemiBold,
+                    color = AppColors.TextPrimary
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "${session.mode.displayName} · ${stageText.ifBlank { "运行中" }}",
+                    color = AppColors.TextSecondary,
+                    fontSize = 12.sp
+                )
+            }
+            Button(
+                onClick = onRestore,
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7C3AED))
+            ) {
+                Text("查看")
+            }
+        }
     }
 }
 
