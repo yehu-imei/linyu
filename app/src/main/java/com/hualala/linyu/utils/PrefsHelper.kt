@@ -11,6 +11,7 @@ import com.hualala.linyu.data.BillHistoryCache
 import com.hualala.linyu.data.shouldPreserveForRecovery
 import com.hualala.linyu.model.ActiveOrder
 import com.hualala.linyu.model.BillItem
+import com.hualala.linyu.api.ProjectSession
 
 object PrefsHelper {
     /** 加密存储的文件名 */
@@ -77,11 +78,56 @@ object PrefsHelper {
             AppLogger.w("加密存储初始化失败，本次运行使用明文存储（$FILE_PLAIN）")
         }
         migrateLegacyProjectScopedBalances()
+        migrateLegacyProjectSessions()
     }
 
     private fun projectScopedKey(base: String): String {
-        val project = prefs.getString("projectId", "").orEmpty().ifBlank { "none" }
+        val project = (ProjectSession.current.get()?.projectId
+            ?: prefs.getString("projectId", "").orEmpty()).ifBlank { "none" }
         return "${base}__project_$project"
+    }
+
+    fun saveProjectAuth(projectId: String, fields: Map<String, String>) {
+        prefs.edit().putString("projectAuth_$projectId", gson.toJson(fields)).apply()
+    }
+
+    fun projectAuth(projectId: String): Map<String, String>? = runCatching {
+        val json = prefs.getString("projectAuth_$projectId", null) ?: return null
+        JsonParser.parseString(json).asJsonObject.entrySet()
+            .associate { it.key to it.value.asString }
+    }.getOrNull()
+
+    private fun migrateLegacyProjectSessions() {
+        if (prefs.getBoolean("projectSessionsV1", false)) return
+        val project = prefs.getString("lastDeviceProjectId", null)
+            ?.takeIf { it.isNotBlank() } ?: projectId
+        val editor = prefs.edit()
+        val bases = listOf(
+            "lastDeviceProjectId", "lastDeviceName", "lastDeviceRawName", "lastDeviceMac",
+            "lastDeviceSnCode", "lastDeviceEmoji", "lastDeviceTypeName", "lastDeviceWithholdMoney",
+            "boundRoom", "bleSessionJson", "washerSessionJson", "widgetNearbyJson",
+            "widgetNearbyTime", "widgetBillJson", "widgetBillTime", "lastConsumeTime"
+        )
+        bases.forEach { base ->
+            val scoped = "${base}__project_${project.ifBlank { "none" }}"
+            if (!prefs.contains(scoped)) {
+                when (val value = prefs.all[base]) {
+                    is String -> editor.putString(scoped, value)
+                    is Float -> editor.putFloat(scoped, value)
+                    is Long -> editor.putLong(scoped, value)
+                }
+            }
+            editor.remove(base)
+        }
+        val orders = getActiveOrders().map { order ->
+            if (order.projectId.isNullOrBlank()) order.copy(projectId = project) else order
+        }
+        editor.putString("activeOrders", gson.toJson(orders))
+            .putBoolean("projectSessionsV1", true).apply()
+    }
+
+    fun hasWasherSession(): Boolean = prefs.all.any { (key, value) ->
+        key.startsWith("washerSessionJson__project_") && value is String && value.isNotBlank()
     }
 
     private fun migrateLegacyProjectScopedBalances() {
@@ -184,6 +230,9 @@ object PrefsHelper {
                         it.startsWith("campusBalance__project_") ||
                         it.startsWith("campusBalanceTime__project_") ||
                         it.startsWith("walletBalance__project_") ||
+                        (it.startsWith("projectAuth_") && !preserveActiveRecovery) ||
+                        (it.contains("__project_") && !preserveActiveRecovery &&
+                            !it.startsWith("manualBalance")) ||
                         (!preserveActiveRecovery && shouldPreserveForRecovery(it))
                 }
                 .forEach { editor.remove(it) }
@@ -195,9 +244,9 @@ object PrefsHelper {
     }
 
     // ── Last device ──
-    var lastDeviceProjectId: String get() = prefs.getString("lastDeviceProjectId", "") ?: ""
-        set(v) = prefs.edit().putString("lastDeviceProjectId", v).apply()
-    var lastDeviceName: String get() = prefs.getString("lastDeviceName", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceName", v).apply()
+    var lastDeviceProjectId: String get() = prefs.getString(projectScopedKey("lastDeviceProjectId"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("lastDeviceProjectId"), v).apply()
+    var lastDeviceName: String get() = prefs.getString(projectScopedKey("lastDeviceName"), "") ?: ""; set(v) = prefs.edit().putString(projectScopedKey("lastDeviceName"), v).apply()
 
     /**
      * 上次使用设备的**原始**设备名（`DeviceInfo.deviceName`），只用来做寝室筛选。
@@ -213,14 +262,14 @@ object PrefsHelper {
      * 老用户没有这个字段（空串），调用方回退到 [lastDeviceName]——用老的短绑定值
      * （`320房`）时靠 `endsWith` 兜底仍然能匹配上。
      */
-    var lastDeviceRawName: String get() = prefs.getString("lastDeviceRawName", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceRawName", v).apply()
+    var lastDeviceRawName: String get() = prefs.getString(projectScopedKey("lastDeviceRawName"), "") ?: ""; set(v) = prefs.edit().putString(projectScopedKey("lastDeviceRawName"), v).apply()
 
-    var lastDeviceMac: String get() = prefs.getString("lastDeviceMac", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceMac", v).apply()
-    var lastDeviceSnCode: String get() = prefs.getString("lastDeviceSnCode", "") ?: ""; set(v) = prefs.edit().putString("lastDeviceSnCode", v).apply()
-    var lastDeviceEmoji: String get() = prefs.getString("lastDeviceEmoji", "🚿") ?: "🚿"; set(v) = prefs.edit().putString("lastDeviceEmoji", v).apply()
+    var lastDeviceMac: String get() = prefs.getString(projectScopedKey("lastDeviceMac"), "") ?: ""; set(v) = prefs.edit().putString(projectScopedKey("lastDeviceMac"), v).apply()
+    var lastDeviceSnCode: String get() = prefs.getString(projectScopedKey("lastDeviceSnCode"), "") ?: ""; set(v) = prefs.edit().putString(projectScopedKey("lastDeviceSnCode"), v).apply()
+    var lastDeviceEmoji: String get() = prefs.getString(projectScopedKey("lastDeviceEmoji"), "🚿") ?: "🚿"; set(v) = prefs.edit().putString(projectScopedKey("lastDeviceEmoji"), v).apply()
 
     // ── 绑定的寝室（设备筛选关键词） ──
-    var boundRoom: String get() = prefs.getString("boundRoom", "") ?: ""; set(v) = prefs.edit().putString("boundRoom", v).apply()
+    var boundRoom: String get() = prefs.getString(projectScopedKey("boundRoom"), "") ?: ""; set(v) = prefs.edit().putString(projectScopedKey("boundRoom"), v).apply()
 
     // ── 已确认需要蓝牙开阀的设备 ──
     //
@@ -326,11 +375,11 @@ object PrefsHelper {
      * 蓝牙会话（JSON 字符串）。**小组件服务与 App 共用**——蓝牙关阀/结算要靠会话里的
      * mac / randomNumber / protocolType，而小组件是另一个进程入口，读不到 ViewModel 内存。
      */
-    var bleSessionJson: String get() = prefs.getString("bleSessionJson", "") ?: ""
-        set(v) = prefs.edit().putString("bleSessionJson", v).apply()
+    var bleSessionJson: String get() = prefs.getString(projectScopedKey("bleSessionJson"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("bleSessionJson"), v).apply()
 
-    var washerSessionJson: String get() = prefs.getString("washerSessionJson", "") ?: ""
-        set(v) = prefs.edit().putString("washerSessionJson", v).apply()
+    var washerSessionJson: String get() = prefs.getString(projectScopedKey("washerSessionJson"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("washerSessionJson"), v).apply()
 
     /**
      * 通知里「结束使用」按钮的 `PendingIntent` requestCode（按 snCode **稳定分配**）。
@@ -528,28 +577,28 @@ object PrefsHelper {
      * 小组件开阀时拿不到 DeviceInfo（它只有 snCode），而预扣金额只存在于设备信息里，
      * 所以单独存一份——否则小组件开阀后卡片上的预扣永远是 ¥0.00。
      */
-    var lastDeviceWithholdMoney: Float get() = prefs.getFloat("lastDeviceWithholdMoney", 0f)
-        set(v) = prefs.edit().putFloat("lastDeviceWithholdMoney", v).apply()
+    var lastDeviceWithholdMoney: Float get() = prefs.getFloat(projectScopedKey("lastDeviceWithholdMoney"), 0f)
+        set(v) = prefs.edit().putFloat(projectScopedKey("lastDeviceWithholdMoney"), v).apply()
 
     /** 上次使用设备的类型名（热水器 / 洗手台 / 饮水机），小组件副标题用 */
-    var lastDeviceTypeName: String get() = prefs.getString("lastDeviceTypeName", "") ?: ""
-        set(v) = prefs.edit().putString("lastDeviceTypeName", v).apply()
+    var lastDeviceTypeName: String get() = prefs.getString(projectScopedKey("lastDeviceTypeName"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("lastDeviceTypeName"), v).apply()
 
     // ── 小组件离线快照 ──
     // 小组件自己扫不了蓝牙、拉不了账单，所以由 App 在干活时把结果存下来，
     // 小组件的「附近设备 / 账单」两页读这里，并显示同步时间避免被当成实时数据。
 
-    var widgetNearbyJson: String get() = prefs.getString("widgetNearbyJson", "") ?: ""
-        set(v) = prefs.edit().putString("widgetNearbyJson", v).apply()
+    var widgetNearbyJson: String get() = prefs.getString(projectScopedKey("widgetNearbyJson"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("widgetNearbyJson"), v).apply()
 
-    var widgetNearbyTime: Long get() = prefs.getLong("widgetNearbyTime", 0L)
-        set(v) = prefs.edit().putLong("widgetNearbyTime", v).apply()
+    var widgetNearbyTime: Long get() = prefs.getLong(projectScopedKey("widgetNearbyTime"), 0L)
+        set(v) = prefs.edit().putLong(projectScopedKey("widgetNearbyTime"), v).apply()
 
-    var widgetBillJson: String get() = prefs.getString("widgetBillJson", "") ?: ""
-        set(v) = prefs.edit().putString("widgetBillJson", v).apply()
+    var widgetBillJson: String get() = prefs.getString(projectScopedKey("widgetBillJson"), "") ?: ""
+        set(v) = prefs.edit().putString(projectScopedKey("widgetBillJson"), v).apply()
 
-    var widgetBillTime: Long get() = prefs.getLong("widgetBillTime", 0L)
-        set(v) = prefs.edit().putLong("widgetBillTime", v).apply()
+    var widgetBillTime: Long get() = prefs.getLong(projectScopedKey("widgetBillTime"), 0L)
+        set(v) = prefs.edit().putLong(projectScopedKey("widgetBillTime"), v).apply()
 
     // 2x4 小组件的当前 tab（每个 widget id 各一份，用 "tab_<id>" 作 key）
     fun widgetTab(id: Int): Int = prefs.getInt("widgetTab_$id", 0)
@@ -563,7 +612,7 @@ object PrefsHelper {
     // 所以由 App（结算成功、或拉到账单列表时）写入，小组件只读。
 
     /** 上次消费时间戳（毫秒），0 表示还没有记录 */
-    var lastConsumeTime: Long get() = prefs.getLong("lastConsumeTime", 0L); set(v) = prefs.edit().putLong("lastConsumeTime", v).apply()
+    var lastConsumeTime: Long get() = prefs.getLong(projectScopedKey("lastConsumeTime"), 0L); set(v) = prefs.edit().putLong(projectScopedKey("lastConsumeTime"), v).apply()
 
     /**
      * 某台设备的「上次消费」金额，0 表示还没有记录。
@@ -580,7 +629,7 @@ object PrefsHelper {
         if (amount <= 0 || snCode.isEmpty()) return
         prefs.edit()
             .putFloat("consume_$snCode", amount.toFloat())
-            .putLong("lastConsumeTime", atMs)
+            .putLong(projectScopedKey("lastConsumeTime"), atMs)
             .apply()
     }
 

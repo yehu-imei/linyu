@@ -516,7 +516,8 @@ object ShowerController {
                     deviceEmoji = device?.typeEmoji ?: PrefsHelper.lastDeviceEmoji,
                     // 小组件调用时 device 为 null，回落到上次记下的金额，
                     // 否则卡片上的「预扣」会一直是 ¥0.00
-                    preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble()
+                    preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble(),
+                    projectId = NetworkModule.currentProjectId()
                 )
             )
         }

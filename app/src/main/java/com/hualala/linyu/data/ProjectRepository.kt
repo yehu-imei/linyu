@@ -1,11 +1,11 @@
 package com.hualala.linyu.data
 
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.api.ProjectSession
 import com.hualala.linyu.api.getProjectListSafe
 import com.hualala.linyu.api.switchProjectSafe
 import com.hualala.linyu.model.BaseResponse
 import com.hualala.linyu.model.ProjectInfo
-import com.hualala.linyu.model.ProjectSwitchData
 import com.hualala.linyu.utils.PrefsHelper
 import kotlinx.coroutines.CancellationException
 
@@ -29,15 +29,15 @@ object ProjectRepository {
             return ProjectSwitchOutcome.Failed("项目编号无效")
         }
 
-        val previous = NetworkModule.currentProjectId()
-        NetworkModule.setProjectId(target.projectId)
         val auth = NetworkModule.authFields()
         return try {
-            val resp = NetworkModule.apiService.switchProjectSafe(
+            val targetSession = ProjectSession(
+                auth + ("projectId" to target.projectId)
+            )
+            val resp = NetworkModule.apiService(targetSession).switchProjectSafe(
                 projectId = target.projectId
             )
             if (!resp.success || resp.errorCode != 0) {
-                NetworkModule.setProjectId(previous)
                 return ProjectSwitchOutcome.Failed(
                     resp.displayMessage ?: "切换项目失败"
                 )
@@ -75,7 +75,6 @@ object ProjectRepository {
                 projectId = confirmed,
                 telephone = telephone
             )
-            NetworkModule.setProjectId(confirmed)
             PrefsHelper.projectId = confirmed
             PrefsHelper.saveAuth(
                 lc = loginCode,
@@ -88,10 +87,8 @@ object ProjectRepository {
             )
             ProjectSwitchOutcome.Success(confirmedProject)
         } catch (e: CancellationException) {
-            NetworkModule.setProjectId(previous)
             throw e
         } catch (e: Exception) {
-            NetworkModule.setProjectId(previous)
             ProjectSwitchOutcome.Failed(e.message ?: "切换项目时网络异常")
         }
     }

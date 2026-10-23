@@ -24,6 +24,7 @@ import com.hualala.linyu.api.setUseCodeSafe
 import com.hualala.linyu.api.getWalletSafe
 import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.data.ActiveOrderRepository
 import com.hualala.linyu.data.BleArbiter
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
@@ -64,7 +65,9 @@ import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
 import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
@@ -124,6 +127,14 @@ class MainViewModel : ViewModel() {
     /** 当前蓝牙用水会话。开阀成功后写入，结算完清空 */
     private var bleSession: BleShowerController.Session? = null
 
+    private data class BleConnection(
+        val controller: BleController?,
+        val session: BleShowerController.Session
+    )
+
+    private val projectBleConnections = mutableMapOf<String, BleConnection>()
+    private val backgroundBleStopJobs = mutableMapOf<String, Job>()
+
     /**
      * 蓝牙流程的进度文案（null 表示没在进行）。
      *
@@ -149,6 +160,7 @@ class MainViewModel : ViewModel() {
      * 否则下次又要问一遍。真猜错了（连上但没有水控服务）会自动撤销。
      */
     fun confirmBleRetry() {
+        if (projectSwitching) return
         val device = bleRetryDevice ?: return
         bleRetryDevice = null
         PrefsHelper.markBleDevice(device.snCode)
@@ -272,9 +284,38 @@ class MainViewModel : ViewModel() {
      * 表现就是"被挤下线后重新登录，刚进去又被弹出来"。
      */
     private var sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
-    private fun sessionScope() = CoroutineScope(viewModelScope.coroutineContext + sessionJob)
+    private fun sessionScope() = CoroutineScope(
+        viewModelScope.coroutineContext + sessionJob + NetworkModule.session().contextElement()
+    )
 
     init {
+        restoreProjectWasherSession()
+        // 让小组件服务知道「App 还活着、可能握着 BLE 连接」（见 BleArbiter）
+        BleArbiter.appAlive = true
+        viewModelScope.launch {
+            ShowerEvents.finished.collect { onShowerFinishedFromService(it) }
+        }
+        viewModelScope.launch {
+            ShowerEvents.ordersRestored.collect {
+                syncActiveOrdersFromPrefs()
+                refreshWidgets()
+            }
+        }
+        viewModelScope.launch {
+            ShowerEvents.stopBleRequest.collect { snCode ->
+                while (projectSwitching) delay(100)
+                val order = ActiveOrderRepository.find(snCode) ?: return@collect
+                if (order.projectId == currentProjectId && !projectSwitching) {
+                    if (bleSession?.snCode == snCode && bleController != null) stopBleShower()
+                    else reconnectAndStopBle(snCode)
+                } else {
+                    stopBackgroundBleOrder(snCode)
+                }
+            }
+        }
+    }
+
+    private fun restoreProjectWasherSession() {
         runCatching {
             gson.fromJson(PrefsHelper.washerSessionJson, WasherSession::class.java)
         }.getOrNull()?.takeIf {
@@ -287,45 +328,6 @@ class MainViewModel : ViewModel() {
                 .toInt().coerceAtLeast(0)
             washerRemainingSec = (session.mode.times - showerElapsedSec).coerceAtLeast(0)
             startWasherPoll(session.device.snCode)
-        }
-        // 让小组件服务知道「App 还活着、可能握着 BLE 连接」（见 BleArbiter）
-        BleArbiter.appAlive = true
-        // 用水结束由 ShowerWatchService 检测（它会清理本地状态并发通知），
-        // 这里只负责界面收尾：同步内存状态 + 弹确认框。
-        // App 不在前台时这个事件没人收，也没关系——服务那边已经处理完了。
-        viewModelScope.launch {
-            ShowerEvents.finished.collect { onShowerFinishedFromService(it) }
-        }
-        // 关阀未确认时服务会把活跃订单**放回去**（见 restoreActiveOrder）。那件事发生在
-        // `finished` 之后，而上面那个处理已经调 `finishShower` 把设备从内存里删了——
-        // 不在这里重新读一次 Prefs，内存和 Prefs 就会一直对不上。
-        viewModelScope.launch {
-            ShowerEvents.ordersRestored.collect {
-                syncActiveOrdersFromPrefs()
-                refreshWidgets()
-            }
-        }
-        // 通知栏「结束使用」按钮 / 小组件的「关闭」对蓝牙表：服务发来请求，
-        // App 若还持有这台设备的 BLE 连接就用自己的连接关阀（更稳），否则**重连设备**再关。
-        viewModelScope.launch {
-            ShowerEvents.stopBleRequest.collect { snCode ->
-                AppLogger.i("收到服务请求停止蓝牙用水 $snCode")
-                // ⚠️ App 能直接关的前提是**这一进程亲手开过这台设备的阀**——
-                // 只有那时它才同时握着 [bleSession]（会话）和 [bleController]（活的 GATT 连接）。
-                //
-                // 小组件开的阀（会话在 WidgetBleService 那边）、或 App 进程被系统回收过
-                // （内存里的会话/连接都没了，但 [BleArbiter.appAlive] 仍为真，因为
-                // MainViewModel 一建起来就把它置 true），这两种情况下都**不能**直接关。
-                //
-                // 这时必须走 [reconnectAndStopBle]：重连设备 → 用状态帧重建会话 → 关阀。
-                // 少了这个分支，请求就停在这里（老代码只弹一句提示），
-                // 卡片闪一下「正在关闭…」又恢复原状，阀一直开着——用户看到的就是「关闭按钮失效」。
-                if (bleSession?.snCode == snCode && bleController != null) {
-                    stopBleShower()
-                } else {
-                    reconnectAndStopBle(snCode)
-                }
-            }
         }
     }
 
@@ -442,10 +444,7 @@ class MainViewModel : ViewModel() {
         boundRoom = PrefsHelper.boundRoom
 
         // 恢复所有活跃订单
-        val saved = PrefsHelper.getActiveOrders()
-        activeOrders.clear()
-        activeOrders.addAll(saved)
-        saved.forEach { activeDeviceSnCodes.add(it.snCode) }
+        syncActiveOrdersFromPrefs()
     }
 
     fun loadAvailableProjects() {
@@ -482,16 +481,23 @@ class MainViewModel : ViewModel() {
 
     fun switchProject(project: ServiceProject) {
         if (project.projectId == currentProjectId || projectSwitching) return
-        if (!canSwitchProject()) {
-            toastMessage = "设备运行中，请先结束当前订单再切换项目"
-            return
-        }
-
         projectSwitching = true
-        sessionScope().launch {
+        viewModelScope.launch {
             try {
+                // Let a device command already being sent finish before changing credentials.
+                while (isStartingShower || isStopping || deductingConsumeDate != null ||
+                    backgroundBleStopJobs.values.any { it.isActive }
+                ) delay(100)
+                val previousProject = currentProjectId
                 when (val outcome = ProjectRepository.switchTo(project)) {
                     is ProjectSwitchOutcome.Success -> {
+                        sessionJob.cancelAndJoin()
+                        sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+                        bleSession?.let {
+                            projectBleConnections[previousProject] = BleConnection(bleController, it)
+                        }
+                        bleController = null
+                        bleSession = null
                         currentProjectId = outcome.project.projectId
                         currentProjectName = outcome.project.displayName
                         schoolName = outcome.project.displayName
@@ -499,6 +505,14 @@ class MainViewModel : ViewModel() {
                         PrefsHelper.projectId = outcome.project.projectId
                         PrefsHelper.schoolName = outcome.project.displayName
                         resetProjectScopedState()
+                        projectBleConnections.remove(currentProjectId)?.let {
+                            bleController = it.controller
+                            bleSession = it.session
+                        }
+                        syncActiveOrdersFromPrefs()
+                        restoreProjectWasherSession()
+                        refreshProjectRunningOrders()
+                        startKickWatch()
                         projectRevision++
                         toastMessage = "已切换到「${outcome.project.displayName}」"
 
@@ -526,14 +540,31 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    private fun canSwitchProject(): Boolean =
-        activeOrders.isEmpty() &&
-            activeWasherSession == null &&
-            !isShowering &&
-            !isStopping &&
-            bleSession == null
-
     private fun resetProjectScopedState() {
+        stopTimer()
+        mqttManager?.disconnect()
+        isShowering = false
+        isStartingShower = false
+        isStopping = false
+        showerSnCode = null
+        currentOrderNo = null
+        showerConsumed = 0.0
+        showerPreDeduct = 0.0
+        showerRemaining = "0.00"
+        showerElapsedSec = 0
+        autoDisConSec = 0
+        showerError = null
+        bleProgress = null
+        activeWasherSession = null
+        washerStatus = null
+        washerStageText = ""
+        washerRemainingSec = 0
+        dismissWasherModes()
+        ownerBySn.clear()
+        showAutoCloseDialog = false
+        isLoadingBills = false
+        billLoadSeq++
+        unpaidSeq++
         scanner?.stopScan()
         isScanning = false
         nearbyDevices.clear()
@@ -556,28 +587,109 @@ class MainViewModel : ViewModel() {
         useCodeData = null
         useCodeLoaded = false
 
-        lastDeviceName = ""
-        lastDeviceMac = ""
-        lastDeviceSnCode = ""
-        lastDeviceEmoji = "🚿"
-        lastDeviceProjectId = ""
-        boundRoom = ""
-        PrefsHelper.lastDeviceName = ""
-        PrefsHelper.lastDeviceMac = ""
-        PrefsHelper.lastDeviceSnCode = ""
-        PrefsHelper.lastDeviceEmoji = ""
-        PrefsHelper.lastDeviceProjectId = ""
-        PrefsHelper.lastDeviceRawName = ""
-        PrefsHelper.lastDeviceTypeName = ""
-        PrefsHelper.lastDeviceWithholdMoney = 0f
-        PrefsHelper.lastConsumeTime = 0L
-        PrefsHelper.boundRoom = ""
-        PrefsHelper.widgetNearbyJson = ""
-        PrefsHelper.widgetBillJson = ""
-        PrefsHelper.widgetNearbyTime = 0L
-        PrefsHelper.widgetBillTime = 0L
+        lastDeviceName = PrefsHelper.lastDeviceName
+        lastDeviceMac = PrefsHelper.lastDeviceMac
+        lastDeviceSnCode = PrefsHelper.lastDeviceSnCode
+        lastDeviceEmoji = PrefsHelper.lastDeviceEmoji
+        lastDeviceProjectId = PrefsHelper.lastDeviceProjectId
+        boundRoom = PrefsHelper.boundRoom
         WidgetBridge.clearBusy()
         appContext?.let { LinYuWidget.refreshAll(it) }
+    }
+
+    /** Refresh only this project's saved orders; a failed request must retain recovery data. */
+    private fun refreshProjectRunningOrders() {
+        sessionScope().launch {
+            for (order in ActiveOrderRepository.forProject()) {
+                if (PrefsHelper.isBleDevice(order.snCode)) continue
+                try {
+                    val resp = NetworkModule.apiService.queryUsingSafe(
+                        snCode = order.snCode, auth = NetworkModule.authFields()
+                    )
+                    if (resp.success || resp.errorCode == 307) {
+                        if (resp.data?.isOwner == false ||
+                            (resp.success && resp.data?.orderNo == null && resp.errorCode != 307)
+                        ) {
+                            ShowerController.markFinished(order.snCode)
+                        } else {
+                            ActiveOrderRepository.replace(order.copy(
+                                orderNo = resp.data?.orderNo?.takeIf { it.isNotBlank() } ?: order.orderNo
+                            ))
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLogger.e("刷新项目运行订单失败", e)
+                }
+            }
+            syncActiveOrdersFromPrefs()
+        }
+        activeWasherSession?.let { session ->
+            sessionScope().launch {
+                val status = WasherController.status(session.device) ?: return@launch
+                if (status.isOwner && status.looksActive) applyWasherStatus(status)
+                else finishWasherState()
+            }
+        }
+        appContext?.let { ctx ->
+            ActiveOrderRepository.forProject().forEach { ShowerWatchService.start(ctx, it.snCode) }
+        }
+    }
+
+    /** A notification can stop a previous project's BLE device without changing the visible project. */
+    private fun stopBackgroundBleOrder(snCode: String) {
+        if (backgroundBleStopJobs[snCode]?.isActive == true) return
+        val ctx = appContext ?: return
+        val order = ActiveOrderRepository.find(snCode) ?: return
+        val auth = ActiveOrderRepository.sessionFor(snCode)
+        val job = viewModelScope.launch(auth.contextElement(), start = CoroutineStart.LAZY) {
+            val saved = projectBleConnections[auth.projectId]
+            val session = saved?.session ?: runCatching {
+                gson.fromJson(PrefsHelper.bleSessionJson, BleShowerController.Session::class.java)
+            }.getOrNull()?.takeIf { it.snCode == snCode } ?: return@launch
+            if (!BleArbiter.begin(snCode, "app")) return@launch
+            val ble = saved?.controller ?: BleController(ctx)
+            try {
+                if (saved?.controller == null && ble.connect(session.mac) !is BleConnectResult.Ready) {
+                    Notifier.showCloseFailed(ctx, order.deviceName, "蓝牙连接失败，请靠近设备后重试")
+                    return@launch
+                }
+                when (val outcome = BleShowerController.closeAndSettle(
+                    ble, session, auth.loginCode, auth.telephone
+                )) {
+                    is BleShowerController.SettleOutcome.Completed,
+                    is BleShowerController.SettleOutcome.PartialSettlement -> {
+                        val elapsed = ShowerController.elapsedSeconds(snCode)
+                        val money = (outcome as? BleShowerController.SettleOutcome.Completed)
+                            ?.rawUpMoney?.let(MoneyFormat::milliToYuan)
+                        ShowerController.markFinished(snCode)
+                        PrefsHelper.bleSessionJson = ""
+                        projectBleConnections.remove(auth.projectId)
+                        if (money != null && money > 0) PrefsHelper.recordConsume(snCode, money)
+                        Notifier.showFinished(ctx, order.deviceName, elapsed, money)
+                        ShowerEvents.notifyFinished(ShowerEvents.Finished(
+                            snCode, order.deviceName, elapsed, money, autoClosed = false
+                        ))
+                        ble.disconnect()
+                    }
+                    is BleShowerController.SettleOutcome.CloseFailed ->
+                        Notifier.showCloseFailed(ctx, order.deviceName, outcome.message)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AppLogger.e("停止其他项目蓝牙设备失败", e)
+                Notifier.showCloseFailed(ctx, order.deviceName, "关闭未确认，请靠近设备后重试")
+            } finally {
+                if (saved?.controller == null) ble.disconnect()
+                BleArbiter.end(snCode)
+                endStopAttempt()
+            }
+        }
+        backgroundBleStopJobs[snCode] = job
+        job.invokeOnCompletion { backgroundBleStopJobs.remove(snCode) }
+        job.start()
     }
 
     override fun onCleared() {
@@ -589,6 +701,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun startScan() {
+        if (projectSwitching) return
         nearbyDevices.clear(); activeDeviceSnCodes.clear()
         // 新一轮扫描 = 允许对每台设备再查一次（见 addDevice）
         queriedThisScan.clear()
@@ -743,8 +856,11 @@ class MainViewModel : ViewModel() {
                     val orderNo = q.data?.orderNo ?: ""
                     val deviceInfo = nearbyDevices.find { it.deviceInfo?.snCode == snCode }?.deviceInfo
                     if (deviceInfo != null) {
-                        activeOrders.add(ActiveOrder(snCode, orderNo, deviceInfo.displayName, deviceInfo.macAddress, deviceInfo.typeEmoji, deviceInfo.withholdMoney))
-                        saveOrders()
+                        ActiveOrderRepository.upsert(ActiveOrder(
+                            snCode, orderNo, deviceInfo.displayName, deviceInfo.macAddress,
+                            deviceInfo.typeEmoji, deviceInfo.withholdMoney, currentProjectId
+                        ))
+                        syncActiveOrdersFromPrefs()
                     }
                 }
                 // 设备上确实有订单，且**是自己的** → 之前那个「占用中」已经不成立了。
@@ -776,6 +892,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun startLastDevice(phone: String) {
+        if (projectSwitching) return
         if (lastDeviceProjectId != currentProjectId) {
             toastMessage = "上次设备属于其他项目，请切换项目后使用"
             return
@@ -815,6 +932,7 @@ class MainViewModel : ViewModel() {
 
     // ════════════════════════════════════════════
     fun startShower(phone: String) {
+        if (projectSwitching) return
         val device = selectedDevice ?: return
         val snCode = device.snCode
         if (snCode.isNullOrBlank()) { showerError = ShowerError("设备信息不完整", ShowerErrorKind.BAD_DEVICE); return }
@@ -905,6 +1023,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadWasherModes(device: DeviceInfo) {
+        if (projectSwitching) return
         showerError = null
         washerModePickerDevice = device
         washerModes.clear()
@@ -950,6 +1069,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun startWasherMode(mode: WasherMode) {
+        if (projectSwitching) return
         val device = washerModePickerDevice ?: return
         if (isStartingShower) return
         showerError = null
@@ -1277,7 +1397,7 @@ class MainViewModel : ViewModel() {
      * （例如用户在桌面小组件里开了阀）。
      */
     private fun syncActiveOrdersFromPrefs() {
-        val saved = PrefsHelper.getActiveOrders()
+        val saved = ActiveOrderRepository.forProject(currentProjectId)
         activeOrders.clear(); activeOrders.addAll(saved)
         activeDeviceSnCodes.clear(); saved.forEach { activeDeviceSnCodes.add(it.snCode) }
     }
@@ -1304,7 +1424,7 @@ class MainViewModel : ViewModel() {
         val i = activeOrders.indexOfFirst { it.snCode == snCode }
         if (i >= 0 && orderNo.isNotEmpty()) {
             activeOrders[i] = activeOrders[i].copy(orderNo = orderNo)
-            saveOrders()
+            ActiveOrderRepository.replace(activeOrders[i])
         }
     }
 
@@ -1826,7 +1946,7 @@ class MainViewModel : ViewModel() {
 
         // 从活跃列表移除
         activeOrders.removeAll { it.snCode == snCode }
-        saveOrders()
+        ActiveOrderRepository.remove(snCode)
         activeDeviceSnCodes.remove(snCode)
 
         if (consumed != null && consumed > 0) {
@@ -1859,6 +1979,8 @@ class MainViewModel : ViewModel() {
         // 有活跃订单时 `canLogoutVoluntarily` 会先拦住，所以断连是安全的。
         // ⚠️ 蓝牙表断开后就再也关不了阀，这句话是这里唯一的安全保证，别绕过。
         releaseBle()
+        projectBleConnections.values.forEach { it.controller?.disconnect() }
+        projectBleConnections.clear()
 
         // 断开 MQTT 连接
         try { mqttManager?.disconnect() } catch (_: Exception) {}
@@ -1937,8 +2059,6 @@ class MainViewModel : ViewModel() {
         PrefsHelper.clear(preserveActiveRecovery)
         if (preserveActiveRecovery) appContext?.let(ShowerWatchService::stop)
     }
-
-    private fun saveOrders() { PrefsHelper.saveActiveOrders(activeOrders.toList()) }
 
     fun isLastDeviceInCurrentProject(): Boolean =
         lastDeviceMac.isNotEmpty() && lastDeviceProjectId == currentProjectId
@@ -2072,7 +2192,7 @@ class MainViewModel : ViewModel() {
      * 否则会反复 clear() + 反复通知界面。
      */
     private fun kickOut() {
-        if (kickedOut) return
+        if (kickedOut || projectSwitching || !sessionJob.isActive) return
         kickedOut = true
         stopTimer()
         PrefsHelper.clear(preserveActiveRecovery = true)

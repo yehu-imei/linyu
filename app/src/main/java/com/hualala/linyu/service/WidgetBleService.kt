@@ -7,6 +7,7 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.data.ActiveOrderRepository
 import com.hualala.linyu.api.getDeviceInfoSafe
 import com.hualala.linyu.ble.BleConnectResult
 import com.hualala.linyu.ble.BleController
@@ -71,7 +72,7 @@ class WidgetBleService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
 
-        scope.launch {
+        scope.launch(ActiveOrderRepository.sessionFor(sn).contextElement()) {
             try {
                 when (action) {
                     ACTION_OPEN -> doOpen(sn, intent)
