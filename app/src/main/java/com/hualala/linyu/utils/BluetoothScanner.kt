@@ -42,7 +42,7 @@ class BluetoothScanner(
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
             val deviceName = device.name ?: return
-            if (deviceName.contains("KLCXKJ-Water", ignoreCase = true)) {
+            if (deviceName.startsWith("KLCXKJ", ignoreCase = true)) {
                 onDeviceFound(
                     NearbyDevice(
                         name = deviceName,

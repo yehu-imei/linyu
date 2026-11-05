@@ -539,8 +539,12 @@ internal object WidgetBridge {
     }
 
     fun render(context: Context, id: Int, size: WidgetSize) {
+        // A different project's monitor may be requesting this redraw.
+        val state = NetworkModule.sessionForProject(PrefsHelper.projectId).read {
+            WidgetRenderer.readState()
+        }
         val views = WidgetRenderer.build(
-            context, size, WidgetRenderer.readState(), id, busyReason(),
+            context, size, state, id, busyReason(),
             tab = PrefsHelper.widgetTab(id)
         )
         AppWidgetManager.getInstance(context).updateAppWidget(id, views)

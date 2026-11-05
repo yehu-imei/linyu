@@ -1,6 +1,7 @@
 package com.hualala.linyu.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,10 +31,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.data.BillCategory
+import com.hualala.linyu.data.billCategory
+import com.hualala.linyu.data.forBillCategory
 import com.hualala.linyu.model.BillDTO
 import com.hualala.linyu.model.BillItem
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.ui.theme.AppColors
+import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.PrefsHelper
 import kotlinx.coroutines.launch
 
@@ -47,6 +53,8 @@ fun WalletScreen(viewModel: MainViewModel) {
         viewModel.loadCampusBalance()
     }
     var detailBill by remember { mutableStateOf<BillDTO?>(null) }
+    var billCategory by rememberSaveable { mutableStateOf(BillCategory.BATH) }
+    var showProjectPicker by remember { mutableStateOf(false) }
     // 待确认的代扣：(consumeDate, 金额)。这是动钱的操作，不弹确认框直接扣太莽了
     var pendingDeduct by remember { mutableStateOf<Pair<String, String>?>(null) }
 
@@ -86,6 +94,39 @@ fun WalletScreen(viewModel: MainViewModel) {
         PrefsHelper.manualBalance, PrefsHelper.manualBalanceTime
     ) {
         if (hasReal || viewModel.billsLoaded) BalanceEstimator.estimate(viewModel.billList) else null
+    }
+
+    val projectBills = remember(
+        viewModel.billHistory,
+        viewModel.billsProjectId,
+        viewModel.currentProjectId
+    ) {
+        if (viewModel.billsProjectId == viewModel.currentProjectId) {
+            viewModel.billHistory
+        } else {
+            emptyList()
+        }
+    }
+    val categoryHistory = remember(projectBills, billCategory) {
+        projectBills.forBillCategory(billCategory)
+    }
+    val categoryPage = remember(categoryHistory) { categoryHistory.take(20) }
+    val categoryTotal = remember(categoryPage) {
+        categoryPage.sumOf { it.consumeBillDTO.consumeMoney.toDoubleOrNull() ?: 0.0 }
+    }
+    val bathCount = remember(projectBills) {
+        projectBills.count { it.billCategory() == BillCategory.BATH }
+    }
+    val washerCount = remember(projectBills) {
+        projectBills.count { it.billCategory() == BillCategory.WASHER }
+    }
+
+    LaunchedEffect(viewModel.currentProjectId, viewModel.currentProjectName) {
+        if (viewModel.currentProjectName.contains("洗衣") ||
+            viewModel.currentProjectName.contains("洗烘")
+        ) {
+            billCategory = BillCategory.WASHER
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
@@ -152,30 +193,77 @@ fun WalletScreen(viewModel: MainViewModel) {
 
             Spacer(Modifier.height(24.dp))
 
+            ProjectSwitchCard(
+                currentProjectName = viewModel.currentProjectName,
+                switching = viewModel.projectSwitching,
+                onClick = {
+                    viewModel.loadAvailableProjects()
+                    showProjectPicker = true
+                }
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            BillCategoryTabs(
+                selected = billCategory,
+                bathCount = bathCount,
+                washerCount = washerCount,
+                onSelected = { billCategory = it }
+            )
+
+            Spacer(Modifier.height(20.dp))
+
             if (trendEnabled) {
                 SpendingTrendCard(
-                    bills = viewModel.billHistory,
+                    bills = categoryHistory,
                     loading = viewModel.isLoadingBills && !viewModel.billsLoaded
                 )
                 Spacer(Modifier.height(24.dp))
             }
 
-            Text("账单", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-            Text("最近20次消费记录", fontSize = 12.sp, color = AppColors.TextSecondary)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Column {
+                    Text(
+                        "${billCategory.label}账单",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppColors.TextPrimary
+                    )
+                    Text(
+                        "最近 20 次${billCategory.label}消费",
+                        fontSize = 12.sp,
+                        color = AppColors.TextSecondary
+                    )
+                }
+                Text(
+                    "合计 ${MoneyFormat.withSymbol(categoryTotal)}",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AppColors.TextSecondary
+                )
+            }
             Spacer(Modifier.height(12.dp))
 
-            if (viewModel.isLoadingBills) {
+            if (viewModel.isLoadingBills && categoryPage.isEmpty()) {
                 Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(Modifier.size(24.dp), color = AppColors.Accent, strokeWidth = 2.dp)
                 }
-            } else if (viewModel.billList.isEmpty()) {
-                Text("暂无账单数据", color = AppColors.TextSecondary, modifier = Modifier.padding(top = 8.dp))
+            } else if (categoryPage.isEmpty()) {
+                Text(
+                    "暂无${billCategory.label}账单记录",
+                    color = AppColors.TextSecondary,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
             } else {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // ⚠️ 在循环外取一次。unpaidConsumeDates 是计算属性，
                     // 写在 forEach 里的话每渲染一行就重建一次整个 Set
                     val unpaidDates = viewModel.unpaidConsumeDates
-                    viewModel.billList.forEach { bill ->
+                    categoryPage.forEach { bill ->
                         val dto = bill.consumeBillDTO
                         BillCard(
                             bill = bill,
@@ -283,6 +371,59 @@ fun WalletScreen(viewModel: MainViewModel) {
             confirmButton = { Button(onClick = { detailBill = null }) { Text("确定") } }
         )
     }
+
+    if (showProjectPicker) {
+        ProjectPickerDialog(
+            projects = viewModel.availableProjects,
+            currentProjectId = viewModel.currentProjectId,
+            loading = viewModel.projectsLoading,
+            switching = viewModel.projectSwitching,
+            onRetry = { viewModel.loadAvailableProjects() },
+            onSelect = { project ->
+                viewModel.switchProject(project)
+                showProjectPicker = false
+            },
+            onDismiss = { showProjectPicker = false }
+        )
+    }
+}
+
+@Composable
+private fun BillCategoryTabs(
+    selected: BillCategory,
+    bathCount: Int,
+    washerCount: Int,
+    onSelected: (BillCategory) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(AppColors.Card)
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        BillCategory.entries.forEach { category ->
+            val active = category == selected
+            val count = if (category == BillCategory.BATH) bathCount else washerCount
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(if (active) AppColors.Accent else Color.Transparent)
+                    .clickable { onSelected(category) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "${category.label}  $count",
+                    fontSize = 14.sp,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                    color = if (active) Color.White else AppColors.TextSecondary
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -304,6 +445,7 @@ private fun BillCard(
                 Spacer(Modifier.height(2.dp))
                 val tc = when {
                     dto.isDrinkingWater -> Color(0xFF10B981)          // 饮水机：绿色
+                    dto.isWasher -> Color(0xFF7C3AED)
                     dto.deviceTypeLabel.contains("洗手台") -> Color(0xFFFF9800)
                     else -> AppColors.Accent
                 }

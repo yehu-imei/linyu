@@ -10,20 +10,13 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
 object NetworkModule {
-    private var loginCode: String = ""
-    private var userId: String = ""
-    private var accountId: String = ""
-    private var projectId: String = ""
-    private var telephone: String = ""
+    @Volatile private var selectedSession = ProjectSession(emptyMap())
 
     /** 从 SharedPreferences 恢复登录态 */
     fun restoreFromPrefs(): Boolean {
-        loginCode = PrefsHelper.loginCode
-        userId = PrefsHelper.userId
-        accountId = PrefsHelper.accountId
-        projectId = PrefsHelper.projectId
-        telephone = PrefsHelper.telephone
-        return loginCode.isNotEmpty()
+        updateAuth(PrefsHelper.loginCode, PrefsHelper.userId, PrefsHelper.accountId,
+            PrefsHelper.projectId, PrefsHelper.telephone)
+        return selectedSession.loginCode.isNotEmpty()
     }
 
     fun updateAuth(
@@ -33,23 +26,35 @@ object NetworkModule {
         projectId: String,
         telephone: String
     ) {
-        this.loginCode = loginCode
-        this.userId = userId
-        this.accountId = accountId
-        this.projectId = projectId
-        this.telephone = telephone
+        val session = ProjectSession(mapOf(
+            "loginCode" to loginCode,
+            "userId" to userId,
+            "accountId" to accountId,
+            "projectId" to projectId,
+            "telephone" to telephone,
+            "telPhone" to telephone,
+            "phoneSystem" to "android",
+            "version" to "6.5.28"
+        ))
+        selectedSession = session
+        if (PrefsHelper.isInitialized && projectId.isNotBlank()) {
+            PrefsHelper.saveProjectAuth(projectId, session.fields)
+        }
     }
 
-    fun authFields(): Map<String, String> = mapOf(
-        "loginCode" to loginCode,
-        "userId" to userId,
-        "accountId" to accountId,
-        "projectId" to projectId,
-        "telephone" to telephone,
-        "telPhone" to telephone,
-        "phoneSystem" to "android",
-        "version" to "6.5.28"
-    )
+    fun authFields(): Map<String, String> = session().fields
+
+    fun session(): ProjectSession = ProjectSession.current.get()
+        ?: selectedSession
+
+    fun sessionForProject(id: String): ProjectSession {
+        val current = session()
+        if (id.isBlank() || id == current.projectId) return current
+        return PrefsHelper.projectAuth(id)?.let(::ProjectSession)
+            ?: ProjectSession(current.fields + ("projectId" to id))
+    }
+
+    fun currentProjectId(): String = session().projectId
 
     /**
      * 官方 v3 API 固定要求的配置请求头。
@@ -62,7 +67,10 @@ object NetworkModule {
         "module_list,advertise_type,question_list,service_phone_list," +
             "banner_list_app,activity_list_app,aliCard_popup_config"
 
-    private val authInterceptor = Interceptor { chain ->
+    private fun authInterceptor(session: ProjectSession) = Interceptor { chain ->
+        val fields = session.fields
+        val projectId = session.projectId
+        val loginCode = session.loginCode
         val originalRequest = chain.request()
         val originalUrl = originalRequest.url
         val builder = originalRequest.newBuilder()
@@ -75,16 +83,19 @@ object NetworkModule {
 
         if (loginCode.isNotEmpty() && originalRequest.method == "GET" && !originalUrl.encodedPath.contains("verification")) {
             val urlBuilder = originalUrl.newBuilder()
+            if (urlBuilder.build().queryParameter("projectId").isNullOrEmpty()) {
+                urlBuilder.addQueryParameter("projectId", projectId)
+            }
+            urlBuilder
                 .addQueryParameter("loginCode", loginCode)
-                .addQueryParameter("userId", userId)
-                .addQueryParameter("accountId", accountId)
-                .addQueryParameter("projectId", projectId)
-                .addQueryParameter("telephone", telephone)
+                .addQueryParameter("userId", fields["userId"].orEmpty())
+                .addQueryParameter("accountId", fields["accountId"].orEmpty())
+                .addQueryParameter("telephone", session.telephone)
                 // ⚠️ `telPhone` 必须也带上。绝大多数 GET 接口只认 `telephone`，
                 // 但 `/settlement/campus/userInfo`（一卡通余额）要的是 `telPhone`，
                 // 少了它服务端直接返回 `手机号不能为空`——而且是 HTTP 200，
                 // 只看状态码完全看不出来，只能靠读 errorMessage。
-                .addQueryParameter("telPhone", telephone)
+                .addQueryParameter("telPhone", session.telephone)
                 .addQueryParameter("phoneSystem", "android")
                 .addQueryParameter("version", "6.5.28")
             builder.url(urlBuilder.build())
@@ -119,7 +130,6 @@ object NetworkModule {
     }
 
     private val okHttpClient = OkHttpClient.Builder()
-        .addInterceptor(authInterceptor)
         .addInterceptor(appLogInterceptor)
         .apply {
             if (BuildConfig.DEBUG) {
@@ -128,10 +138,22 @@ object NetworkModule {
         }
         .build()
 
-    val apiService: QzxyService = Retrofit.Builder()
-        .baseUrl(QzxyService.BASE_URL)
-        .client(okHttpClient)
-        .addConverterFactory(GsonConverterFactory.create())
-        .build()
-        .create(QzxyService::class.java)
+    private val services = object : LinkedHashMap<ProjectSession, QzxyService>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ProjectSession, QzxyService>) =
+            size > 8
+    }
+
+    val apiService: QzxyService get() = apiService(session())
+
+    @Synchronized
+    fun apiService(session: ProjectSession): QzxyService = services.getOrPut(session) {
+        Retrofit.Builder()
+            .baseUrl(QzxyService.BASE_URL)
+            .client(okHttpClient.newBuilder().apply {
+                interceptors().add(0, authInterceptor(session))
+            }.build())
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(QzxyService::class.java)
+    }
 }

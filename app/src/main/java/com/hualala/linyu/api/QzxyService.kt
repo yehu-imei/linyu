@@ -225,6 +225,31 @@ interface QzxyService {
     @GET("/project/info/triple")
     fun getProjectInfo(): Call<ResponseBody>
 
+    @GET("/project/group/list/v2")
+    fun getProjectList(): Call<ResponseBody>
+
+    @GET("/user/info")
+    fun switchProject(
+        @Query("projectId") projectId: String
+    ): Call<ResponseBody>
+
+    @GET(WasherApiContract.MODE_LIST)
+    fun getWasherModes(
+        @Query("smallTypeId") smallTypeId: Int
+    ): Call<ResponseBody>
+
+    @FormUrlEncoded
+    @POST(WasherApiContract.START)
+    fun startWasher(
+        @FieldMap fields: Map<String, String>
+    ): Call<ResponseBody>
+
+    @FormUrlEncoded
+    @POST(WasherApiContract.STATUS)
+    fun queryWasherStatus(
+        @FieldMap fields: Map<String, String>
+    ): Call<ResponseBody>
+
     // ── 短信验证码 ──
     // secret 由 SignUtils.smsSecret(telephone) 按手机号动态计算，不再硬编码
     @GET("/user/verification/code/get")

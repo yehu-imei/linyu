@@ -6,5 +6,6 @@ data class ActiveOrder(
     val deviceName: String,
     val deviceMac: String,
     val deviceEmoji: String,
-    val preDeduct: Double
+    val preDeduct: Double,
+    val projectId: String? = null
 )

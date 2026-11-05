@@ -516,7 +516,8 @@ object ShowerController {
                     deviceEmoji = device?.typeEmoji ?: PrefsHelper.lastDeviceEmoji,
                     // 小组件调用时 device 为 null，回落到上次记下的金额，
                     // 否则卡片上的「预扣」会一直是 ¥0.00
-                    preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble()
+                    preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble(),
+                    projectId = NetworkModule.currentProjectId()
                 )
             )
         }
@@ -570,6 +571,7 @@ object ShowerController {
         PrefsHelper.lastDeviceMac = device.macAddress
         PrefsHelper.lastDeviceSnCode = device.snCode
         PrefsHelper.lastDeviceEmoji = device.typeEmoji
+        PrefsHelper.lastDeviceProjectId = NetworkModule.currentProjectId()
         // 小组件副标题要显示「卫生间热水器」这类类型说明
         PrefsHelper.lastDeviceTypeName = device.typeLabel
         // 小组件开阀时只有 snCode，预扣金额得从这里取

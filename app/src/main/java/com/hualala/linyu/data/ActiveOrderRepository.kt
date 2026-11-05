@@ -1,6 +1,7 @@
 package com.hualala.linyu.data
 
 import com.hualala.linyu.model.ActiveOrder
+import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.utils.PrefsHelper
 
 /**
@@ -24,6 +25,12 @@ object ActiveOrderRepository {
     private val lock = Any()
 
     fun all(): List<ActiveOrder> = PrefsHelper.getActiveOrders()
+
+    fun forProject(projectId: String = NetworkModule.currentProjectId()): List<ActiveOrder> =
+        all().filter { it.projectId == projectId }
+
+    fun sessionFor(snCode: String) =
+        NetworkModule.sessionForProject(find(snCode)?.projectId.orEmpty())
 
     fun find(snCode: String): ActiveOrder? =
         if (snCode.isEmpty()) null else all().find { it.snCode == snCode }
