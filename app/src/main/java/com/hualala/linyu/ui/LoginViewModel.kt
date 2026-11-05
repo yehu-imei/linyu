@@ -56,9 +56,9 @@ class LoginViewModel : ViewModel() {
                     errorMessage = when {
                         msg.contains("Unable to resolve host", ignoreCase = true) ||
                         msg.contains("No address associated", ignoreCase = true) ||
-                        msg.contains("Network is unreachable", ignoreCase = true) -> "网络连接失败，请检查网络设置"
+                        msg.contains("Network is unreachable", ignoreCase = true) -> "网络连接失败，请检查网络"
                         msg.contains("timeout", ignoreCase = true) || msg.contains("timed out", ignoreCase = true) ->
-                            "连接超时，请检查网络后重试"
+                            "连接超时，请重试"
                         else -> msg
                     }
                 }

@@ -306,7 +306,7 @@ object Notifier {
         if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyFinished) return
         postEvent(context, ID_FINISHED, alert = true,
             title = "关阀失败 · ${shortName(deviceName)}",
-            body = reason,
+            body = "关闭结果未确认，设备可能仍在出水，请检查设备后重试",
             tab = 0)
     }
 
@@ -355,7 +355,7 @@ object Notifier {
         if (!PrefsHelper.notifyEnabled) return
         postEvent(context, ID_OPEN_FAILED, alert = true,
             title = "开阀失败 · ${shortName(deviceName)}",
-            body = reason)
+            body = UserFeedback.message(reason, "开启失败，请重试"))
     }
 
     /**

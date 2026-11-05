@@ -50,7 +50,7 @@ fun DeductConfirmDialog(
                 Text("将从校园卡中扣除：", color = AppColors.TextSecondary, fontSize = 13.sp)
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    if (known) MoneyFormat.withSymbol(amount) else "金额无法识别",
+                    if (known) MoneyFormat.withSymbol(amount) else "金额无法确认",
                     fontSize = 22.sp, fontWeight = FontWeight.Bold,
                     color = if (known) AppColors.Danger else AppColors.TextSecondary
                 )
@@ -58,8 +58,8 @@ fun DeductConfirmDialog(
                 Text(detail, color = AppColors.TextSecondary, fontSize = 12.sp)
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    if (known) "余额不足时会扣款失败"
-                    else "服务端返回的金额格式不对，无法确认将扣多少钱。请到「钱包」页逐笔核对后再操作。",
+                    if (known) "将从校园卡扣除以上金额，是否继续？"
+                    else "无法确认扣款金额，请到账单页核对。",
                     color = if (known) AppColors.TextSecondary else AppColors.Warning,
                     fontSize = 11.sp
                 )

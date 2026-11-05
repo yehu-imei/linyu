@@ -252,7 +252,7 @@ fun WalletScreen(viewModel: MainViewModel) {
                 viewModel.requestDeduct(date) { r ->
                     viewModel.toastMessage = when (r) {
                         is MainViewModel.DeductResult.Ok -> "代扣成功"
-                        is MainViewModel.DeductResult.Failed -> r.reason ?: "代扣失败"
+                        is MainViewModel.DeductResult.Failed -> com.hualala.linyu.utils.UserFeedback.message(r.reason, "代扣失败，请重试")
                         // 结果未知**不能说失败**：请求可能已经发出去了，
                         // 说失败就是在鼓励用户再点一次 → 扣两次
                         is MainViewModel.DeductResult.Unknown -> "结果未知，请下拉刷新确认后再操作"

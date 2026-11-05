@@ -273,7 +273,7 @@ object ShowerController {
                 // 单次轮询失败不算失败，继续下一轮
             }
         }
-        if (!opened) return OpenOutcome.Failed("开阀未确认成功，请确认热水器是否已开启")
+        if (!opened) return OpenOutcome.Failed("开启结果未确认，请检查是否出水，勿重复开启")
 
         // 4. 落盘：开阀时间戳 / 活跃订单 / 自动关停倒计时 / 上次使用设备
         if (PrefsHelper.getStartedAt(snCode) <= 0L) {
@@ -321,10 +321,10 @@ object ShowerController {
             val running = orderRunning(snCode)
             if (running == true) {
                 // 服务端说还开着 → 确实没关成
-                return CloseOutcome.Unconfirmed(startTime, "关阀请求没发出去，设备可能还在用水", null)
+                return CloseOutcome.Unconfirmed(startTime, "关闭结果未确认，设备可能仍在出水", null)
             }
             // 查不到（多半也是断网）→ 一样没有证据
-            return CloseOutcome.Unconfirmed(startTime, "关阀请求没发出去：${e.message}", null)
+            return CloseOutcome.Unconfirmed(startTime, "关闭结果未确认，设备可能仍在出水", null)
         }
 
         if (!close.success) {

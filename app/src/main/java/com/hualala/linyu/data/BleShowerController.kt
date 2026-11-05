@@ -209,7 +209,7 @@ object BleShowerController {
                     // 补结算已清掉设备记录（state 回 0）。断开连接，让用户重新点一次开阀——
                     // 重开阀需要一次全新的连接（设备在新连接里才会给出可用的会话参数）。
                     ble.disconnect()
-                    return OpenOutcome.Recovered("已结清上一笔遗留账单，请重新点击开阀")
+                    return OpenOutcome.Recovered("上笔账单已结清，请重新开启")
                 } else if (ShowerController.isRunning(device.snCode)) {
                     // 本地有这台设备的活跃订单 → 是「恢复」场景：上一次没关干净 / App 被杀过，
                     // 设备其实在为自己出水。别当成「别人在用」报错，直接沿用当前会话进入
@@ -237,7 +237,7 @@ object BleShowerController {
                 deviceId = device.deviceId.toString(),
                 xfModel = XF_MODEL,
                 randomNumber = st.randomNumber
-            ) ?: return OpenOutcome.Failed("签名失败，请重新登录后重试")
+            ) ?: return OpenOutcome.Failed("设备验证失败，请重新登录")
 
             val resp = NetworkModule.apiService.bluetoothRateOrderSafe(
                 deviceId = device.deviceId.toString(),
@@ -252,7 +252,7 @@ object BleShowerController {
                 auth = NetworkModule.authFields()
             )
             if (!resp.success || resp.data == null) {
-                val msg = resp.displayMessage ?: "服务端未下发费率"
+                val msg = resp.displayMessage ?: "获取计费信息失败，请重试"
                 AppLogger.w("蓝牙开阀失败：$msg")
                 return OpenOutcome.Failed(msg)
             }
@@ -263,7 +263,7 @@ object BleShowerController {
             // 费率包不合法就绝不能往设备里写——写进去的东西不对，后果不是"失败"而是"扣错钱"
             if (downBytes == null || downBytes.isEmpty()) {
                 AppLogger.e("费率包无效：${downDataHex.take(64)}", null)
-                return OpenOutcome.Failed("服务端费率数据无效，已停止启动")
+                return OpenOutcome.Failed("获取计费信息失败，请重试")
             }
 
             // ④ 写入费率包——这一步真正开阀
@@ -290,7 +290,7 @@ object BleShowerController {
             } else {
                 // 命令发出去了但设备没回确认——**不能当失败**，费率包可能已经写进去了
                 AppLogger.w("费率包已发送但设备未确认，结果未知")
-                OpenOutcome.Unconfirmed("未能确认设备已开启，请确认水流状态后决定是否重试")
+                OpenOutcome.Unconfirmed("开启结果未确认，请检查是否出水，勿重复开启")
             }
         } finally {
             // 连接留给结算流程复用（关阀还要用），这里不断开。
@@ -408,14 +408,14 @@ object BleShowerController {
         }
         if (!reconnected) {
             AppLogger.w("关阀后重连失败，结算推迟到下次连接")
-            return SettleOutcome.PartialSettlement("设备已关闭，但结算未完成，下次连接会自动结清")
+            return SettleOutcome.PartialSettlement("已关闭，结算待完成；再次连接后重试")
         }
 
         // ③ 查设备状态 → 采集 + 上传 + 写回（复用补结算流程）
         val st = ble.query()
         if (st == null) {
             AppLogger.w("关阀重连后读取状态失败")
-            return SettleOutcome.PartialSettlement("设备已关闭，但读取状态失败，下次连接会自动结清")
+            return SettleOutcome.PartialSettlement("已关闭，结算待完成；再次连接后重试")
         }
         AppLogger.i("关阀重连后设备状态：state=${st.state} random=${st.randomNumber}")
         val result = settlePending(ble, st, loginCode, telephone)

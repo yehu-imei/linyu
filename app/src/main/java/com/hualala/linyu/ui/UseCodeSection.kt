@@ -148,7 +148,7 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
                                 msg.contains("Unable to resolve host", ignoreCase = true) ||
                                 msg.contains("No address associated", ignoreCase = true) ||
                                 msg.contains("Failed to connect", ignoreCase = true) ->
-                                    "网络连接失败，请检查网络设置"
+                                    "网络连接失败，请检查网络"
                                 else -> "操作失败，请重试"
                             }
                         }
@@ -161,7 +161,7 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
 
             // 领取入口同样收起。⚠️ 今天已领过时**按钮照样能点**——
             // 置灰虽然「正确」，但用户看不懂为什么不给点；让他点、然后弹一句
-            // 「1天只能领取一次使用码」，比一个灰按钮说得多。
+            // 「每天只能领取一次使用码」，比一个灰按钮说得多。
             Spacer(Modifier.height(12.dp))
             HorizontalDivider(color = AppColors.Border)
             CollapsibleHeader(
@@ -171,7 +171,7 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
             if (redeemExpanded) {
                 if (!canRedeem) {
                     useCode?.resetAvailabilityWarMark?.let {
-                        Text(it, color = AppColors.TextSecondary, fontSize = 11.sp,
+                        Text(com.hualala.linyu.utils.UserFeedback.message(it, "当前无法领取，请稍后重试"), color = AppColors.TextSecondary, fontSize = 11.sp,
                             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
                     }
                     Spacer(Modifier.height(6.dp))
@@ -256,7 +256,9 @@ internal fun UseCodeRedeemDialog(
     // 服务端说今天已经领过了。**不是不给点，而是点了告诉用户为什么**——
     // 所以这里不拦入口，只把弹窗内容换成一句说明。
     val blocked = useCode?.resetAvailability == 0
-    val blockReason = useCode?.resetAvailabilityWarMark ?: "1天只能领取一次使用码"
+    val blockReason = useCode?.resetAvailabilityWarMark?.let {
+        com.hualala.linyu.utils.UserFeedback.message(it, "当前无法领取，请稍后重试")
+    } ?: "每天只能领取一次使用码"
 
     // 打开弹窗就**先换一个出来**。
     //
@@ -299,7 +301,7 @@ internal fun UseCodeRedeemDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("领取后替换为", color = AppColors.TextSecondary, fontSize = 12.sp)
+                        Text("新使用码", color = AppColors.TextSecondary, fontSize = 12.sp)
                         Spacer(Modifier.height(2.dp))
                         val shown = candidate
                         if (shown.isNullOrEmpty()) {
@@ -344,7 +346,7 @@ internal fun UseCodeRedeemDialog(
                 Spacer(Modifier.height(6.dp))
                 if (candidate != null) {
                     Text(
-                        if (expired) "已超时，请重新换一个"
+                        if (expired) "使用码已过期，请重新获取"
                         else "请在 %d:%02d 内领取".format(leftSec / 60, leftSec % 60),
                         color = if (expired) AppColors.Danger else AppColors.TextSecondary,
                         fontSize = 11.sp
@@ -356,7 +358,7 @@ internal fun UseCodeRedeemDialog(
                 }
                 error?.let {
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = AppColors.Danger, fontSize = 12.sp)
+                    Text(com.hualala.linyu.utils.UserFeedback.message(it), color = AppColors.Danger, fontSize = 12.sp)
                 }
             }
         },

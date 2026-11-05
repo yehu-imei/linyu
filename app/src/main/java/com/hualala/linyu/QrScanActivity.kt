@@ -286,9 +286,9 @@ class QrScanActivity : AppCompatActivity() {
                         val sn = matchDeviceCode(codes)
                         if (sn != null) finishWithSn(sn) else onMiss()
                     }
-                    .addOnFailureListener { onError("图片识别失败，换一张试试") }
+                    .addOnFailureListener { onError("未识别到设备二维码，请换张图片") }
             } catch (_: Exception) {
-                onError("这张图片读不出来，换一张试试")
+                onError("图片读取失败，请换张图片")
             }
         }
     }
@@ -329,7 +329,7 @@ class QrScanActivity : AppCompatActivity() {
         ) { ok ->
             granted = ok
             denied = !ok
-            if (!ok) hint = "没有相机权限就没法扫码"
+            if (!ok) hint = "请允许相机权限后扫码"
         }
 
         // 相册选图：Android 13+ 走系统照片选择器，旧版本自动回落，
@@ -340,7 +340,7 @@ class QrScanActivity : AppCompatActivity() {
             if (uri == null) return@rememberLauncherForActivityResult
             analyzeImage(
                 uri,
-                onMiss = { hint = "这张图片里没有找到设备二维码" },
+                onMiss = { hint = "未识别到设备二维码，请换张图片" },
                 onError = { hint = it }
             )
         }
@@ -425,9 +425,9 @@ class QrScanActivity : AppCompatActivity() {
                     title = if (!granted) "需要相机权限" else "相机启动失败",
                     desc = when {
                         !granted && denied ->
-                            "权限被拒绝了。可以点下面的「授予权限」再试一次，或者去系统设置里打开"
-                        !granted -> "扫码要用到相机。权限只用于识别二维码，不会拍照上传"
-                        else -> "可能是相机被其他应用占用，或者设备不支持。稍后再试一次，或者重启一下手机"
+                            "请允许相机权限后扫码"
+                        !granted -> "相机仅用于扫码，不会上传照片"
+                        else -> "相机暂不可用，请稍后重试"
                     },
                     actions = buildList {
                         if (!granted) {

@@ -453,7 +453,7 @@ class MainViewModel : ViewModel() {
                     msg.contains("No address associated", ignoreCase = true) ||
                     msg.contains("Network is unreachable", ignoreCase = true) ||
                     msg.contains("Failed to connect", ignoreCase = true)) {
-                    "网络连接失败，请检查网络设置"
+                    "网络连接失败，请检查网络"
                 } else {
                     "查询设备失败"
                 }
@@ -493,7 +493,7 @@ class MainViewModel : ViewModel() {
                         // 服务端明确报错（被挤下线由上面的 checkKick 负责），照原话说
                         !resp.success -> resp.displayMessage ?: "获取设备信息失败，请稍后重试"
                         // success=true 但 data=null：服务端确认没有登记这台设备
-                        else -> "服务端没有这台设备的记录（$mac）"
+                        else -> "未查询到该设备，请检查设备码"
                     }
                 }
             } catch (e: Exception) {
@@ -503,7 +503,7 @@ class MainViewModel : ViewModel() {
                     msg.contains("No address associated", ignoreCase = true) ||
                     msg.contains("Network is unreachable", ignoreCase = true) ||
                     msg.contains("Failed to connect", ignoreCase = true)) {
-                    "网络连接失败，请检查网络设置"
+                    "网络连接失败，请检查网络"
                 } else {
                     // 以前这里什么都不说，异常被整个吞掉，同样是"点了没反应"
                     "获取设备信息失败，请稍后重试"
@@ -658,7 +658,7 @@ class MainViewModel : ViewModel() {
                     OpenOutcome.Unknown -> {
                         // App 内调用给了充足预算，理论上不会走到这；保守起见按未确认处理
                         showerError = ShowerError(
-                            "开阀未确认成功，请确认热水器是否已开启",
+                            "开启结果未确认，请检查是否出水，勿重复开启",
                             ShowerErrorKind.UNKNOWN_RESULT
                         )
                         mqttManager?.disconnect()
@@ -746,7 +746,7 @@ class MainViewModel : ViewModel() {
                 // randomNumber，立刻开阀会 226。用 toast 温和提示，让用户重新点开阀。
                 AppLogger.i("蓝牙补结算完成，提示重新开阀")
                 releaseBle()
-                toastMessage = result.message
+                toastMessage = com.hualala.linyu.utils.UserFeedback.message(result.message)
             }
 
             is BleShowerController.OpenOutcome.NotBleDevice -> {
@@ -1071,7 +1071,7 @@ class MainViewModel : ViewModel() {
         currentOrderNo = null
         // 注意：保留 activeOrders 与 PrefsHelper.getStartedAt(snCode)，用水与计时都继续
         try { mqttManager?.disconnect() } catch (_: Exception) {}
-        toastMessage = "已返回主页，设备仍在运行"
+        toastMessage = "已返回首页，用水仍在继续"
     }
 
     // ════════════════════════════════════════════
@@ -1117,7 +1117,7 @@ class MainViewModel : ViewModel() {
                 checkKick(outcome.kickHint)
 
                 if (outcome is CloseOutcome.Failed) {
-                    toastMessage = outcome.message
+                    toastMessage = "关闭结果未确认，设备可能仍在出水"
                     isStopping = false
                     return@launch
                 }
@@ -1127,7 +1127,7 @@ class MainViewModel : ViewModel() {
                 // 退出去就等于把他扔在一个「以为停了、其实还在扣钱」的状态里，
                 // 而且他想再停一次都找不到按钮。留在这里，让他能重试。
                 if (outcome is CloseOutcome.Unconfirmed) {
-                    toastMessage = "没能确认设备已关闭，请检查网络后重试"
+                    toastMessage = "关闭结果未确认，设备可能仍在出水"
                     isStopping = false
                     AppLogger.w("停止用水未确认：${outcome.message}")
                     return@launch
@@ -1154,7 +1154,7 @@ class MainViewModel : ViewModel() {
                     )
                     toastMessage = when {
                         // null = 两条路都没拿到金额，是「还不知道」而不是「没花钱」
-                        amount == null -> "已停止，消费金额稍后可在账单中查看"
+                        amount == null -> "已关闭，金额请稍后查看账单"
                         amount > 0 -> "已停止，本次消费 ${MoneyFormat.withSymbol(amount)}"
                         else -> "热水器已关闭，本次无消费"
                     }
@@ -1339,14 +1339,14 @@ class MainViewModel : ViewModel() {
                 is BleShowerController.SettleOutcome.PartialSettlement -> {
                     // 水**已经关了**，只是账没结完。要退出使用页（否则用户被卡住），
                     // 但明确告诉他金额去哪儿看
-                    toastMessage = "设备已关闭；${outcome.message}，金额请稍后在账单中查看"
+                    toastMessage = "已关闭，金额请稍后查看账单"
                     finishShower(session.snCode, null)
                     releaseBle()
                 }
 
                 is BleShowerController.SettleOutcome.CloseFailed -> {
                     // ⚠️ 水可能还在流 —— 留在使用页，让他能重试
-                    toastMessage = outcome.message
+                    toastMessage = "关闭结果未确认，设备可能仍在出水"
                     AppLogger.w("蓝牙关阀失败，保留使用页以便重试")
                     isStopping = false
                     endStopAttempt()   // 卡片从「正在关闭…」回到「使用中」，水确实还在流
@@ -1689,7 +1689,7 @@ class MainViewModel : ViewModel() {
                     msg.contains("No address associated", ignoreCase = true) ||
                     msg.contains("Network is unreachable", ignoreCase = true) ||
                     msg.contains("Failed to connect", ignoreCase = true)) {
-                    toastMessage = "网络连接失败，请检查网络设置"
+                    toastMessage = "网络连接失败，请检查网络"
                 }
             }
         }
@@ -2231,7 +2231,7 @@ class MainViewModel : ViewModel() {
                     msg.contains("No address associated", ignoreCase = true) ||
                     msg.contains("Network is unreachable", ignoreCase = true) ||
                     msg.contains("Failed to connect", ignoreCase = true)) {
-                    toastMessage = "网络连接失败，请检查网络设置"
+                    toastMessage = "网络连接失败，请检查网络"
                 }
             }
             finally { isLoadingBills = false }

@@ -599,7 +599,7 @@ object WidgetRenderer {
      */
     private fun nearbyBlocker(context: Context): String? {
         if (!ScanPermission.granted(context)) return "请在 App 中开启扫描权限"
-        if (!isBluetoothOn(context)) return "请打开蓝牙"
+        if (!isBluetoothOn(context)) return "请开启蓝牙后重试"
         return null
     }
 

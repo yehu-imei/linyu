@@ -135,7 +135,7 @@ internal fun NotifyCard() {
             // 权限没开的话开关全是摆设，必须说清楚，否则用户会以为坏了。
             //
             // ⚠️ 但要跟着**总开关**一起判断：用户自己把通知全关了的时候，
-            // 再提示「请打开通知权限」就很莫名其妙——他本来就是不想要通知，
+            // 再提示「请允许通知权限」就很莫名其妙——他本来就是不想要通知，
             // 而且那个「去开启」按钮还能一键把系统权限打开，等于跟用户对着干。
             if (!allowed && enabled) {
                 Spacer(Modifier.height(12.dp))
@@ -147,7 +147,7 @@ internal fun NotifyCard() {
                     color = AppColors.Warning.copy(alpha = 0.12f)
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("请打开通知权限", color = AppColors.Warning,
+                        Text("请允许通知权限", color = AppColors.Warning,
                             fontSize = 13.sp, fontWeight = FontWeight.Medium)
                         Spacer(Modifier.height(4.dp))
                         Text("开启后才能收到用水提醒和结束通知。",
@@ -233,7 +233,7 @@ internal fun TrendToggleCard() {
                     color = AppColors.TextPrimary)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    if (enabled) "在钱包页显示消费统计图" else "已隐藏钱包页的消费统计图",
+                    if (enabled) "在账单页显示消费统计图" else "已隐藏账单页的消费统计图",
                     color = AppColors.TextSecondary, fontSize = 13.sp
                 )
             }

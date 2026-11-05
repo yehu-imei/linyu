@@ -239,9 +239,9 @@ class MainActivity : ComponentActivity() {
                     if (showKickedDialog) {
                         AlertDialog(
                             onDismissRequest = {},
-                            title = { Text("账号在别处登录", fontWeight = FontWeight.Bold,
+                            title = { Text("登录已失效", fontWeight = FontWeight.Bold,
                                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-                            text = { Text("当前登录已失效。设备可能仍在用水，请重新登录核对，或立即使用官方客户端、联系人工处理。", textAlign = TextAlign.Center,
+                            text = { Text("请重新登录。若正在用水，请确认设备已关闭；无法关闭时请使用官方应用或联系工作人员。", textAlign = TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant) },
                             confirmButton = {
                                 Button(onClick = {

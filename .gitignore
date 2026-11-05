@@ -31,4 +31,5 @@ local.properties
 *.zip
 
 # ── 开发过程文档（调研/草稿/清单，不进仓库）──
-docs/
+docs/*
+!docs/APP_CHANGELOG.md

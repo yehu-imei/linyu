@@ -269,7 +269,7 @@ fun LoginScreen(
                             shape = RoundedCornerShape(8.dp),
                             color = Color(0xFFFFEBEE)
                         ) {
-                            Text(msg, modifier = Modifier.padding(12.dp),
+                            Text(com.hualala.linyu.utils.UserFeedback.message(msg, "登录失败，请重试"), modifier = Modifier.padding(12.dp),
                                 color = Color(0xFFC62828), fontSize = 13.sp,
                                 textAlign = TextAlign.Center)
                         }

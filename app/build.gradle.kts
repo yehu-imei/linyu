@@ -17,7 +17,16 @@ val releaseKeystorePath = releaseSigningProperties.getProperty("KEYSTORE_FILE")
 val releaseSigningReady = releaseSigningFields.all { !releaseSigningProperties.getProperty(it).isNullOrBlank() } &&
     releaseKeystorePath?.let { file(it).isFile } == true
 
+// 用户日志以文档为唯一输入；无需维护一份 assets 手工副本。
+val releaseNotesAssets = layout.buildDirectory.dir("generated/releaseNotesAssets")
+val copyUserReleaseNotes by tasks.registering(Copy::class) {
+    from(rootProject.file("docs/APP_CHANGELOG.md"))
+    into(releaseNotesAssets)
+}
+tasks.named("preBuild").configure { dependsOn(copyUserReleaseNotes) }
+
 android {
+    sourceSets.getByName("main").assets.srcDir(releaseNotesAssets)
     namespace = "com.hualala.linyu"
     compileSdk = 36
 

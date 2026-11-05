@@ -64,8 +64,7 @@ fun DeviceDetailDialog(
                 if (isBle) {
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "此设备通过手机蓝牙直连控制：开启后请留在设备旁，" +
-                            "走远会断开连接、无法关闭。",
+                        "使用期间请保持蓝牙开启并留在设备附近，以便结束用水。",
                         fontSize = 13.sp,
                         color = AppColors.TextSecondary,
                         lineHeight = 18.sp

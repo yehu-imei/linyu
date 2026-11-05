@@ -63,6 +63,8 @@ import com.hualala.linyu.api.GithubRelease
 import com.hualala.linyu.api.GithubRepoInfo
 import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.data.AuthRepository
+import com.hualala.linyu.data.UserReleaseNote
+import com.hualala.linyu.data.UserReleaseNotesRepository
 import com.hualala.linyu.api.forgetPasswordSafe
 import com.hualala.linyu.api.updatePasswordSafe
 import com.hualala.linyu.api.updatePhoneSafe
@@ -78,6 +80,7 @@ import com.hualala.linyu.utils.ApkInstallResult
 import com.hualala.linyu.utils.ApkUpdater
 import com.hualala.linyu.utils.PrefsHelper
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 
 /** 「我的」页面中可编辑的卡片类型（声明顺序即默认顺序） */
@@ -536,7 +539,7 @@ private fun AccountCard(
                 InfoRow("姓名", name)
                 Spacer(Modifier.height(10.dp))
             }
-            InfoRow("手机号", phone)
+            InfoRow("账户", phone)
             Spacer(Modifier.height(10.dp))
             InfoRow("学校", school)
             // 学号跟在**学校**下面：这两个是同一类信息（学籍），挨着放一眼能对上；
@@ -756,7 +759,7 @@ private fun BackgroundCard(onOpen: () -> Unit) {
 }
 
 
-/** 更新日志默认展开几个版本，其余折叠。点「展开全部」可看全部（最多 10 个） */
+/** 默认列出三个版本，其余历史按需展开。 */
 private const val RECENT_RELEASE_COUNT = 3
 
 // ── 应用信息 / 软件更新 ──
@@ -766,6 +769,7 @@ private fun UpdateCard() {
     val context = LocalContext.current
     // 用进程级缓存，避免每次切到「我的」都重新请求
     var releases by remember { mutableStateOf(UserPageCache.releases) }
+    var releaseNotes by remember { mutableStateOf(UserReleaseNotesRepository.local(context)) }
     var checking by remember { mutableStateOf(false) }
     var checkedOnce by remember { mutableStateOf(UserPageCache.releasesFetched) }
     var expandedTag by remember { mutableStateOf<String?>(null) }
@@ -784,11 +788,13 @@ private fun UpdateCard() {
         if (checking) return
         checking = true
         scope.launch {
+            val notesTask = async { UserReleaseNotesRepository.refresh(context.applicationContext) }
             val list = GithubApi.fetchReleases()
             UserPageCache.releases = list
             UserPageCache.releasesFetched = true
             releases = list
             checkedOnce = true
+            releaseNotes = notesTask.await()
             checking = false
             // 不自动展开任何版本（由用户手动点击展开）
         }
@@ -808,7 +814,7 @@ private fun UpdateCard() {
             val (statusText, statusColor) = when {
                 checking -> "正在检测更新…" to AppColors.TextSecondary
                 !checkedOnce -> "正在检测更新…" to AppColors.TextSecondary
-                releases.isEmpty() -> "检测失败（多为网络原因）" to AppColors.Warning
+                releases.isEmpty() -> "检查更新失败，请重试" to AppColors.Warning
                 hasUpdate -> "发现新版本 $latestTag" to AppColors.Accent
                 else -> "当前已是最新版本" to AppColors.Success
             }
@@ -816,7 +822,7 @@ private fun UpdateCard() {
                 fontWeight = FontWeight.Medium)
 
             // ③ 更新日志（点击版本号展开）
-            if (releases.isNotEmpty()) {
+            if (releaseNotes.isNotEmpty()) {
                 Spacer(Modifier.height(14.dp))
                 HorizontalDivider(color = AppColors.Border)
                 Spacer(Modifier.height(10.dp))
@@ -825,16 +831,16 @@ private fun UpdateCard() {
                 Spacer(Modifier.height(2.dp))
                 // 默认只列最近几个版本。全部铺开会把卡片拉得很长，
                 // 「检查更新」按钮被顶到屏幕外，想更新的人还得先划过一堆旧日志。
-                val shown = if (showAllReleases) releases else releases.take(RECENT_RELEASE_COUNT)
+                val shown = if (showAllReleases) releaseNotes else releaseNotes.take(RECENT_RELEASE_COUNT)
                 shown.forEach { r ->
                     ReleaseRow(
                         release = r,
-                        isCurrent = r.tagName == currentVersion,
-                        expanded = expandedTag == r.tagName,
-                        onToggle = { expandedTag = if (expandedTag == r.tagName) null else r.tagName }
+                        isCurrent = r.version.removePrefix("v") == currentVersion.removePrefix("v"),
+                        expanded = expandedTag == r.version,
+                        onToggle = { expandedTag = if (expandedTag == r.version) null else r.version }
                     )
                 }
-                if (releases.size > RECENT_RELEASE_COUNT) {
+                if (releaseNotes.size > RECENT_RELEASE_COUNT) {
                     TextButton(
                         onClick = { showAllReleases = !showAllReleases },
                         modifier = Modifier.fillMaxWidth()
@@ -974,7 +980,7 @@ private fun DownloadSection(
         is ApkDownloadState.Failed -> {
             Surface(shape = RoundedCornerShape(10.dp),
                 color = AppColors.Warning.copy(alpha = 0.12f)) {
-                Text(state.message, modifier = Modifier.padding(10.dp),
+                Text(com.hualala.linyu.utils.UserFeedback.message(state.message, "下载更新失败，请重试"), modifier = Modifier.padding(10.dp),
                     color = AppColors.Warning, fontSize = 12.sp)
             }
             Spacer(Modifier.height(8.dp))
@@ -1006,7 +1012,7 @@ private fun DownloadSection(
         Spacer(Modifier.height(8.dp))
         Surface(shape = RoundedCornerShape(10.dp),
             color = AppColors.Warning.copy(alpha = 0.12f)) {
-            Text(msg, modifier = Modifier.padding(10.dp),
+            Text(com.hualala.linyu.utils.UserFeedback.message(msg, "安装失败，请重试"), modifier = Modifier.padding(10.dp),
                 color = AppColors.Warning, fontSize = 12.sp)
         }
     }
@@ -1050,48 +1056,9 @@ private fun formatBytes(bytes: Long): String = when {
     else -> "%.1f MB".format(bytes / 1024.0 / 1024.0)
 }
 
-/**
- * 从发行版说明中只抽出「新增功能」与「修复」两类内容，其余段落（安装步骤、注意事项等）丢弃。
- * 发行版说明是 Markdown，按 `#` 标题切段落，命中关键词的段落保留整段。
- */
-private fun extractReleaseHighlights(body: String): String {
-    val out = StringBuilder()
-    var keeping = false
-    body.lines().forEach { raw ->
-        val line = raw.trimEnd()
-        if (line.trimStart().startsWith("#")) {
-            val title = plainHeading(line)
-            keeping = title.contains("新增") || title.contains("功能") ||
-                      title.contains("修复") || title.contains("BUG", ignoreCase = true)
-            if (keeping) {
-                if (out.isNotEmpty()) out.append('\n')
-                out.append(stripMarkdown(title)).append('\n')
-            }
-        } else if (keeping) {
-            out.append(stripMarkdown(line)).append('\n')
-        }
-    }
-    return out.toString().trim()
-}
-
-/**
- * 去掉 Markdown 强调标记。
- *
- * 发行版说明是按 Markdown 写的，但 App 里用的是普通 Text 渲染（没有 Markdown 解析），
- * 不处理的话 `**加粗**` 会把星号原样显示出来，`反引号` 同理。
- */
-private fun stripMarkdown(s: String): String =
-    s.replace("**", "").replace("__", "").replace("`", "")
-
-/** 去掉标题里的 `#`、表情符号和多余空白，只保留中日韩文字与 ASCII */
-private fun plainHeading(line: String): String =
-    line.trimStart().trimStart('#').trim()
-        .filter { c -> c.code in 0x4E00..0x9FFF || c.code in 0x3000..0x303F || c.code in 0x20..0x7E }
-        .trim()
-
 @Composable
 private fun ReleaseRow(
-    release: GithubRelease,
+    release: UserReleaseNote,
     isCurrent: Boolean,
     expanded: Boolean,
     onToggle: () -> Unit
@@ -1112,7 +1079,7 @@ private fun ReleaseRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(release.tagName, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+                Text(release.version, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
                     color = AppColors.TextPrimary)
                 if (isCurrent) {
                     Spacer(Modifier.width(6.dp))
@@ -1130,16 +1097,15 @@ private fun ReleaseRow(
         }
         if (expanded) {
             Text(
-                extractReleaseHighlights(release.body).ifBlank { "本版本未填写更新详情。" },
-                fontSize = 12.sp, color = AppColors.TextSecondary,
+                release.text,
+                fontSize = 12.sp, lineHeight = 20.sp, color = AppColors.TextSecondary,
                 modifier = Modifier.padding(bottom = 6.dp)
             )
             Text(
-                release.publishedAt.take(10),
+                release.date,
                 fontSize = 11.sp, color = AppColors.TextSecondary.copy(alpha = 0.7f),
                 modifier = Modifier.padding(bottom = 6.dp)
             )
-            HorizontalDivider(color = AppColors.Border)
         }
     }
 }
@@ -1315,7 +1281,7 @@ private fun ChangePhoneDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) 
                 }
                 error?.let {
                     Spacer(Modifier.height(10.dp))
-                    Text(it, color = AppColors.Danger, fontSize = 12.sp)
+                    Text(com.hualala.linyu.utils.UserFeedback.message(it), color = AppColors.Danger, fontSize = 12.sp)
                 }
             }
         },
@@ -1341,7 +1307,7 @@ private fun ChangePhoneDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) 
                                 error = r.displayMessage ?: "更换失败"
                             }
                         } catch (_: Exception) {
-                            error = "网络异常，请重试"
+                            error = "网络连接失败，请检查网络"
                         }
                         submitting = false
                     }
@@ -1474,7 +1440,7 @@ private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Uni
 
                 error?.let {
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = AppColors.Danger, fontSize = 12.sp)
+                    Text(com.hualala.linyu.utils.UserFeedback.message(it), color = AppColors.Danger, fontSize = 12.sp)
                 }
             }
         },
@@ -1506,7 +1472,7 @@ private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Uni
                                 error = r.displayMessage ?: "修改失败"
                             }
                         } catch (_: Exception) {
-                            error = "网络异常，请重试"
+                            error = "网络连接失败，请检查网络"
                         }
                         submitting = false
                     }

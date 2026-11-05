@@ -360,7 +360,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             },
             text = {
                 Column {
-                    Text(err.message, color = AppColors.TextPrimary, fontSize = 14.sp)
+                    Text(com.hualala.linyu.utils.UserFeedback.message(err.message, "开启失败，请重试"), color = AppColors.TextPrimary, fontSize = 14.sp)
                     if (bills.isNotEmpty()) {
                         Spacer(Modifier.height(12.dp))
                         Text("检测到 ${bills.size} 笔没扣成功的账单：",
@@ -410,7 +410,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                             s.unknown > 0 ->
                                 "成功 ${s.ok} 笔、失败 ${s.failed} 笔、${s.unknown} 笔结果未知"
                             s.failed == 0 -> "补扣成功，再试一次开阀"
-                            s.ok == 0 -> s.firstFailReason ?: "补扣失败，请到「钱包」页重试"
+                            s.ok == 0 -> com.hualala.linyu.utils.UserFeedback.message(s.firstFailReason, "补扣失败，请到账单页重试")
                             else -> "成功 ${s.ok} 笔、失败 ${s.failed} 笔"
                         }
                     }
@@ -454,7 +454,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             onDismissRequest = { viewModel.dismissBleRetry() },
             title = {
                 Text(
-                    "要用蓝牙方式开启吗？",
+                    "尝试蓝牙开启？",
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
@@ -462,11 +462,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             },
             text = {
                 Text(
-                    "「${dev.displayName}」无法通过云端开启。\n\n" +
-                        "如果这台设备需要手机蓝牙直连（开启时必须待在设备旁边），" +
-                        "可以改用蓝牙方式。\n\n" +
-                        "不确定的话：用官方「趣智校园」试一下——" +
-                        "需要站到设备旁才能开的就是这一类。",
+                    "云端开启失败。若设备支持蓝牙控制，请靠近设备后重试。",
                     color = AppColors.TextSecondary,
                     lineHeight = 20.sp
                 )
@@ -475,7 +471,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                 Button(
                     onClick = { viewModel.confirmBleRetry() },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("用蓝牙开启") }
+                ) { Text("蓝牙开启") }
             },
             dismissButton = {
                 TextButton(onClick = { viewModel.dismissBleRetry() }) { Text("取消") }
@@ -646,10 +642,9 @@ private fun ScanPermissionCard(onGrant: () -> Unit) {
             Spacer(Modifier.height(6.dp))
             Text(
                 if (needLocation)
-                    "Android 11 及以下系统规定：扫描蓝牙设备必须授予定位权限。" +
-                        "授权后仅用于发现附近的热水器。"
+                    "请允许定位权限后扫描，仅用于发现附近设备。"
                 else
-                    "需要「附近的设备」权限才能扫描附近的热水器。",
+                    "请允许附近设备权限后扫描。",
                 color = AppColors.TextSecondary, fontSize = 12.sp
             )
             Spacer(Modifier.height(12.dp))
@@ -659,7 +654,7 @@ private fun ScanPermissionCard(onGrant: () -> Unit) {
                 Text("授予权限并扫描")
             }
             Spacer(Modifier.height(6.dp))
-            Text("也可以直接用右上角 📷 扫码绑定设备，无需任何权限",
+            Text("也可点击右上角扫码，需要相机权限",
                 color = AppColors.TextSecondary, fontSize = 11.sp)
         }
     }
