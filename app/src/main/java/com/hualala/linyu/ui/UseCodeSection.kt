@@ -65,6 +65,7 @@ import com.hualala.linyu.api.GithubRelease
 import com.hualala.linyu.api.GithubRepoInfo
 import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.data.AuthRepository
+import com.hualala.linyu.data.UseCodePolicy
 import com.hualala.linyu.api.forgetPasswordSafe
 import com.hualala.linyu.api.updatePasswordSafe
 import com.hualala.linyu.api.updatePhoneSafe
@@ -85,10 +86,9 @@ import kotlinx.coroutines.launch
 
 @Composable
 internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
-    var localCodeOn by remember { mutableStateOf(useCode?.useCodeStatus == 1) }
-    LaunchedEffect(useCode?.useCodeStatus) { useCode?.useCodeStatus?.let { localCodeOn = it == 1 } }
-    val scope = rememberCoroutineScope()
+    val localCodeOn = useCode?.useCodeStatus == 1
     var showRedeem by remember { mutableStateOf(false) }
+    var blockMessage by remember { mutableStateOf<String?>(null) }
     var redeemExpanded by remember { mutableStateOf(false) }
 
     val code = useCode?.useCode
@@ -133,35 +133,16 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
                 modifier = Modifier.fillMaxWidth()) {
                 Text(if (localCodeOn) "使用码已开启" else "使用码已关闭",
                     color = AppColors.TextSecondary, fontSize = 12.sp)
-                Switch(checked = localCodeOn, onCheckedChange = { newVal ->
-                    localCodeOn = newVal
-                    scope.launch {
-                        try {
-                            NetworkModule.apiService.updateUseCodeStatusSafe(
-                                status = if (newVal) 1 else 0,
-                                auth = NetworkModule.authFields()
-                            )
-                        } catch (e: Exception) {
-                            localCodeOn = !newVal
-                            val msg = e.message ?: ""
-                            viewModel?.toastMessage = when {
-                                msg.contains("Unable to resolve host", ignoreCase = true) ||
-                                msg.contains("No address associated", ignoreCase = true) ||
-                                msg.contains("Failed to connect", ignoreCase = true) ->
-                                    "网络连接失败，请检查网络"
-                                else -> "操作失败，请重试"
-                            }
-                        }
-                    }
-                }, colors = SwitchDefaults.colors(checkedThumbColor = AppColors.Accent,
+                Switch(checked = localCodeOn,
+                    enabled = loaded && viewModel?.changingUseCodeStatus == false,
+                    onCheckedChange = { viewModel?.setUseCodeEnabled(it) },
+                    colors = SwitchDefaults.colors(checkedThumbColor = AppColors.Accent,
                     checkedTrackColor = AppColors.Accent.copy(alpha = 0.5f)))
             }
             Text("在热水器物理键盘上输入此码",
                 color = AppColors.TextSecondary, fontSize = 12.sp)
 
-            // 领取入口同样收起。⚠️ 今天已领过时**按钮照样能点**——
-            // 置灰虽然「正确」，但用户看不懂为什么不给点；让他点、然后弹一句
-            // 「每天只能领取一次使用码」，比一个灰按钮说得多。
+            // 入口可点，但资格或额度不足时只说明原因，不进入会自动生成候选码的弹窗。
             Spacer(Modifier.height(12.dp))
             HorizontalDivider(color = AppColors.Border)
             CollapsibleHeader(
@@ -177,7 +158,10 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
                     Spacer(Modifier.height(6.dp))
                 }
                 Button(
-                    onClick = { showRedeem = true },
+                    onClick = {
+                        val reason = viewModel?.useCodeBlockReason ?: UseCodePolicy.blockReason(useCode?.resetAvailability, null)
+                        if (reason == null) showRedeem = true else blockMessage = reason
+                    },
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = AppColors.Accent)
@@ -190,6 +174,11 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
 
     if (showRedeem) {
         UseCodeRedeemDialog(useCode, viewModel) { showRedeem = false }
+    }
+    blockMessage?.let { message ->
+        AlertDialog(onDismissRequest = { blockMessage = null },
+            title = { Text("无法领取") }, text = { Text(message) },
+            confirmButton = { TextButton(onClick = { blockMessage = null }) { Text("知道了") } })
     }
 }
 
@@ -215,7 +204,7 @@ internal fun UseCodeRedeemDialog(
 ) {
     val currentCode = useCode?.useCode
     var candidate by remember { mutableStateOf<String?>(null) }
-    var remainTimes by remember { mutableStateOf<Int?>(null) }
+    var remainTimes by remember { mutableStateOf(viewModel?.useCodeRemaining) }
     var swapping by remember { mutableStateOf(false) }
     var claiming by remember { mutableStateOf(false) }
     var leftSec by remember { mutableStateOf(RedeemTtlSec) }
@@ -234,7 +223,7 @@ internal fun UseCodeRedeemDialog(
     val expired = candidate != null && leftSec <= 0
 
     val swap: () -> Unit = {
-        if (!swapping && !claiming) {
+        if (UseCodePolicy.canGenerate(viewModel?.useCodeRemaining ?: remainTimes, swapping || claiming)) {
             swapping = true
             error = null
             if (viewModel == null) {
@@ -242,19 +231,18 @@ internal fun UseCodeRedeemDialog(
                 swapping = false
             } else {
                 viewModel.generateUseCode { r ->
-                    if (r == null) error = "换码失败，请重试"
+                    if (r == null) error = viewModel.useCodeError ?: "换码失败，请重试"
                     else {
                         candidate = r.first
-                        remainTimes = r.second
                     }
+                    remainTimes = r?.second?.takeIf { it >= 0 } ?: viewModel.useCodeRemaining
                     swapping = false
                 }
             }
         }
     }
 
-    // 服务端说今天已经领过了。**不是不给点，而是点了告诉用户为什么**——
-    // 所以这里不拦入口，只把弹窗内容换成一句说明。
+    // 入口已有资格判断；弹窗保留兜底。额度耗尽不抹掉最后一个可领取的候选码。
     val blocked = useCode?.resetAvailability == 0
     val blockReason = useCode?.resetAvailabilityWarMark?.let {
         com.hualala.linyu.utils.UserFeedback.message(it, "当前无法领取，请稍后重试")
@@ -331,7 +319,7 @@ internal fun UseCodeRedeemDialog(
                             )
                         }
                     }
-                    TextButton(onClick = swap, enabled = !swapping && !claiming) {
+                    TextButton(onClick = swap, enabled = UseCodePolicy.canGenerate(remainTimes, swapping || claiming)) {
                         Icon(Icons.Default.Refresh, null, tint = AppColors.Accent,
                             modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
@@ -382,7 +370,7 @@ internal fun UseCodeRedeemDialog(
                             claiming = false
                         }
                     },
-                    enabled = candidate != null && !expired && !claiming && !swapping
+                    enabled = UseCodePolicy.canClaim(candidate, leftSec, claiming || swapping)
                 ) { Text(if (claiming) "领取中…" else "确定领取") }
             }
         },

@@ -8,6 +8,9 @@ data class UserReleaseNote(val version: String, val date: String, val items: Lis
 /** 与 iOS 共用 APP_CHANGELOG.md 格式；无语义关键词过滤。 */
 object UserReleaseNotes {
     const val REMOTE_URL = "https://raw.githubusercontent.com/yehu-imei/linyu/master/docs/APP_CHANGELOG.md"
+    fun local(document: String, bundled: List<UserReleaseNote>): List<UserReleaseNote> =
+        parse(document).ifEmpty { bundled }
+
     private val versionPattern = Regex("^v[0-9]+(?:\\.[0-9]+){1,2}$")
     private val datePattern = Regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
     private val descending = Comparator<UserReleaseNote> { a, b ->

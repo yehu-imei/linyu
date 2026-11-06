@@ -8,6 +8,8 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hualala.linyu.data.PendingSettlement
 import com.hualala.linyu.data.BillHistoryCache
+import com.hualala.linyu.data.ConsumptionCachePolicy
+import com.hualala.linyu.data.UseCodeQuota
 import com.hualala.linyu.data.shouldPreserveForRecovery
 import com.hualala.linyu.model.ActiveOrder
 import com.hualala.linyu.model.BillItem
@@ -153,6 +155,7 @@ object PrefsHelper {
             prefs.all.keys
                 .filter {
                     it.startsWith("consume_") ||
+                        it.startsWith("consumeTime_") ||
                         it.startsWith("billCache_") ||
                         (!preserveActiveRecovery && shouldPreserveForRecovery(it))
                 }
@@ -538,13 +541,28 @@ object PrefsHelper {
     fun lastConsumeFor(snCode: String): Float =
         if (snCode.isEmpty()) 0f else prefs.getFloat("consume_$snCode", 0f)
 
-    /** 记一笔消费。金额为 0 时不动已有记录，避免「本次无消费」把历史值抹掉 */
+    fun lastConsumeTimeFor(snCode: String): Long = prefs.getLong("consumeTime_$snCode", 0L)
+
+    /** 与 iOS 一样，旧账单不能覆盖刚完成的结算；零消费保留原值。 */
+    @Synchronized
     fun recordConsume(snCode: String, amount: Double, atMs: Long = System.currentTimeMillis()) {
-        if (amount <= 0 || snCode.isEmpty()) return
+        if (snCode.isEmpty() || !ConsumptionCachePolicy.shouldUpdate(amount, atMs, lastConsumeTimeFor(snCode))) return
         prefs.edit()
             .putFloat("consume_$snCode", amount.toFloat())
-            .putLong("lastConsumeTime", atMs)
+            .putLong("consumeTime_$snCode", atMs)
+            .putLong("lastConsumeTime", maxOf(lastConsumeTime, atMs))
             .apply()
+    }
+
+    // 退出后保留当日额度，重新登录不能重新获得已耗尽的次数；不同账户不会共享额度。
+    fun useCodeOwner(): String = if (accountId.isBlank() || projectId.isBlank()) "" else "$projectId:$accountId"
+
+    fun useCodeQuota(owner: String = useCodeOwner()): UseCodeQuota? = runCatching {
+        if (owner.isEmpty()) null else gson.fromJson(prefs.getString("useCodeQuota_$owner", ""), UseCodeQuota::class.java)
+    }.getOrNull()
+
+    fun saveUseCodeQuota(owner: String, quota: UseCodeQuota) {
+        if (owner.isNotEmpty()) prefs.edit().putString("useCodeQuota_$owner", gson.toJson(quota)).apply()
     }
 
     // ── Per-device timer ──

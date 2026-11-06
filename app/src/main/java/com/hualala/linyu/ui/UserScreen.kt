@@ -42,6 +42,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -533,20 +536,30 @@ private fun AccountCard(
 
     BaseCard {
         Column(Modifier.padding(20.dp)) {
-            // 没值就**整行不显示**。以前写死「未设置」，大多数人看到的是那三个字，
-            // 既像报错又占位置——而学校没同步姓名是服务端的事，用户改不了。
-            if (name != null) {
-                InfoRow("姓名", name)
+            // 首次没有缓存时保留四行，避免先只显示账户、随后突然撑高卡片。
+            if (viewModel?.accountInfoLoaded == false) {
+                listOf("姓名", "账户", "学校", "学号").forEachIndexed { index, label ->
+                    if (index > 0) Spacer(Modifier.height(10.dp))
+                    InfoRow(label, "加载中...")
+                }
+            } else {
+                // 服务端确实没有姓名/学号时不展示空行；已有缓存直接展示。
+                if (name != null) {
+                    InfoRow("姓名", name)
+                    Spacer(Modifier.height(10.dp))
+                }
+                InfoRow("账户", phone)
                 Spacer(Modifier.height(10.dp))
+                InfoRow("学校", school)
+                if (studentId != null) {
+                    Spacer(Modifier.height(10.dp))
+                    InfoRow("学号", studentId)
+                }
             }
-            InfoRow("账户", phone)
-            Spacer(Modifier.height(10.dp))
-            InfoRow("学校", school)
-            // 学号跟在**学校**下面：这两个是同一类信息（学籍），挨着放一眼能对上；
-            // 夹在手机号和学校之间会把「账号」和「学籍」两组信息切得七零八落
-            if (studentId != null) {
-                Spacer(Modifier.height(10.dp))
-                InfoRow("学号", studentId)
+            viewModel?.accountInfoError?.let { message ->
+                TextButton(onClick = { viewModel.loadAccountInfo() }) {
+                    Text(message, fontSize = 12.sp, color = AppColors.Accent)
+                }
             }
 
             // 账号管理默认收起。这两件事一年用不上一次，铺在卡片里纯占地方；
@@ -590,20 +603,19 @@ internal fun CollapsibleHeader(
     expanded: Boolean,
     onToggle: () -> Unit
 ) {
-    Row(
+    Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .clickable { onToggle() }
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { onToggle() }
             .padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
+        contentAlignment = Alignment.Center
     ) {
-        Text(title, fontSize = 13.sp, color = AppColors.Accent)
-        Spacer(Modifier.width(4.dp))
+        Text(title, fontSize = 13.sp, color = AppColors.Accent,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), textAlign = TextAlign.Center)
         Icon(
             if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-            null, tint = AppColors.Accent, modifier = Modifier.size(18.dp)
+            null, tint = AppColors.Accent, modifier = Modifier.size(18.dp).align(Alignment.CenterEnd)
         )
     }
 }
@@ -770,6 +782,7 @@ private fun UpdateCard() {
     // 用进程级缓存，避免每次切到「我的」都重新请求
     var releases by remember { mutableStateOf(UserPageCache.releases) }
     var releaseNotes by remember { mutableStateOf(UserReleaseNotesRepository.local(context)) }
+    val lifecycleOwner = LocalLifecycleOwner.current
     var checking by remember { mutableStateOf(false) }
     var checkedOnce by remember { mutableStateOf(UserPageCache.releasesFetched) }
     var expandedTag by remember { mutableStateOf<String?>(null) }
@@ -784,22 +797,35 @@ private fun UpdateCard() {
     val downloadState = ApkUpdater.state
 
     // 打开卡片即自动检测一次（已拉取过则跳过）
-    fun doCheck() {
+    fun doCheck(force: Boolean = false) {
         if (checking) return
         checking = true
         scope.launch {
-            val notesTask = async { UserReleaseNotesRepository.refresh(context.applicationContext) }
-            val list = GithubApi.fetchReleases()
-            UserPageCache.releases = list
-            UserPageCache.releasesFetched = true
-            releases = list
-            checkedOnce = true
-            releaseNotes = notesTask.await()
-            checking = false
+            try {
+                val notesTask = async { releaseNotes = UserReleaseNotesRepository.refresh(context.applicationContext, force) }
+                val list = GithubApi.fetchReleases()
+                UserPageCache.releases = list
+                UserPageCache.releasesFetched = true
+                releases = list
+                checkedOnce = true
+                notesTask.await()
+            } finally { checking = false }
             // 不自动展开任何版本（由用户手动点击展开）
         }
     }
-    LaunchedEffect(Unit) { if (!UserPageCache.releasesFetched) doCheck() }
+    LaunchedEffect(Unit) {
+        if (!UserPageCache.releasesFetched) doCheck()
+        else releaseNotes = UserReleaseNotesRepository.refresh(context.applicationContext)
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) scope.launch {
+                releaseNotes = UserReleaseNotesRepository.refresh(context.applicationContext)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     BaseCard {
         Column(Modifier.padding(20.dp)) {
@@ -858,7 +884,7 @@ private fun UpdateCard() {
             Button(
                 onClick = {
                     ApkUpdater.reset()
-                    doCheck()
+                    doCheck(force = true)
                 },
                 enabled = !checking,
                 shape = RoundedCornerShape(12.dp),

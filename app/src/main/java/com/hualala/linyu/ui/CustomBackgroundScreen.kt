@@ -243,7 +243,7 @@ fun CustomBackgroundScreen(onDismiss: () -> Unit) {
             shape = RoundedCornerShape(20.dp),
             containerColor = AppColors.SolidSurface,
             title = { Text("恢复默认背景？", fontWeight = FontWeight.Bold) },
-            text = { Text("这将移除当前页面的自定义背景及相关效果。\n不会影响深色 / 浅色模式。",
+            text = { Text("这将移除当前页面的自定义背景",
                 color = AppColors.TextSecondary) },
             confirmButton = {
                 Button(onClick = {

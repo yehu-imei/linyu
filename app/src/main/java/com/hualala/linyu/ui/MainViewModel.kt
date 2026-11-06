@@ -16,6 +16,9 @@ import com.hualala.linyu.api.getCampusUserInfoSafe
 import com.hualala.linyu.api.getDeviceInfoSafe
 import com.hualala.linyu.api.forgetPasswordSafe
 import com.hualala.linyu.api.generateUseCodeSafe
+import com.hualala.linyu.api.updateUseCodeStatusSafe
+import com.hualala.linyu.data.UseCodePolicy
+import com.hualala.linyu.data.ConsumptionCachePolicy
 import com.hualala.linyu.api.getProjectInfoSafe
 import com.hualala.linyu.api.getUseCodeSafe
 import com.hualala.linyu.api.queryUnpaidBillsSafe
@@ -308,6 +311,16 @@ class MainViewModel : ViewModel() {
      */
     var useCodeLoaded by mutableStateOf(false)
         private set
+    private var useCodeQuota by mutableStateOf(PrefsHelper.useCodeQuota())
+    val useCodeRemaining: Int? get() = UseCodePolicy.remainingToday(useCodeQuota)
+    val useCodeBlockReason: String? get() = UseCodePolicy.blockReason(useCodeData?.resetAvailability, useCodeRemaining)
+    var changingUseCodeStatus by mutableStateOf(false)
+        private set
+    private var generatingUseCode = false
+    private var claimingUseCode = false
+    private var useCodeLoadSeq = 0
+    var useCodeError by mutableStateOf<String?>(null)
+        private set
 
     /**
      * 账号信息（姓名 / 学号 / 绑定状态）。null = 还没拉到。
@@ -317,6 +330,12 @@ class MainViewModel : ViewModel() {
      */
     var accountInfo by mutableStateOf<AccountInfo?>(null)
         private set
+    var accountInfoLoaded by mutableStateOf(PrefsHelper.userName.isNotBlank() || PrefsHelper.userStudentId.isNotBlank())
+        private set
+    var accountInfoError by mutableStateOf<String?>(null)
+        private set
+    private var loadingAccountInfo = false
+    private var profileLoadSeq = 0
 
     /**
      * 一卡通**真实余额**。null = 拿不到（没签约免密支付、或者还没拉过），
@@ -1455,6 +1474,16 @@ class MainViewModel : ViewModel() {
         walletBalance = null
         phone = ""
         useCodeLoaded = false
+        useCodeLoadSeq++
+        changingUseCodeStatus = false
+        generatingUseCode = false
+        claimingUseCode = false
+        useCodeQuota = null
+        useCodeError = null
+        profileLoadSeq++
+        loadingAccountInfo = false
+        accountInfoLoaded = false
+        accountInfoError = null
         // 未支付账单和代扣锁是**跟账号走的**：不清的话，换账号后开阀失败弹窗会列出
         // 上一任的账单和金额，还能用新账号的凭证去扣它；锁更麻烦——
         // 万一扣款协程在启动前就被取消（logout/挤号都会 cancel sessionJob），
@@ -1663,6 +1692,16 @@ class MainViewModel : ViewModel() {
         kickedOut = false
         // 换账号了，手机号跟着换（新会话的认证参数已经写进 Prefs，这里同步到界面状态）
         phone = PrefsHelper.telephone
+        useCodeQuota = PrefsHelper.useCodeQuota()
+        useCodeLoadSeq++
+        changingUseCodeStatus = false
+        generatingUseCode = false
+        claimingUseCode = false
+        useCodeError = null
+        profileLoadSeq++
+        loadingAccountInfo = false
+        accountInfoLoaded = PrefsHelper.userName.isNotBlank() || PrefsHelper.userStudentId.isNotBlank()
+        accountInfoError = null
     }
 
     fun refreshWallet() {
@@ -1696,14 +1735,36 @@ class MainViewModel : ViewModel() {
     }
 
     fun loadUseCode() {
+        if (changingUseCodeStatus || claimingUseCode) return
+        val seq = ++useCodeLoadSeq
         sessionScope().launch {
             try {
                 val resp = NetworkModule.apiService.getUseCodeSafe()
+                if (seq != useCodeLoadSeq) return@launch
                 if (resp.success && resp.data != null) useCodeData = resp.data
                 // 无论成功与否都算「拉过了」——网络失败时停在「加载中」比显示
                 // 「尚未领取」更糟，用户会以为 App 卡住了，而重进页面就会重拉
                 useCodeLoaded = true
-            } catch (_: Exception) {}
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (seq == useCodeLoadSeq) useCodeLoaded = true }
+        }
+    }
+
+    /** 同一时刻只发送一次开关请求；确认成功后更新卡片，失败保留原状态。 */
+    fun setUseCodeEnabled(enabled: Boolean) {
+        if (changingUseCodeStatus || claimingUseCode || !useCodeLoaded) return
+        changingUseCodeStatus = true
+        val seq = ++useCodeLoadSeq
+        sessionScope().launch {
+            try {
+                val status = if (enabled) 1 else 0
+                val response = NetworkModule.apiService.updateUseCodeStatusSafe(status, NetworkModule.authFields())
+                if (seq != useCodeLoadSeq) return@launch
+                if (response.success) useCodeData = (useCodeData ?: UseCodeData()).copy(useCodeStatus = status)
+                else toastMessage = com.hualala.linyu.utils.UserFeedback.message(response.displayMessage, "操作失败，请重试")
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (seq == useCodeLoadSeq) toastMessage = "操作失败，请重试" }
+            finally { if (seq == useCodeLoadSeq) changingUseCodeStatus = false }
         }
     }
 
@@ -1716,31 +1777,63 @@ class MainViewModel : ViewModel() {
      * @param onResult 成功时回调 `(新码, 剩余次数)`；失败回调 null
      */
     fun generateUseCode(onResult: (Pair<String, Int>?) -> Unit) {
+        val reason = useCodeBlockReason
+        if (reason != null || generatingUseCode || claimingUseCode) {
+            useCodeError = reason ?: "请稍候再试"
+            onResult(null)
+            return
+        }
+        generatingUseCode = true
+        useCodeError = null
+        val owner = PrefsHelper.useCodeOwner()
+        val requestSession = sessionJob
         sessionScope().launch {
             val r = try {
                 val resp = NetworkModule.apiService.generateUseCodeSafe(NetworkModule.authFields())
+                if (requestSession !== sessionJob || owner != PrefsHelper.useCodeOwner()) return@launch
+                UseCodePolicy.quotaFromResponse(resp.data?.remainTimes, resp.errorCode)?.let {
+                    useCodeQuota = it
+                    PrefsHelper.saveUseCodeQuota(owner, it)
+                }
                 val code = resp.data?.useCode
                 if (resp.success && !code.isNullOrEmpty()) {
-                    code to (resp.data?.remainTimes ?: 0)
-                } else null
-            } catch (_: Exception) {
+                    code to (resp.data?.remainTimes ?: -1)
+                } else {
+                    useCodeError = if (resp.errorCode == 79) UseCodePolicy.EXHAUSTED_MESSAGE
+                        else com.hualala.linyu.utils.UserFeedback.message(resp.displayMessage, "换码失败，请重试")
+                    null
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                useCodeError = "换码失败，请重试"
                 null
-            }
+            } finally { if (requestSession === sessionJob) generatingUseCode = false }
             onResult(r)
         }
     }
 
     /** 「确定领取」：把换出来的候选码设为当前生效的使用码。成功返回 true */
     fun claimUseCode(useCode: String, onResult: (Boolean) -> Unit) {
+        if (claimingUseCode || generatingUseCode || changingUseCodeStatus || useCode.isBlank()) {
+            onResult(false)
+            return
+        }
+        claimingUseCode = true
+        val seq = ++useCodeLoadSeq
         sessionScope().launch {
             val ok = try {
                 NetworkModule.apiService
                     .setUseCodeSafe(useCode, NetworkModule.authFields())
                     .success
-            } catch (_: Exception) {
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
                 false
+            } finally { if (seq == useCodeLoadSeq) claimingUseCode = false }
+            if (seq != useCodeLoadSeq) return@launch
+            if (ok) {
+                useCodeData = (useCodeData ?: UseCodeData()).copy(useCode = useCode, resetAvailability = 0)
+                loadUseCode()
             }
-            if (ok) loadUseCode()
             onResult(ok)
         }
     }
@@ -1752,10 +1845,20 @@ class MainViewModel : ViewModel() {
      * 而且**姓名在学校没同步时会是空**——单独走这个接口补齐，拿到就写回 Prefs。
      */
     fun loadAccountInfo() {
-        if (!PrefsHelper.isLoggedIn) return
+        if (!PrefsHelper.isLoggedIn || loadingAccountInfo) return
+        loadingAccountInfo = true
+        accountInfoError = null
+        val seq = ++profileLoadSeq
         sessionScope().launch {
             try {
-                NetworkModule.apiService.getAccountInfoSafe().data?.let {
+                val response = NetworkModule.apiService.getAccountInfoSafe()
+                if (seq != profileLoadSeq) return@launch
+                if (!response.success) {
+                    accountInfoError = "信息加载失败，点击重试"
+                    checkKick(response.displayMessage)
+                    return@launch
+                }
+                response.data?.let {
                     applyIdentity(it.name, it.idCardNumber, it)
                 }
                 // 姓名靠学校同步学籍数据，没同步的账号 /account/info 返回的 name 就是 null
@@ -1763,10 +1866,18 @@ class MainViewModel : ViewModel() {
                 // 两个接口数据来源不同，一个没有另一个可能有。
                 if (PrefsHelper.userName.isEmpty() || PrefsHelper.userStudentId.isEmpty()) {
                     NetworkModule.apiService.getBindCardInfoSafe().data?.let {
+                        if (seq != profileLoadSeq) return@launch
                         applyIdentity(it.name, it.idCardNumber, null)
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { if (seq == profileLoadSeq) accountInfoError = "信息加载失败，点击重试" }
+            finally {
+                if (seq == profileLoadSeq) {
+                    accountInfoLoaded = true
+                    loadingAccountInfo = false
+                }
+            }
         }
     }
 
@@ -2183,7 +2294,7 @@ class MainViewModel : ViewModel() {
                 val reconciliation = SettlementReconciler.reconcile(pendingBefore, all)
                 val pendingBySn = pendingBefore.associateBy { it.snCode }
                 reconciliation.updates.forEach { update ->
-                    PrefsHelper.recordConsume(update.snCode, update.amount)
+                    PrefsHelper.recordConsume(update.snCode, update.amount, pendingBySn[update.snCode]?.createdAt ?: 0L)
 
                     // 结算那会儿要是误判成了「无消费」，这条通知现在还挂着错误金额——
                     // 拿到了真金额就得把它改成对的，否则用户看到的一直是错的。
@@ -2207,16 +2318,13 @@ class MainViewModel : ViewModel() {
                     }
                 }
                 PrefsHelper.savePendingSettlements(reconciliation.remaining)
-                // 顺手把最近一笔消费记给桌面小组件。账单按月倒序拉取，第一条就是最新的。
-                // ⚠️ 只有确认它属于「上次使用设备」时才记——账单接口不带 snCode，只能拿设备名比对。
-                // 比不中就跳过：宁可这次不记录，也别把别的设备的消费记到当前设备头上。
-                val newest = all.firstOrNull()?.consumeBillDTO
+                // 遍历已拉取的账单找该设备的最新有效消费，不要求它恰好是整个账户的第一笔。
                 val lastSn = PrefsHelper.lastDeviceSnCode
-                if (newest != null && lastSn.isNotEmpty() &&
-                    newest.displayDesc == PrefsHelper.lastDeviceName
-                ) {
-                    newest.consumeMoney.toDoubleOrNull()
-                        ?.let { PrefsHelper.recordConsume(lastSn, it) }
+                if (lastSn.isNotEmpty()) {
+                    ConsumptionCachePolicy.latestForDevice(all, PrefsHelper.lastDeviceRawName,
+                        PrefsHelper.lastDeviceName, PrefsHelper.lastDeviceTypeName)?.let {
+                        PrefsHelper.recordConsume(lastSn, it.amount, it.atMs)
+                    }
                 }
                 // ⚠️ 必须和上面 billList 用的条数一致。
                 // 小组件用这份缓存算「初始余额 − 消费」的估算值，
