@@ -8,7 +8,7 @@
 
 **⬇️ [下载 3.1.1：Android APK / iOS IPA](https://github.com/yehu-imei/linyu/releases/tag/v3.1.1)**
 
-> 双端统一为 3.1.1（构建 19）。Android 支持 Android 8.0+、arm64-v8a；iOS 主应用需 iOS 16+，桌面小组件需 iOS 17+。
+> Android 支持 Android 8.0+、arm64-v8a；iOS 主应用需 iOS 16+，桌面小组件需 iOS 17+。
 >
 > **国内下载慢？用 Gitee 镜像** → https://gitee.com/yehu-imei/linyu/releases
 > App 内的更新下载默认也走镜像。
