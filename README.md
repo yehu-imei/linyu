@@ -6,20 +6,17 @@
 [![Version](https://img.shields.io/badge/Version-v3.1.1-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**⬇️ [下载 3.1.1：Android APK / iOS IPA](https://github.com/yehu-imei/linyu/releases/tag/v3.1.1)**
+**⬇️ [下载 linyu-v3.1.1](https://github.com/yehu-imei/linyu/releases/tag/v3.1.1)**
 
-> Android 支持 Android 8.0+、arm64-v8a；iOS 主应用需 iOS 16+，桌面小组件需 iOS 17+。
+> Android 支持 Android 8.0+、arm64-v8a；iOS 主应用需 iOS 16+，桌面小组件需 iOS 17+
 >
-> **国内下载慢？用 Gitee 镜像** → https://gitee.com/yehu-imei/linyu/releases
-> App 内的更新下载默认也走镜像。
+> **国内下载慢？用 Gitee 镜像** → [https://gitee.com/yehu-imei/linyu/releases](https://gitee.com/yehu-imei/linyu/releases) App 内的更新下载默认也走镜像
 
-趣智校园第三方 Android 客户端，用于控制校园热水器。相比官方 App，提供更简洁的界面和更流畅的操作体验。
+趣智校园第三方 Android 客户端，用于控制校园热水器。相比官方 App，提供更简洁的界面和更流畅的操作体验
 
 iOS 独立客户端：[GitHub 仓库](https://github.com/yehu-imei/linyu-ios) · [Gitee 镜像](https://gitee.com/yehu-imei/linyu-ios) · [IPA 发行](https://github.com/yehu-imei/linyu-ios/releases/tag/v3.1.1)
 
-iOS 包需自行签名安装，详见作者维护的 [安装教程](https://github.com/yehu-imei/Guides/blob/main/Tutorial/.ipa%E7%9A%84%E5%AE%89%E8%A3%85.md)。使用桌面小组件时须独立安装 App，并保留小组件扩展和共享权限；导入 LiveContainer 不等同于独立安装。两个 GitHub 仓库提供同一份 IPA。
-
-以下截图与后台监控、通知关水、1×1 小组件说明均针对 **Android**；iOS 的能力边界见其 README，不承诺后台持续监控或使用中实时扣费。
+iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guides/blob/main/Tutorial/.ipa%E7%9A%84%E5%AE%89%E8%A3%85.md)，使用桌面小组件时须独立安装 App，并保留小组件扩展和共享权限
 
 ## 📱 预览
 
