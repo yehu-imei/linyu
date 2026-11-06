@@ -93,10 +93,10 @@ object BleShowerController {
     }
 
     sealed interface SettleOutcome {
-        /** 结算完成 */
-        data class Completed(val rawUpMoney: Int?) : SettleOutcome
+        /** 服务端已记账；设备清理是否确认单独记录，绝不能因此上报订单失败。 */
+        data class Uploaded(val rawUpMoney: Int?, val recordCleared: Boolean) : SettleOutcome
 
-        /** 关阀成功但结算没走完（消费数据没上传或没写回） */
+        /** 关阀成功，但尚未确认消费上传成功 */
         data class PartialSettlement(val message: String) : SettleOutcome
 
         /** 关阀都没成功 */
@@ -203,8 +203,11 @@ object BleShowerController {
                 if (st.state == STATE_PENDING_SETTLE || st.state == STATE_PENDING_SETTLE_ALT) {
                     AppLogger.i("蓝牙设备有遗留未结算数据（state=${st.state}），先补结算")
                     val settleResult = settlePending(ble, st, loginCode, telephone)
-                    if (settleResult !is SettleOutcome.Completed) {
+                    if (settleResult !is SettleOutcome.Uploaded) {
                         return OpenOutcome.Failed("设备有未结算记录，自动补结算失败，请稍后重试")
+                    }
+                    if (!settleResult.recordCleared) {
+                        return OpenOutcome.Failed("账单已结清，设备清理未确认，请靠近后重试")
                     }
                     // 补结算已清掉设备记录（state 回 0）。断开连接，让用户重新点一次开阀——
                     // 重开阀需要一次全新的连接（设备在新连接里才会给出可用的会话参数）。
@@ -308,7 +311,7 @@ object BleShowerController {
      * 对应官方 App 的 confirmValveClosed(collect=true)：0x85 采集 → 上传 →
      * 0x86 写回。写回成功后设备回到空闲（state=0），否则下次仍会卡在「有遗留数据」。
      *
-     * @return 上传是否被服务端接受（写回失败不影响服务端已记账，仍算成功）
+     * @return 上传结果和设备清理结果分别记录；已记账的订单不能再上报失败。
      */
     private suspend fun settlePending(
         ble: BleController,
@@ -358,21 +361,25 @@ object BleShowerController {
         val plain = KlcxkjCrypto.decryptByAes(clData)
         val dataHex = plain?.substringAfter("-", "")?.takeIf { it.isNotBlank() }
         val backBytes = dataHex?.let { BleFrame.fromHex(it) }
-        if (backBytes == null) {
-            AppLogger.w("结算写回数据无效，设备记录可能未清（服务端已记账）")
-        } else if (!ble.writeBack(backBytes)) {
-            AppLogger.w("结算写回设备失败（服务端已记账）")
-        } else {
-            AppLogger.i("结算写回设备成功，记录已清")
-        }
+        val recordCleared = BleSettlementCleanup.confirm(
+            writeBack = {
+                if (backBytes == null || backBytes.isEmpty()) {
+                    AppLogger.w("结算写回数据无效（服务端已记账）")
+                } else if (!ble.writeBack(backBytes)) {
+                    AppLogger.w("结算写回应答未确认（服务端已记账）")
+                }
+            },
+            readState = { ble.query(timeoutMs = 4_000)?.state }
+        )
+        AppLogger.i(if (recordCleared) "结算后设备已空闲，记录已清" else "账单已结清，设备清理未确认")
         AppLogger.i("结算上传成功，upMoney=${resp.data.upMoney}")
-        return SettleOutcome.Completed(resp.data.upMoney)
+        return SettleOutcome.Uploaded(resp.data.upMoney, recordCleared)
     }
 
     /**
      * 关阀并完成结算。
      *
-     * 任何一步失败都会尝试 [failBluetoothOrderSafe] 上报——
+     * 上传未成功时尝试 [reportFail] 上报；已记账但清理未确认时不再上报失败。
      * **这很重要**：蓝牙通道没有服务端兜底，不上报的话这一单会一直挂在预扣状态。
      */
     suspend fun closeAndSettle(
@@ -419,7 +426,7 @@ object BleShowerController {
         }
         AppLogger.i("关阀重连后设备状态：state=${st.state} random=${st.randomNumber}")
         val result = settlePending(ble, st, loginCode, telephone)
-        if (result !is SettleOutcome.Completed) {
+        if (result !is SettleOutcome.Uploaded) {
             reportFail(loginCode, telephone, session)
         }
         return result

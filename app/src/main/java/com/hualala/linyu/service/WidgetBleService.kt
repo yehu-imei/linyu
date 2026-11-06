@@ -225,7 +225,7 @@ class WidgetBleService : Service() {
             BleArbiter.end(snCode)
         }
         when (outcome) {
-            is BleShowerController.SettleOutcome.Completed -> {
+            is BleShowerController.SettleOutcome.Uploaded -> {
                 PrefsHelper.bleSessionJson = ""
                 ShowerController.markFinished(snCode)
                 // 服务端金额单位是**厘**，换算成元再交给通知（显示 3 位小数的准确值）

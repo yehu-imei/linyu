@@ -1337,7 +1337,7 @@ class MainViewModel : ViewModel() {
             bleProgress = null
 
             when (outcome) {
-                is BleShowerController.SettleOutcome.Completed -> {
+                is BleShowerController.SettleOutcome.Uploaded -> {
                     // ⚠️ 金额单位**未实测确认**。按与 4G 表一致的「厘」处理（÷1000），
                     // 并在日志里留原始值——第一次真机结算后要用账单列表核对一次。
                     val yuan = MoneyFormat.milliToYuan(outcome.rawUpMoney)

@@ -10,10 +10,10 @@ class UserReleaseNotesTest {
 
     @Test fun allPublishedVersionsAreBrief() {
         val notes = UserReleaseNotes.parse(document())
-        assertEquals(14, notes.size)
-        assertEquals("v3.1.0", notes.first().version)
+        assertEquals(15, notes.size)
+        assertEquals("v3.1.1", notes.first().version)
         assertEquals("v1.0", notes.last().version)
-        assertFalse(notes.any { it.version == "v3.1.1" })
+        assertFalse(notes.any { it.date == "待发布" })
         assertTrue(notes.all { it.items.size in 1..5 && it.items.all { text -> text.length <= 50 } })
     }
     @Test fun platformTagsAreExplicit() {
@@ -39,7 +39,7 @@ class UserReleaseNotesTest {
         assertEquals(notes, UserReleaseNotes.merge(emptyList(), notes))
         assertEquals(notes, UserReleaseNotes.parse(document().replace("\n", "\r\n")))
         val updated = notes.first().copy(items = listOf("修订文案"))
-        assertEquals(14, UserReleaseNotes.merge(listOf(updated), notes).size)
+        assertEquals(notes.size, UserReleaseNotes.merge(listOf(updated), notes).size)
         assertEquals(updated, UserReleaseNotes.merge(listOf(updated), notes).first())
     }
 }

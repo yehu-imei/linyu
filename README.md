@@ -3,17 +3,23 @@
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-purple.svg)](https://developer.android.com/jetpack/compose)
-[![Version](https://img.shields.io/badge/Version-v3.1.0-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v3.1.1-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**⬇️ [下载最新 APK (v3.1.0)](https://github.com/yehu-imei/linyu/releases/latest)**
+**⬇️ [下载 3.1.1：Android APK / iOS IPA](https://github.com/yehu-imei/linyu/releases/tag/v3.1.1)**
 
-> 安装包 12.6 MB，仅支持 64 位（arm64-v8a）设备。
+> 双端统一为 3.1.1（构建 19）。Android 支持 Android 8.0+、arm64-v8a；iOS 主应用需 iOS 16+，桌面小组件需 iOS 17+。
 >
 > **国内下载慢？用 Gitee 镜像** → https://gitee.com/yehu-imei/linyu/releases
 > App 内的更新下载默认也走镜像。
 
 趣智校园第三方 Android 客户端，用于控制校园热水器。相比官方 App，提供更简洁的界面和更流畅的操作体验。
+
+iOS 独立客户端：[GitHub 仓库](https://github.com/yehu-imei/linyu-ios) · [Gitee 镜像](https://gitee.com/yehu-imei/linyu-ios) · [IPA 发行](https://github.com/yehu-imei/linyu-ios/releases/tag/v3.1.1)
+
+iOS 包需自行签名安装，详见作者维护的 [安装教程](https://github.com/yehu-imei/Guides/blob/main/Tutorial/.ipa%E7%9A%84%E5%AE%89%E8%A3%85.md)。使用桌面小组件时须独立安装 App，并保留小组件扩展和共享权限；导入 LiveContainer 不等同于独立安装。两个 GitHub 仓库提供同一份 IPA。
+
+以下截图与后台监控、通知关水、1×1 小组件说明均针对 **Android**；iOS 的能力边界见其 README，不承诺后台持续监控或使用中实时扣费。
 
 ## 📱 预览
 
@@ -89,7 +95,7 @@
 ### 🔧 其他
 
 - 📜 **内置运行日志** — 内存 + 文件双缓冲，敏感信息自动打码，崩溃自动捕获，可一键分享导出
-- 🔄 **应用内更新** — 自动读取 GitHub Release 比对版本、展开查看更新日志，并可直接在应用内下载安装
+- 🔄 **应用内更新** — 自动读取 GitHub Release 比对版本，更新日志读取独立的 [精简文档](docs/APP_CHANGELOG.md)，并可直接在应用内下载安装
   - **下载默认走 Gitee 镜像**，更新卡片里可切回 GitHub
   - 更新日志默认只列最近 3 个版本，点「展开全部」看其余
 - 🔐 **加密存储** — 登录凭证加密存储（EncryptedSharedPreferences）
@@ -137,7 +143,7 @@ secret = MD5( 手机号前3位 + 手机号后4位 + "klcx" )
 | 位置 | 当前值 | 不改会怎样 |
 |---|---|---|
 | BLE 设备名过滤 | `KLCXKJ-Water` | 扫不到附近设备（扫码绑定不受影响，仍可用） |
-| MQTT 服务器 | `tcp://47.107.37.60:1883` | 收不到实时消费推送（不影响开关阀，HTTP 轮询仍正常） |
+| MQTT 服务器 | `tcp://47.107.37.60:1883` | 收不到订单结束后的消费事件（不影响开关阀，HTTP 查询仍可用；无使用中实时扣费） |
 
 改完自行编译即可，构建方法见 [PROJECT.md](PROJECT.md#构建说明)。
 
