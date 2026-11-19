@@ -10,7 +10,7 @@
 2. [认证机制](#2-认证机制)
 3. [密码加密](#3-密码加密)
 4. [API 接口详解](#4-api-接口详解)
-5. [MQTT 实时推送](#5-mqtt-实时推送)
+5. [MQTT 订单事件](#5-mqtt-订单事件)
 6. [蓝牙设备发现](#6-蓝牙设备发现)
 7. [完整业务流程](#7-完整业务流程)
 8. [数据模型参考](#8-数据模型参考)
@@ -38,11 +38,12 @@
 | 设备信息 | GET | `/device/info/mac` | ✅ | 通过 MAC 地址获取设备详情 |
 | 开始洗澡 | POST | `/order/tcpDevice/downRate/rateOrder` | ✅ | 开启热水器 |
 | 开阀结果确认 | POST | `/order/tcpDevice/query/downRateResult` | ✅ | 确认开阀是否成功，**`orderNo` 在这里就能拿到**（v1.2.0 新增，v3.0.3 修正）|
-| 停止洗澡 | POST | `/order/tcpDevice/closeOrder` | ✅ | 关闭热水器 |
-| 关阀结果确认 | POST | `/order/tcpDevice/closeOrder/result/query` | ✅ | 确认关阀是否成功。实测 `data` 恒为 `null`（v1.2.0 新增）|
+| 停止洗澡 | POST | `/order/tcpDevice/closeOrder` | ✅ | 提交关水指令，结果由设备订单状态复核 |
+| 关阀结果接口 | POST | `/order/tcpDevice/closeOrder/result/query` | ✅ | 历史接口，已观测到成功响应的 `data` 为 `null` |
 | 消费结果查询 | POST | `/order/consumeOrder/result/query` | ✅ | 查询消费结算结果。⚠️ `consumeMoney` 单位是**厘**，见 [4.11](#411-消费结果查询) |
 | 查询进行中 | POST | `/order/tcpDevice/query/rateOrder/using` | ✅ | 查询设备是否有进行中的订单 |
 | 账单列表 | GET | `/order/query/account/bill/list` | ✅ | 获取月度账单 |
+| 关联项目账户 | GET | `/user/project/list` | ✅ | 查询当前用户已关联的项目与账户 |
 | 账单详情 | GET | `/order/query/account/bill/detail` | ✅ | 获取单笔账单详情 |
 | 获取使用码 | GET | `/account/useCode/new` | ✅ | 获取当前使用码 + 今日能否重新领取 |
 | **换一个**使用码 | POST | `/account/useCode/new/generate` | ✅ | **只换候选码，不生效**，每天 20 次（v3.0.0 修正） |
@@ -79,7 +80,7 @@ telephone=13800001111
 &password=A1B2C3D4E5          ← MD5 后取后 10 位大写
 &phoneSystem=android
 &type=0
-&version=6.5.24
+&version=6.5.28
 ```
 
 ### 登录响应
@@ -121,7 +122,7 @@ telephone=13800001111
 **GET 请求**：认证参数作为 URL Query 参数传递
 
 ```
-GET /account/wallet?loginCode=xxx&userId=xxx&accountId=xxx&projectId=xxx&telephone=xxx&phoneSystem=android&version=6.5.24
+GET /account/wallet?loginCode=xxx&userId=xxx&accountId=xxx&projectId=xxx&telephone=xxx&phoneSystem=android&version=6.5.28
 ```
 
 **POST 请求**：认证参数作为 Form 字段传递（与业务参数一起）
@@ -130,7 +131,7 @@ GET /account/wallet?loginCode=xxx&userId=xxx&accountId=xxx&projectId=xxx&telepho
 POST /order/tcpDevice/downRate/rateOrder
 Content-Type: application/x-www-form-urlencoded
 
-xfModel=0&snCode=xxx&loginCode=xxx&userId=xxx&accountId=xxx&projectId=xxx&telephone=xxx&telPhone=xxx&phoneSystem=android&version=6.5.24
+xfModel=0&snCode=xxx&loginCode=xxx&userId=xxx&accountId=xxx&projectId=xxx&telephone=xxx&telPhone=xxx&phoneSystem=android&version=6.5.28
 ```
 
 ### 完整认证参数 Map
@@ -144,7 +145,7 @@ fun authFields(): Map<String, String> = mapOf(
     "telephone" to telephone,
     "telPhone" to telephone,      // ⚠️ 两个都要传，值相同
     "phoneSystem" to "android",
-    "version" to "6.5.24"
+    "version" to "6.5.28"
 )
 ```
 
@@ -365,9 +366,9 @@ snCode=QZXY20230001&orderNo=1234567&loginCode=xxx&userId=xxx&...
 {"success":true,"errorCode":0,"errorMessage":"成功","data":null}
 ```
 
-`errorCode: 307` 或 `errorMessage` 含「已在」时，表示服务端已在关闭中——**同样按成功处理**。
+`success=true` 表示服务端受理。`errorCode=307` 或文案包含「已在」时也进入状态复核。3.1.2 会继续显示「正在关闭」，最多用 9 秒查询同一设备是否空闲，期间仅查询状态。确认空闲后才完成用水，超时未确认时保留停止入口。
 
-### 4.4.1 关阀结果确认：这个接口**确认不了任何东西**
+### 4.4.1 历史关阀结果接口与状态复核
 
 ```
 POST /order/tcpDevice/closeOrder/result/query
@@ -376,13 +377,13 @@ Content-Type: application/x-www-form-urlencoded
 snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&...
 ```
 
-**响应（实测，每次都是这样）**：
+一次历史响应样本
 
 ```json
 {"success":true,"errorCode":0,"errorMessage":"成功","data":null}
 ```
 
-> ⚠️ **`data` 恒为 `null`。** 客户端早期版本用
+> 该样本的 **`data` 为 `null`**。客户端早期版本用
 > `d == null || d.state == 0 || d.status == 0 || d.orderNo.isNullOrEmpty()`
 > 判断"关阀成功"——`d == null` 永远成立，于是**第 1 轮就跳出循环**。
 > 那段"确认"实际只验证了「HTTP 请求成功」，跟设备关没关没有半点关系。
@@ -401,9 +402,9 @@ snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&...
 
 | 响应 | 含义 |
 |---|---|
-| `errorCode == 307` 或 `data.orderNo != null` | **有订单**（还在用）|
+| `errorCode == 307`，或 `success == true` 且 `data.orderNo != null` | **有订单**（还在用）|
 | `success == true` 且没有订单 | **没有订单**（确实停了）|
-| 请求本身失败 | **不确定** —— 绝不能当成"没有订单" |
+| 请求失败或服务端返回其他业务错误 | **不确定**，保留用水状态 |
 
 ```kotlin
 // ⚠️ 反面写法：catch 里返回 false，等于把"不知道"当成了"关好了"
@@ -467,7 +468,9 @@ GET /order/query/account/bill/list?month=2026-05&billRequestType=2
 | 参数 | 说明 |
 |---|---|
 | `month` | 月份，格式 `yyyy-MM` |
-| `billRequestType` | 账单类型，固定传 `2` |
+| `billRequestType` | 默认项目传 `2`，其他已关联项目传 `0` |
+
+3.1.2 按关联项目与月份查询最近三个月的消费。跨项目请求使用该项目对应的账户，设备控制与对账沿用同一项目上下文。账单合并后统一显示，本地余额估算仅使用默认项目的账单。
 
 **响应**：
 ```json
@@ -643,7 +646,7 @@ MD5("185" + "3960" + "klcx")
 POST /user/registerAndLogin
 Content-Type: application/x-www-form-urlencoded
 
-telephone={手机号}&smsCode={验证码}&type=5&phoneSystem=android&version=6.5.24
+telephone={手机号}&smsCode={验证码}&type=5&phoneSystem=android&version=6.5.28
 ```
 
 | 参数 | 值 | 说明 |
@@ -651,7 +654,7 @@ telephone={手机号}&smsCode={验证码}&type=5&phoneSystem=android&version=6.5
 | `smsCode` | 6 位数字 | 收到的短信验证码 |
 | `type` | `5` | 固定值 |
 | `phoneSystem` | `android` | |
-| `version` | `6.5.24` | 与密码登录保持一致 |
+| `version` | `6.5.28` | 当前 Android 客户端与密码登录一致 |
 
 > ⚠️ 这个接口**不需要** `loginCode` / `userId` 等认证参数——它本身就是用来换取这些的。
 
@@ -915,7 +918,7 @@ snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&userId=xxx&...
 
 ---
 
-## 5. MQTT 实时推送
+## 5. MQTT 订单事件
 
 ### 连接信息
 
@@ -934,7 +937,7 @@ snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&userId=xxx&...
 |---|---|
 | `app_downRate_{phone}` | 开始洗澡事件推送 |
 | `app_shutdownOrder_{phone}` | 停止洗澡事件推送 |
-| `app_uploadData_{phone}` | 实时消费金额推送 |
+| `app_uploadData_{phone}` | 订单结束后的消费金额事件 |
 
 ### 消息格式
 
@@ -950,15 +953,15 @@ snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&userId=xxx&...
 | 字段 | 说明 |
 |---|---|
 | `orderNo` | 订单号（开始洗澡后通过此字段获取） |
-| `consumeMoney` | 当前已消费金额（元） |
+| `consumeMoney` | 订单结束后的消费金额（元） |
 | `state` | 订单状态 |
 | `result` | 操作结果 |
 
 ### 使用场景
 
-1. **获取 orderNo**：调用 `downRate` 后，MQTT 会推送包含 `orderNo` 的消息
-2. **实时更新余额**：`app_uploadData` 主题会推送 `consumeMoney` 更新
-3. **HTTP 轮询兜底**：如果 MQTT 连接失败，应使用 HTTP 轮询 `queryUsing` 作为备选方案
+1. 开关水状态和订单号通过 HTTP 确认
+2. MQTT 消费事件发生在订单结束后。使用中展示计时和预扣金额
+3. 结算优先使用 HTTP 结果，必要时按所属项目的账单对账
 
 ---
 
@@ -1032,31 +1035,27 @@ scanner.startScan(null, settings, object : ScanCallback() {
     │       │       └── 无订单 → 调用 downRate 开始洗澡
     │       │               │
     │       │               ├── 连接 MQTT 订阅推送
-    │       │               ├── 进入洗澡中界面
-    │       │               └── 轮询 queryUsing 获取 orderNo（最多 10 次，间隔 800ms）
+    │       │               ├── 轮询 downRateResult 确认开启并获取 orderNo
+    │       │               └── 确认开启后进入洗澡中界面
     │       │
     │       ├── 启动前台服务 ShowerWatchService
     │       │       │
     │       │       ├── 挂常驻通知（带「结束用水」按钮）
     │       │       ├── 每 15 秒查询一次订单还在不在
     │       │       │     剩 ≤14 秒时改成精确等到超时那一刻
-    │       │       ├── 查到订单没了 → 关阀 + 结算 + 发结束通知
+    │       │       ├── 查到订单没了 → 清理本地状态、查结算并通知
     │       │       └── ⚠️ 网络失败时**什么都不做**，下一轮再说，
     │       │             绝不因为一次抖动就误判成「已结束」
     │       │
     │       └── 洗澡中界面
     │               │
     │               ├── 显示计时器（每秒刷新，起点是持久化的开阀时间戳）
-    │               ├── 显示预扣金额
-    │               └── MQTT 推送更新消费金额
+    │               └── 显示预扣金额
     │
     ├── 用户点「结束使用」（界面 / 通知栏 / 桌面小组件，三个入口）
     │       │
-    │       ├── 界面入口 → 通知服务
-    │       ├── 通知 / 小组件入口 → 直接走服务
-    │       │
-    │       └── 服务统一执行：挂「正在结束…」→ closeOrder 轮询确认关阀
-    │              → 查账单结算金额 → 发「使用结束」通知 → 撤通知、停服务
+    │       ├── 界面由 ViewModel 发起，通知与小组件由服务发起
+    │       └── 共用 closeOrder → queryUsing 确认空闲 → 查询结算并通知
     │
     └── 使用码启动的设备（物理键盘操作）
             │
@@ -1241,7 +1240,7 @@ interface QzxyService {
         @Field("password") password: String,
         @Field("phoneSystem") phoneSystem: String = "android",
         @Field("type") type: Int = 0,
-        @Field("version") version: String = "6.5.24"
+        @Field("version") version: String = "6.5.28"
     ): Call<ResponseBody>
 
     @GET("/account/wallet")
@@ -1398,7 +1397,7 @@ interface QzxyService {
         @Field("smsCode") smsCode: String,
         @Field("type") type: Int = 5,
         @Field("phoneSystem") phoneSystem: String = "android",
-        @Field("version") version: String = "6.5.24"
+        @Field("version") version: String = "6.5.28"
     ): Call<ResponseBody>
 
     companion object {

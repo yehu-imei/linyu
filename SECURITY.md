@@ -2,18 +2,22 @@
 
 本文说明淋浴（LinYu）在安全方面做了什么、没做什么，以及**你该如何确认自己装的是正版**。
 
-> 一句话版本：**只从下面列出的官方渠道下载，装之前对一下签名指纹。** 别人重新打包的版本可能带后门。
+> 请从下列项目发行页下载。Android APK 可核对签名证书指纹，iOS IPA 按教程自行签名。
 
 ---
 
 ## 一、从哪下载
 
-官方只有两个渠道，内容完全一致：
+GitHub 和 Gitee 镜像提供同一份安装包。
 
 | 渠道 | 地址 | 说明 |
 |---|---|---|
-| **GitHub**（主仓库） | https://github.com/yehu-imei/linyu/releases | 源码主仓库，发行版在这里发布 |
-| **Gitee**（国内镜像） | https://gitee.com/yehu-imei/linyu/releases | 同一份包，国内下载更快 |
+| 主仓库 GitHub | [发行页](https://github.com/yehu-imei/linyu/releases/latest) | Android APK 与 iOS IPA |
+| 主仓库 Gitee 镜像 | [发行页](https://gitee.com/yehu-imei/linyu/releases) | Android APK 与 iOS IPA |
+| iOS 仓库 GitHub | [发行页](https://github.com/yehu-imei/linyu-ios/releases/latest) | iOS IPA |
+| iOS 仓库 Gitee 镜像 | [发行页](https://gitee.com/yehu-imei/linyu-ios/releases) | iOS IPA |
+
+iOS IPA 安装后使用用户自己的签名。以下证书指纹用于校验 Android APK。 [iOS 安装教程](https://github.com/yehu-imei/Guides/blob/main/Tutorial/.ipa%E7%9A%84%E5%AE%89%E8%A3%85.md)
 
 **除此之外的任何来源都不是我们发的。** 包括但不限于：
 
@@ -23,7 +27,7 @@
 
 ---
 
-## 二、怎么确认你装的是正版
+## 二、怎么验证 Android APK
 
 ### 这是最重要的一节
 
