@@ -14,27 +14,21 @@ import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.autofill.Autofill
-import androidx.compose.ui.autofill.AutofillNode
-import androidx.compose.ui.autofill.AutofillType
-import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalAutofill
-import androidx.compose.ui.platform.LocalAutofillTree
+import androidx.compose.ui.platform.LocalAutofillManager
+import androidx.compose.ui.semantics.contentType
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -46,18 +40,6 @@ import com.hualala.linyu.R
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
-/**
- * 把一个输入框接入系统自动填充。两件事缺一不可：
- * 1. 把控件在屏幕上的位置告诉 AutofillNode（系统要靠它把高亮框画对位置）
- * 2. 控件获得焦点时主动向系统发一次请求，密码管理器才会弹出「填充/保存」条
- */
-@OptIn(ExperimentalComposeUiApi::class)
-private fun Modifier.loginAutofill(node: AutofillNode, autofill: Autofill?): Modifier =
-    this
-        .onGloballyPositioned { node.boundingBox = it.boundsInWindow() }
-        .onFocusChanged { if (it.isFocused) autofill?.requestAutofillForNode(node) }
-
-@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun LoginScreen(
     viewModel: LoginViewModel = viewModel(),
@@ -66,35 +48,18 @@ fun LoginScreen(
     var animated by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (animated) 1f else 0.8f, tween(400))
 
-    // ── 系统自动填充（保存/回填账号密码）──
-    // 本项目用的 Compose 1.6 还没有官方那套 `Modifier.semantics { contentType = ... }`
-    // （那个 API 到 Compose 1.8 才有），所以这里用官方暴露的底层三件套自己接：
-    //   AutofillNode（描述这个输入框是什么）+ AutofillTree（注册给系统）+ LocalAutofill（触发请求）
-    val autofill = LocalAutofill.current
-    val autofillTree = LocalAutofillTree.current
-
-    val phoneAutofill = remember {
-        AutofillNode(listOf(AutofillType.Username)) { viewModel.phone = it }
-    }
-    val passwordAutofill = remember {
-        AutofillNode(listOf(AutofillType.Password)) { viewModel.password = it }
-    }
-    val smsAutofill = remember {
-        AutofillNode(listOf(AutofillType.SmsOtpCode)) { viewModel.smsCode = it }
-    }
-
-    // 注册到系统 Autofill 树；离开页面时摘掉，避免切来切去堆积无用节点
-    DisposableEffect(Unit) {
-        val nodes = listOf(phoneAutofill, passwordAutofill, smsAutofill)
-        nodes.forEach { autofillTree += it }
-        onDispose { nodes.forEach { autofillTree.children.remove(it.id) } }
-    }
+    val autofillManager = LocalAutofillManager.current
 
     LaunchedEffect(viewModel.loginResult) {
-        val result = viewModel.loginResult
-        if (result != null && result.isSuccess) {
+        val result = viewModel.loginResult ?: return@LaunchedEffect
+        if (result.isSuccess) {
+            // 密码登录通过后，在清理输入框和离开页面之前交给系统密码管理器。
+            if (!viewModel.isSmsMode) autofillManager?.commit()
+            else autofillManager?.cancel()
             onLoginSuccess(viewModel.phone)
             viewModel.resetResult()
+        } else if (!viewModel.isSmsMode) {
+            autofillManager?.cancel()
         }
     }
 
@@ -168,7 +133,13 @@ fun LoginScreen(
 
                     // 密码/验证码切换
                     Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalArrangement = Arrangement.Center) {
-                        TextButton(onClick = { viewModel.switchMode() }) {
+                        TextButton(
+                            enabled = viewModel.canEditFields,
+                            onClick = {
+                                autofillManager?.cancel()
+                                viewModel.switchMode()
+                            }
+                        ) {
                             Text(if (viewModel.isSmsMode) "密码登录" else "验证码登录",
                                 color = Color(0xFF1A73E8), fontSize = 13.sp)
                         }
@@ -185,11 +156,20 @@ fun LoginScreen(
 
                     OutlinedTextField(
                         value = viewModel.phone,
-                        onValueChange = { viewModel.phone = it },
+                        onValueChange = { if (viewModel.canEditFields) viewModel.phone = it },
                         label = { Text("手机号") },
                         leadingIcon = { Icon(Icons.Default.Phone, null, tint = Color(0xFF1A73E8)) },
-                        trailingIcon = { if (viewModel.phone.isNotEmpty()) TextButton(onClick = { viewModel.phone = "" }) { Text("✕", color = Color.Gray) } },
-                        modifier = Modifier.fillMaxWidth().loginAutofill(phoneAutofill, autofill),
+                        trailingIcon = {
+                            if (viewModel.phone.isNotEmpty()) {
+                                TextButton(
+                                    enabled = viewModel.canEditFields,
+                                    onClick = { viewModel.phone = "" }
+                                ) { Text("✕", color = Color.Gray) }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().semantics {
+                            contentType = if (viewModel.isSmsMode) ContentType.PhoneNumber else ContentType.Username
+                        },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                         shape = RoundedCornerShape(14.dp),
@@ -204,7 +184,7 @@ fun LoginScreen(
                                 value = viewModel.smsCode,
                                 onValueChange = { viewModel.smsCode = it },
                                 label = { Text("验证码") },
-                                modifier = Modifier.weight(1f).loginAutofill(smsAutofill, autofill),
+                                modifier = Modifier.weight(1f).semantics { contentType = ContentType.SmsOtpCode },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 shape = RoundedCornerShape(14.dp),
@@ -231,11 +211,18 @@ fun LoginScreen(
                     } else {
                         OutlinedTextField(
                             value = viewModel.password,
-                            onValueChange = { viewModel.password = it },
+                            onValueChange = { if (viewModel.canEditFields) viewModel.password = it },
                             label = { Text("密码") },
                             leadingIcon = { Icon(Icons.Default.Lock, null, tint = Color(0xFF1A73E8)) },
-                            trailingIcon = { if (viewModel.password.isNotEmpty()) TextButton(onClick = { viewModel.password = "" }) { Text("✕", color = Color.Gray) } },
-                            modifier = Modifier.fillMaxWidth().loginAutofill(passwordAutofill, autofill),
+                            trailingIcon = {
+                                if (viewModel.password.isNotEmpty()) {
+                                    TextButton(
+                                        enabled = viewModel.canEditFields,
+                                        onClick = { viewModel.password = "" }
+                                    ) { Text("✕", color = Color.Gray) }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
                             singleLine = true,
                             visualTransformation = PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -248,7 +235,7 @@ fun LoginScreen(
                     Button(
                         onClick = { viewModel.login() },
                         modifier = Modifier.fillMaxWidth().height(52.dp),
-                        enabled = !viewModel.isLoading,
+                        enabled = viewModel.canEditFields,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF1A73E8),

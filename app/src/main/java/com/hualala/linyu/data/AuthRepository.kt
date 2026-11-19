@@ -33,6 +33,7 @@ object AuthRepository {
                     data.userAccount.projectId.toString(), phone,
                     data.userAccount.name
                 )
+                ProjectAuthRepository.refreshAccounts()
                 Result.success(data)
             } else {
                 Result.failure(Exception(response.displayMessage ?: "登录失败"))
@@ -71,6 +72,7 @@ object AuthRepository {
                 PrefsHelper.saveAuth(data.loginCode, data.userId.toString(),
                     data.userAccount.accountId.toString(), data.userAccount.projectId.toString(), phone,
                     data.userAccount.name)
+                ProjectAuthRepository.refreshAccounts()
                 Result.success(data)
             } else {
                 Result.failure(Exception(response.displayMessage ?: "登录失败"))

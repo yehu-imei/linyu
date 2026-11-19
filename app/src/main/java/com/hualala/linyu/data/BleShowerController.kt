@@ -52,7 +52,10 @@ object BleShowerController {
         val randomNumber: String,
         /** 服务端给的消费时间戳，**失败上报要用** */
         val consumeDate: String,
-        val orderNo: String
+        val orderNo: String,
+        val projectId: String? = null,
+        val accountId: String? = null,
+        val authOwner: String? = null
     )
 
     sealed interface OpenOutcome {
@@ -147,6 +150,12 @@ object BleShowerController {
         if (loginCode.isEmpty() || telephone.isEmpty()) {
             return OpenOutcome.Failed("登录信息不完整，请重新登录")
         }
+        val context = try { ProjectAuthRepository.forDevice(device.snCode, device) }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { return OpenOutcome.Failed(e.message ?: "设备账户不可用") }
+        if (context.loginCode != loginCode || context.telephone != telephone) {
+            return OpenOutcome.Failed("登录状态已变化，请重试")
+        }
 
         // realMac 优先：部分设备 macAddress 是虚拟的，连不上。
         //
@@ -202,7 +211,7 @@ object BleShowerController {
                 // 上传 → 0x86 写回，清掉记录后设备回到空闲。不处理的话永远开不了阀。
                 if (st.state == STATE_PENDING_SETTLE || st.state == STATE_PENDING_SETTLE_ALT) {
                     AppLogger.i("蓝牙设备有遗留未结算数据（state=${st.state}），先补结算")
-                    val settleResult = settlePending(ble, st, loginCode, telephone)
+                    val settleResult = settlePending(ble, st, loginCode, telephone, context)
                     if (settleResult !is SettleOutcome.Uploaded) {
                         return OpenOutcome.Failed("设备有未结算记录，自动补结算失败，请稍后重试")
                     }
@@ -252,7 +261,7 @@ object BleShowerController {
                 randomNumber = st.randomNumber.lowercase(),
                 xfModel = XF_MODEL,
                 signature = signature,
-                auth = NetworkModule.authFields()
+                auth = context.fields()
             )
             if (!resp.success || resp.data == null) {
                 val msg = resp.displayMessage ?: "获取计费信息失败，请重试"
@@ -279,7 +288,10 @@ object BleShowerController {
                 consumeDate = consumeDate,
                 // 服务端不同学校口径下 orderNo 可能放在 liquidOrderNo 里（实测有学校
                 // 两个都空）。存下来是为了对账/故障恢复时有凭据，空就空着，不强求。
-                orderNo = resp.data.orderNo.orEmpty().ifEmpty { resp.data.liquidOrderNo.orEmpty() }
+                orderNo = resp.data.orderNo.orEmpty().ifEmpty { resp.data.liquidOrderNo.orEmpty() },
+                projectId = context.projectId,
+                accountId = context.accountId,
+                authOwner = NetworkModule.session().owner
             )
 
             return if (written) {
@@ -317,8 +329,10 @@ object BleShowerController {
         ble: BleController,
         st: DeviceQueryState,
         loginCode: String,
-        telephone: String
+        telephone: String,
+        context: com.hualala.linyu.api.ProjectAuthContext
     ): SettleOutcome {
+        ProjectAuthRepository.requireCurrent(context)
         val collectPayload = ble.collect()
         if (collectPayload == null || collectPayload.isEmpty()) {
             AppLogger.w("结算：采集消费数据失败")
@@ -345,7 +359,7 @@ object BleShowerController {
             randomNumber = st.randomNumber.lowercase(),
             xfData = xfData,
             signature = signature,
-            auth = NetworkModule.authFields()
+            auth = context.fields()
         )
         if (resp.errorCode !in UPLOAD_OK_CODES || resp.data == null) {
             // 170「签名错误」= 签名原文与上传字段不一致（已统一小写，若复现带日志反馈）。
@@ -425,7 +439,10 @@ object BleShowerController {
             return SettleOutcome.PartialSettlement("已关闭，结算待完成；再次连接后重试")
         }
         AppLogger.i("关阀重连后设备状态：state=${st.state} random=${st.randomNumber}")
-        val result = settlePending(ble, st, loginCode, telephone)
+        val context = try { sessionContext(session, loginCode) }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { return SettleOutcome.PartialSettlement("已关闭，账户待核对，请重新登录后结算") }
+        val result = settlePending(ble, st, loginCode, telephone, context)
         if (result !is SettleOutcome.Uploaded) {
             reportFail(loginCode, telephone, session)
         }
@@ -444,6 +461,7 @@ object BleShowerController {
             return
         }
         try {
+            val context = sessionContext(session, loginCode)
             val signature = BleSignBuilder.signFail(loginCode, telephone, session.consumeDate)
             if (signature == null) {
                 AppLogger.w("失败上报签名失败")
@@ -452,12 +470,24 @@ object BleShowerController {
             val resp = NetworkModule.apiService.bluetoothFailOrderSafe(
                 consumeDate = session.consumeDate,
                 signature = signature,
-                auth = NetworkModule.authFields()
+                auth = context.fields()
             )
             AppLogger.i("失败上报${if (resp.success) "成功" else "被拒：${resp.displayMessage}"}")
         } catch (t: Throwable) {
             AppLogger.e("失败上报异常", t)
         }
+    }
+
+    /** 恢复/结算只使用原设备及原账户，不把换号后的身份用于旧订单。 */
+    private suspend fun sessionContext(session: Session, loginCode: String): com.hualala.linyu.api.ProjectAuthContext {
+        val context = ProjectAuthRepository.forDevice(session.snCode)
+        if (context.loginCode != loginCode ||
+            (session.authOwner != null && session.authOwner != NetworkModule.session().owner) ||
+            (session.projectId != null && session.projectId != context.projectId) ||
+            (session.accountId != null && session.accountId != context.accountId)) {
+            throw com.hualala.linyu.api.ProjectAuthException("订单账户已变化，请切回原账户")
+        }
+        return context
     }
 
     /** 计费模式。蓝牙表这条链路沿用 0，与 4G 表一致 */

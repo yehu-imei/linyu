@@ -50,6 +50,41 @@ private sealed interface MoneyProbe {
 }
 
 object SettlementEngine {
+    /** 默认账单不能拿来结算外项目订单；外项目仅按其账户拉取相关月份复核。 */
+    suspend fun reconcilePending(pending: List<PendingSettlement>, defaultBills: List<BillItem>): SettlementReconciliation {
+        val session = NetworkModule.session()
+        val updates = mutableListOf<SettlementUpdate>()
+        val remaining = mutableListOf<PendingSettlement>()
+        val billCache = mutableMapOf<String, List<BillItem>>()
+        for (item in pending) {
+            try {
+                val context = ProjectAuthRepository.forPending(item)
+                if (!item.matchesContext(session, context)) {
+                    remaining += item
+                    continue
+                }
+                val bills = if (context.projectId == session.projectId) defaultBills else {
+                    val months = listOf(item.startedAt, item.createdAt).filter { it > 0 }.map {
+                        java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString().take(7)
+                    }.distinct()
+                    months.flatMap { month ->
+                        val key = "${context.projectId}:${context.accountId}:$month"
+                        billCache[key] ?: NetworkModule.apiService.getBillListSafe(month, auth = context.fields()).let {
+                            if (!it.success || it.data == null) throw com.hualala.linyu.api.ProjectAuthException("账单查询失败")
+                            it.data.also { bills -> billCache[key] = bills }
+                        }
+                    }
+                }
+                ProjectAuthRepository.requireCurrent(session)
+                val result = SettlementReconciler.reconcile(listOf(item), bills)
+                updates += result.updates
+                remaining += result.remaining
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { remaining += item }
+        }
+        ProjectAuthRepository.requireCurrent(session)
+        return SettlementReconciliation(updates, remaining)
+    }
 
     /**
      * 查出本次消费金额。
@@ -76,14 +111,16 @@ object SettlementEngine {
         orderNo: String,
         startTimeMs: Long,
         snCode: String,
-        deviceName: String = ""
+        deviceName: String = "",
+        context: com.hualala.linyu.api.ProjectAuthContext
     ): Double? {
+        ProjectAuthRepository.requireCurrent(context)
         var sawDefiniteZero = false
         if (orderNo.isNotEmpty()) {
             // ① 快速探测：命中正数立刻收工。实测第 1 轮就是终值，
             //    不能让有消费的单子干等——这条路的耗时必须保持在一两秒。
             for (attempt in 0 until SETTLE_PROBE_ROUNDS) {
-                when (val probe = queryConsumeResult(orderNo, snCode)) {
+                when (val probe = queryConsumeResult(orderNo, snCode, context)) {
                     is MoneyProbe.Found -> {
                         PrefsHelper.recordConsume(snCode, probe.value)
                         PrefsHelper.clearPendingSettlement(snCode)
@@ -109,7 +146,7 @@ object SettlementEngine {
             if (sawDefiniteZero) {
                 for (attempt in 0 until SETTLE_ZERO_CONFIRM_ROUNDS) {
                     delay(SETTLE_ZERO_CONFIRM_DELAY_MS)
-                    when (val probe = queryConsumeResult(orderNo, snCode)) {
+                    when (val probe = queryConsumeResult(orderNo, snCode, context)) {
                         is MoneyProbe.Found -> {
                             PrefsHelper.recordConsume(snCode, probe.value)
                             PrefsHelper.clearPendingSettlement(snCode)
@@ -125,7 +162,8 @@ object SettlementEngine {
         }
 
         // ③ 回退：拉账单列表自己匹配
-        val probe = settleFromBillList(orderNo, startTimeMs, snCode)
+        val probe = settleFromBillList(orderNo, startTimeMs, snCode, deviceName, context)
+        ProjectAuthRepository.requireCurrent(context)
 
         // 账单列表也没查到金额，要靠**两种不同的信息**下结论，别混为一谈：
         //
@@ -139,12 +177,7 @@ object SettlementEngine {
         // （开完水马上停，一笔账都不产生）。所以"账单里出现过"本身就是
         // 「有消费」的证据，不能因为金额还是 0 就判成没花钱——
         // 这正是「有消费却显示无消费」的来源。
-        val resolved = when {
-            probe.amount != null -> probe.amount
-            probe.sawBill -> null
-            sawDefiniteZero -> 0.0
-            else -> null
-        }
+        val resolved = probe.resolvedAmount(sawDefiniteZero)
         if (probe.sawBill && probe.amount == null) {
             AppLogger.w("结算：账单已出现但金额未填，按「未结算完」处理（不判无消费）")
         }
@@ -165,7 +198,10 @@ object SettlementEngine {
                     createdAt = System.currentTimeMillis(),
                     elapsedSec = if (startTimeMs > 0)
                         ((System.currentTimeMillis() - startTimeMs) / 1000).toInt()
-                    else 0
+                    else 0,
+                    projectId = context.projectId,
+                    accountId = context.accountId,
+                    authOwner = NetworkModule.session().owner
                 )
             )
             if (resolved == 0.0) {
@@ -208,9 +244,10 @@ object SettlementEngine {
      * 至于为什么明知结构还是走原始串解析，见
      * [com.hualala.linyu.api.consumeOrderResultRaw] 的说明。
      */
-    private suspend fun queryConsumeResult(orderNo: String, snCode: String): MoneyProbe = try {
+    private suspend fun queryConsumeResult(orderNo: String, snCode: String, context: com.hualala.linyu.api.ProjectAuthContext): MoneyProbe = try {
         val raw = NetworkModule.apiService
-            .consumeOrderResultRaw(snCode, orderNo, NetworkModule.authFields())
+            .consumeOrderResultRaw(snCode, orderNo, context.fields())
+        ProjectAuthRepository.requireCurrent(context)
 
         // 只在内容变化时记一次：5 轮响应通常一模一样，记 5 遍只是噪音；
         // 但金额从不结算变成结算会改内容，那一版必须留下
@@ -251,6 +288,7 @@ object SettlementEngine {
         }
         if (!root.isJsonObject) return MoneyProbe.Unknown
         val obj = root.asJsonObject
+        if (obj.get("success")?.asBoolean != true) return MoneyProbe.Unknown
 
         // 金额可能在 data 里，也可能直接铺在顶层，两处都看
         val scopes = listOfNotNull(
@@ -263,7 +301,7 @@ object SettlementEngine {
             for (key in listOf("consumeMoney", "consumeMoneyStr", "money", "consumeAmount")) {
                 val el = scope.get(key) ?: continue
                 if (el.isJsonNull || !el.isJsonPrimitive) continue
-                val raw = el.asString.toDoubleOrNull() ?: continue
+                val raw = el.asString.toDoubleOrNull()?.takeIf { it.isFinite() && it >= 0.0 } ?: continue
                 val v = toYuan(raw)
                 if (v > 0) {
                     // 原始值和换算后都记：万一某个学校不是按厘返回的，
@@ -284,7 +322,7 @@ object SettlementEngine {
                 val k = key.lowercase()
                 if (!AMOUNT_KEY_HINT.containsMatchIn(k)) continue
                 if (AMOUNT_KEY_EXCLUDE.containsMatchIn(k)) continue
-                val raw = el.asString.toDoubleOrNull() ?: continue
+                val raw = el.asString.toDoubleOrNull()?.takeIf { it.isFinite() } ?: continue
                 val v = toYuan(raw)
                 if (v > 0) {
                     AppLogger.w("结算：字段名不在预期内，按名字兜底命中 `$key` = $raw（原始值）→ ¥$v")
@@ -301,29 +339,14 @@ object SettlementEngine {
         return MoneyProbe.Unknown
     }
 
-    /**
-     * 账单回退的探测结果。
-     *
-     * ⚠️ **两个字段缺一不可**：光有 `amount` 区分不了
-     * 「确实没花钱」和「账单出现了但金额还没填」——后者是有消费的。
-     */
-    private data class BillProbe(
-        /** 查到的金额（元）；没查到为 null */
-        val amount: Double?,
-        /**
-         * 账单列表里**是否出现过这一单**（哪怕金额还是占位 `"0.0"`）。
-         *
-         * 这是「有消费」的直接证据：真零消费的单子压根不会产生账单。
-         */
-        val sawBill: Boolean
-    )
-
     /** 回退路径：拉账单列表，挑出本次这一单 */
     private suspend fun settleFromBillList(
         orderNo: String,
         startTimeMs: Long,
-        snCode: String
-    ): BillProbe {
+        snCode: String,
+        deviceName: String,
+        context: com.hualala.linyu.api.ProjectAuthContext
+    ): SettlementBillProbe {
         val month = java.time.YearMonth.now().toString()
 
         // ⚠️ 兜底时间窗必须**往前放宽**，不能拿 `>= startTimeMs` 卡。
@@ -335,85 +358,45 @@ object SettlementEngine {
         // 用 `>=` 判就把**这一单自己**滤掉了，6 轮全空、返回 0，
         // 通知永远显示「无消费」。
         val windowStart = if (startTimeMs > 0) startTimeMs - SETTLE_WINDOW_SLACK_MS else 0L
+        val windowEnd = System.currentTimeMillis()
 
-        // 有没有匹配到过账单——用来区分「压根没查到」和「查到了但金额就是 0」
-        var sawBill = false
+        var probe = SettlementBillProbe()
 
         for (attempt in 0 until BILL_LIST_ROUNDS) {
             try {
-                val resp = NetworkModule.apiService.getBillListSafe(month = month)
-                val bills = resp.data ?: return BillProbe(null, false)
-
-                val matched = matchBill(bills, orderNo, windowStart)
-                if (matched != null) {
-                    sawBill = true
-                    val dto = matched.consumeBillDTO
-                    // ⚠️ 这里的 `consumeMoney` 是**字符串**、单位是**元**
-                    // （和主路径那个数字型的差 1000 倍，见 [MILLI_PER_YUAN]）
-                    val m = dto.consumeMoney.toDoubleOrNull()
-                    if (m != null && m > 0) {
-                        PrefsHelper.recordConsume(snCode, m)   // 供桌面小组件显示「上次消费」
-                        AppLogger.i(
-                            "结算命中（账单列表，第 ${attempt + 1} 轮）：orderNo=${dto.orderNo} " +
-                                "orderId=${dto.orderId} 金额=$m 账单时间=${dto.consumeDate}"
-                        )
-                        return BillProbe(m, true)
+                val resp = NetworkModule.apiService.getBillListSafe(month = month, auth = context.fields())
+                ProjectAuthRepository.requireCurrent(context)
+                val bills = resp.data?.takeIf { resp.success }
+                if (bills == null) {
+                    probe = probe.afterLookup(succeeded = false)
+                } else {
+                    val matched = matchSettlementBill(bills, orderNo, deviceName, windowStart, windowEnd)
+                    probe = probe.afterLookup(succeeded = true, matched = matched)
+                    if (matched != null) {
+                        val dto = matched.consumeBillDTO
+                        val amount = probe.amount
+                        if (amount != null) {
+                            PrefsHelper.recordConsume(snCode, amount)
+                            AppLogger.i(
+                                "结算命中（账单列表，第 ${attempt + 1} 轮）：orderNo=${dto.orderNo} " +
+                                    "orderId=${dto.orderId} 金额=$amount 账单时间=${dto.consumeDate}"
+                            )
+                            return probe
+                        }
+                        AppLogger.i("结算：已匹配到账单但金额还是 ${dto.consumeMoney}（可能是占位值）")
                     }
-                    // 账单先以 "0.0" 占位出现、结算完才填金额（12:47:36 实测），
-                    // 所以这里不能拿 0 当结论，只能记下"见到过账单"继续下一轮
-                    AppLogger.i("结算：已匹配到账单但金额还是 ${dto.consumeMoney}（可能是占位值）")
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
-                // 网络抖动，继续重试
+                probe = probe.afterLookup(succeeded = false)
             }
             if (attempt < BILL_LIST_ROUNDS - 1) delay(1200)
         }
 
-        AppLogger.w("结算超时：orderNo=$orderNo 两条路都没拿到金额（sawBill=$sawBill）")
-
-        // ⚠️ **一律返回 null（"还没确定"），不要返回 0.0**。
-        //
-        // 这里以前是 `if (sawBill) 0.0 else null`，那个 0.0 是错的：
-        // 「账单里匹配到了这一单」**本身就是「有消费」的证据**——
-        // 真零消费的单子（开完水马上停）账单列表里压根不会有这一条。
-        // 所以 `sawBill == true` 却金额是 0，只有一种解释：**金额还没填上**
-        // （账单先以占位 `"0.0"` 出现，结算完才写金额）。
-        // 把这种"还没算完"当成"没花钱"，正是「有消费却显示无消费」的来源。
-        //
-        // 真零消费的判定交给上层：那边会拿 `sawDefiniteZero`（直答接口明确说 0）
-        // 结合"账单里始终没有这一单"来下结论。所以这里把 `sawBill` 一并带回去。
-        return BillProbe(null, sawBill)
+        AppLogger.w("结算超时：orderNo=$orderNo 未拿到金额（sawBill=${probe.sawBill}，查询失败=${probe.lookupFailed}）")
+        return probe
     }
-
-    /**
-     * 从账单列表里找出「本次这一单」。
-     *
-     * ⚠️ 顺序和字段都不能想当然：
-     *
-     * - `orderNo`（20 位，如 `13200000000000000002`）才是**关阀时用的那个**，先拿它精确匹配
-     * - `orderId`（7 位，如 `9564403`）是账单**序号**，和 orderNo 不是一个东西。
-     *   以前代码写的是 `it.orderId == orderNo`，**永远不成立**——这是结束后
-     *   通知一直显示「无消费」的根因。这里保留它只作兜底（万一某校真用同一个值）
-     * - 都对不上才退回时间窗，且窗口要**往前放宽**（见 [SETTLE_WINDOW_SLACK_MS]）
-     */
-    private fun matchBill(bills: List<BillItem>, orderNo: String, windowStartMs: Long): BillItem? {
-        if (orderNo.isNotEmpty()) {
-            bills.firstOrNull { it.consumeBillDTO.orderNo == orderNo }?.let { return it }
-            bills.firstOrNull { it.consumeBillDTO.orderId == orderNo }?.let { return it }
-        }
-        return bills
-            .filter { bill ->
-                // 没有开阀时间就**没法判断哪笔是本次的**，一笔都不能算。
-                // （这里以前写的是 `return@filter true`，会把所有历史账单都当成
-                // 本次的，于是「用时 0 秒 · 消费 ¥上一次的金额」）
-                if (windowStartMs <= 0) return@filter false
-                billTimeMs(bill.consumeBillDTO.consumeDate) >= windowStartMs
-            }
-            .maxByOrNull { it.consumeBillDTO.consumeDate }
-    }
-
-    /** 账单里的日期 → 毫秒；解析不了返回 0（会被当成早于窗口而排除） */
-    private fun billTimeMs(consumeDate: String): Long = BillDateParser.toEpochMillis(consumeDate)
 
     /**
      * 兜底时间窗往前放宽多久。

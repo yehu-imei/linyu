@@ -9,8 +9,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.api.ProjectAuthContext
 import com.hualala.linyu.api.getAccountInfoSafe
-import com.hualala.linyu.api.getBillListSafe
+import com.hualala.linyu.api.getProjectBillListSafe
 import com.hualala.linyu.api.getBindCardInfoSafe
 import com.hualala.linyu.api.getCampusUserInfoSafe
 import com.hualala.linyu.api.getDeviceInfoSafe
@@ -27,9 +28,14 @@ import com.hualala.linyu.api.setUseCodeSafe
 import com.hualala.linyu.api.getWalletSafe
 import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.data.CampusBalanceUpdate
+import com.hualala.linyu.data.BillHistoryCache
 import com.hualala.linyu.data.BleArbiter
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
+import com.hualala.linyu.data.ProjectAuthRepository
+import com.hualala.linyu.data.deviceInUse
+import com.hualala.linyu.data.ownedOrderNo
 import com.hualala.linyu.ble.BleController
 import com.hualala.linyu.ble.BleConnectResult
 import com.hualala.linyu.ble.DeviceQueryState
@@ -60,15 +66,23 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.data.DeviceInfoCache
+import com.hualala.linyu.data.FavoriteDevice
+import com.hualala.linyu.data.HomeDeviceLayout
+import com.hualala.linyu.data.HomeDevicePreferences
+import com.hualala.linyu.data.HomeDeviceSection
 import com.hualala.linyu.widget.WidgetBridge
 import com.hualala.linyu.data.MacFormat
 import com.hualala.linyu.data.SettlementEngine
+import java.time.YearMonth
 
 /**
  * 开阀失败的原因分类。
@@ -96,6 +110,10 @@ class MainViewModel : ViewModel() {
 
     var walletInfo by mutableStateOf<WalletData?>(null)
     val nearbyDevices = mutableStateListOf<NearbyDevice>()
+    internal var homeDeviceLayout by mutableStateOf(HomeDeviceLayout())
+        private set
+    private var homeLayoutOwner = ""
+    private var deviceDetailJob: Job? = null
     var isScanning by mutableStateOf(false)
     var scanStartTime by mutableStateOf(0L)
 
@@ -197,7 +215,7 @@ class MainViewModel : ViewModel() {
     var showDeviceDetail by mutableStateOf(false)
 
     /**
-     * 设备归属（按 snCode 索引）。
+     * 已查询到占用的设备（按 snCode 索引）。值表示是否已确认是自己的订单。
      *
      * ⚠️ 原先是一个全局 `isOwner` 布尔，而 [refreshDeviceStatus] 是**异步**的——
      * 快速切换设备时，A 的响应回来会盖到 B 上（「A 是别人的」串成 B 的状态，
@@ -205,11 +223,13 @@ class MainViewModel : ViewModel() {
      */
     private val ownerBySn = mutableStateMapOf<String, Boolean>()
 
-    /** 该设备是否归自己（没查过时按「是自己的」处理，与原默认值一致） */
-    fun isOwnerFor(snCode: String): Boolean = ownerBySn[snCode] ?: true
+    /** 未查询到归属时，只允许恢复有本地记录的用水。 */
+    fun isOwnerFor(snCode: String): Boolean = ownerBySn[snCode] ?: activeOrders.any {
+        it.snCode == snCode && (it.orderNo.isNotBlank() || PrefsHelper.getStartedAt(snCode) > 0L)
+    }
 
     /** 当前选中设备是否归自己（设备详情弹窗用） */
-    val isOwner: Boolean get() = selectedDevice?.snCode?.let { isOwnerFor(it) } ?: true
+    val isOwner: Boolean get() = selectedDevice?.snCode?.let { isOwnerFor(it) } == true
 
     // ── 多设备活跃订单 ──
     val activeOrders = mutableStateListOf<ActiveOrder>()
@@ -218,7 +238,6 @@ class MainViewModel : ViewModel() {
     private var showerSnCode: String? = null
 
     private var currentOrderNo: String? = null
-    private var activeDeviceSnCodes = mutableSetOf<String>()
     /** 本轮扫描里已经发起过设备信息查询的 MAC（见 [addDevice]）；[startScan] 时清空 */
     private val queriedThisScan = mutableSetOf<String>()
     private val gson = Gson()
@@ -287,12 +306,21 @@ class MainViewModel : ViewModel() {
     // ── 账单 ──
     var billList by mutableStateOf<List<BillItem>>(emptyList())
     var billHistory by mutableStateOf<List<BillItem>>(emptyList())
+    var balanceBills by mutableStateOf<List<BillItem>>(emptyList())
+        private set
     var isLoadingBills by mutableStateOf(false)
+    var billRefreshFailed by mutableStateOf(false)
+        private set
+    private var billLoadJob: Job? = null
+    private var billLoadSequence = 0
+
+    fun isDefaultProjectBill(bill: BillItem): Boolean =
+        bill.belongsTo(PrefsHelper.projectId, PrefsHelper.accountId)
 
     /**
      * 账单是否**至少成功拉取过一次**。
      *
-     * 余额是「用户填的初始余额 − 账单里的消费」算出来的。账单到位之前 billList 是空的，
+     * 余额是「用户填的初始余额 − 账单里的消费」算出来的。账单到位之前 balanceBills 是空的，
      * 减数为 0，于是界面上会先亮出那个初始值、等账单到了再跳到真实值——
      * 看着就像余额自己变了一下（用户复现的「10.60 跳变」就是这个）。
      * 所以没加载完之前不显示估算结果，宁可先显示「—」。
@@ -346,6 +374,7 @@ class MainViewModel : ViewModel() {
      * 看着像数据丢了。先亮上次的值，拉到新的再覆盖。
      */
     var campusBalance by mutableStateOf(PrefsHelper.campusBalance.toDoubleOrNull())
+    private var campusBalanceLoadJob: Job? = null
 
     /**
      * 趣智校园钱包余额（`/account/wallet`）。
@@ -388,12 +417,13 @@ class MainViewModel : ViewModel() {
         lastDeviceSnCode = PrefsHelper.lastDeviceSnCode
         lastDeviceEmoji = PrefsHelper.lastDeviceEmoji
         boundRoom = PrefsHelper.boundRoom
+        homeLayoutOwner = NetworkModule.session().owner
+        homeDeviceLayout = HomeDevicePreferences.load(homeLayoutOwner)
 
         // 恢复所有活跃订单
         val saved = PrefsHelper.getActiveOrders()
         activeOrders.clear()
         activeOrders.addAll(saved)
-        saved.forEach { activeDeviceSnCodes.add(it.snCode) }
     }
 
     override fun onCleared() {
@@ -405,7 +435,7 @@ class MainViewModel : ViewModel() {
     }
 
     fun startScan() {
-        nearbyDevices.clear(); activeDeviceSnCodes.clear()
+        nearbyDevices.clear(); ownerBySn.clear()
         // 新一轮扫描 = 允许对每台设备再查一次（见 addDevice）
         queriedThisScan.clear()
         isScanning = true; scanStartTime = System.currentTimeMillis(); scanner?.startScan()
@@ -445,7 +475,8 @@ class MainViewModel : ViewModel() {
 
     // ── 扫码绑定 ──
     fun scanBind(snCode: String) {
-        sessionScope().launch {
+        deviceDetailJob?.cancel()
+        deviceDetailJob = sessionScope().launch {
             try {
                 val resp = DeviceInfoCache.load(snCode)
                 if (resp.success && resp.data != null) {
@@ -465,6 +496,8 @@ class MainViewModel : ViewModel() {
                     toastMessage = resp.displayMessage ?: "未找到该设备"
                     checkKick(resp.displayMessage)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 checkKickEx(e)
                 val msg = e.message ?: ""
@@ -494,13 +527,14 @@ class MainViewModel : ViewModel() {
     // 现在三种结果分开说：查到了 → 弹详情；服务端说没有这台设备 → 明说；
     // 服务端明确报错 → 把原话转给用户。
     fun fetchDeviceInfo(mac: String) {
+        deviceDetailJob?.cancel()
         val cached = nearbyDevices.find { it.mac == mac }?.deviceInfo
         if (cached != null) {
             selectedDevice = cached; showDeviceDetail = true
-            sessionScope().launch { refreshDeviceStatus(cached.snCode) }
+            deviceDetailJob = sessionScope().launch { refreshDeviceStatus(cached.snCode) }
             return
         }
-        sessionScope().launch {
+        deviceDetailJob = sessionScope().launch {
             try {
                 val resp = DeviceInfoCache.load(mac)
                 if (resp.success && resp.data != null) {
@@ -515,6 +549,8 @@ class MainViewModel : ViewModel() {
                         else -> "未查询到该设备，请检查设备码"
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 checkKickEx(e)
                 val msg = e.message ?: ""
@@ -531,31 +567,38 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    private suspend fun refreshDeviceStatus(snCode: String) {
+    private suspend fun refreshDeviceStatus(snCode: String, discovered: DeviceInfo? = null) {
         try {
-            val q = NetworkModule.apiService.queryUsingSafe(snCode = snCode, auth = NetworkModule.authFields())
-            if (q.errorCode == 307 || (q.success && q.data?.orderNo != null)) {
-                activeDeviceSnCodes.add(snCode)
-                // ⚠️ 按 snCode 记录归属（不能写全局变量：异步响应会串到别的设备上）
-                val owner = q.data?.isOwner ?: true
-                ownerBySn[snCode] = owner
-                // 只有自己的订单才加入 activeOrders
-                if (owner && activeOrders.none { it.snCode == snCode }) {
-                    val orderNo = q.data?.orderNo ?: ""
-                    val deviceInfo = nearbyDevices.find { it.deviceInfo?.snCode == snCode }?.deviceInfo
-                    if (deviceInfo != null) {
-                        activeOrders.add(ActiveOrder(snCode, orderNo, deviceInfo.displayName, deviceInfo.macAddress, deviceInfo.typeEmoji, deviceInfo.withholdMoney))
-                        saveOrders()
+            val session = NetworkModule.session()
+            val context = ProjectAuthRepository.forDevice(snCode, discovered)
+            val q = NetworkModule.apiService.queryUsingSafe(snCode = snCode,
+                auth = context.fields())
+            ProjectAuthRepository.requireCurrent(session)
+            when (q.deviceInUse) {
+                true -> {
+                    val orderNo = q.ownedOrderNo(snCode)
+                    ownerBySn[snCode] = orderNo != null
+                    if (orderNo != null) {
+                        val info = discovered ?: selectedDevice?.takeIf { it.snCode == snCode }
+                            ?: nearbyDevices.firstOrNull { it.deviceInfo?.snCode == snCode }?.deviceInfo
+                        if (info != null) {
+                            val saved = activeOrders.firstOrNull { it.snCode == snCode }
+                            if (saved == null || saved.orderNo.isBlank()) {
+                                ShowerController.ensureActiveOrder(snCode, orderNo, info)
+                                syncActiveOrdersFromPrefs()
+                            }
+                        }
+                        clearOccupiedIfStale(snCode)
                     }
                 }
-                // 设备上确实有订单，且**是自己的** → 之前那个「占用中」已经不成立了。
-                // （不是自己的就是真被占着，标记该留着，不用管。）
-                if (owner) clearOccupiedIfStale(snCode)
-            } else {
-                // 服务端说这台上**没有订单**：不管之前记没记过「占用中」，现在都空了。
-                ownerBySn[snCode] = true
-                clearOccupiedIfStale(snCode)
+                false -> {
+                    ownerBySn.remove(snCode)
+                    clearOccupiedIfStale(snCode)
+                }
+                null -> checkKick(q.displayMessage)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {}
     }
 
@@ -608,6 +651,114 @@ class MainViewModel : ViewModel() {
                 toastMessage = "获取设备信息失败"
             }
         }
+    }
+
+    internal fun toggleHomeSection(section: HomeDeviceSection) {
+        updateHomeLayout { it.toggleSection(section) }
+    }
+
+    internal fun moveHomeSection(section: HomeDeviceSection, delta: Int) {
+        updateHomeLayout { it.moveSection(section, delta) }
+    }
+
+    internal fun moveFavorite(key: String, delta: Int) {
+        updateHomeLayout { it.moveFavorite(key, delta) }
+    }
+
+    internal fun removeFavorite(key: String) {
+        updateHomeLayout { it.removeFavorite(key) }
+    }
+
+    internal fun favoriteFor(info: DeviceInfo?): FavoriteDevice? {
+        val favorite = info?.let { FavoriteDevice.from(it, NetworkModule.session().projectId) } ?: return null
+        return homeDeviceLayout.findFavorite(favorite)
+    }
+
+    internal fun lastDeviceFavorite(): FavoriteDevice? {
+        val mac = MacFormat.normalize(lastDeviceMac) ?: return null
+        return homeDeviceLayout.favorites.singleOrNull {
+            it.device.snCode == lastDeviceSnCode && MacFormat.normalize(it.device.macAddress) == mac
+        }
+    }
+
+    internal fun addFavorite(mac: String, info: DeviceInfo? = null, expectedSn: String? = null) {
+        if (mac.isBlank() || !PrefsHelper.isLoggedIn) return
+        val session = NetworkModule.session()
+        sessionScope().launch {
+            try {
+                val resolved = info ?: DeviceInfoCache.load(mac).let { if (it.success) it.data else null }
+                ProjectAuthRepository.requireCurrent(session)
+                val favorite = resolved?.let { FavoriteDevice.from(it, session.projectId) }
+                if (favorite == null || (!expectedSn.isNullOrBlank() && favorite.device.snCode != expectedSn)) {
+                    toastMessage = "设备信息未确认，暂无法收藏"
+                    return@launch
+                }
+                val nearbyIndex = nearbyDevices.indexOfFirst { it.mac == mac && it.deviceInfo == null }
+                if (nearbyIndex >= 0) {
+                    nearbyDevices[nearbyIndex] = nearbyDevices[nearbyIndex].copy(deviceInfo = favorite.device)
+                }
+                updateHomeLayout { layout ->
+                    if (layout.findFavorite(favorite) != null) layout else layout.toggleFavorite(favorite)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                checkKickEx(e)
+                toastMessage = "获取设备信息失败，请重试"
+            }
+        }
+    }
+
+    internal fun openFavorite(favorite: FavoriteDevice) {
+        if (showDeviceDetail || isStartingShower || isShowering || !PrefsHelper.isLoggedIn) return
+        val session = NetworkModule.session()
+        deviceDetailJob?.cancel()
+        deviceDetailJob = sessionScope().launch {
+            try {
+                val resp = DeviceInfoCache.load(favorite.device.macAddress, force = favorite.projectId == null)
+                ProjectAuthRepository.requireCurrent(session)
+                val info = resp.data?.takeIf { resp.success }
+                if (!resp.success || info == null) {
+                    checkKick(resp.displayMessage)
+                    toastMessage = "获取设备信息失败，请重试"
+                    return@launch
+                }
+                val resolved = FavoriteDevice.from(info, session.projectId)
+                if (resolved == null || !favorite.matches(resolved)) {
+                    toastMessage = "设备信息已变化，请重新扫码或刷新附近设备"
+                    return@launch
+                }
+                if (favorite.projectId == null) {
+                    if (info.projectId?.takeIf { it > 0 } == null) {
+                        toastMessage = "设备项目待确认，请稍后重试"
+                        return@launch
+                    }
+                    updateHomeLayout { it.confirmFavorite(favorite, resolved) }
+                } else if (resolved.projectId != favorite.projectId) {
+                    toastMessage = "设备项目待确认，请稍后重试"
+                    return@launch
+                }
+                if (!showDeviceDetail && !isStartingShower && !isShowering) {
+                    selectedDevice = info
+                    showDeviceDetail = true
+                    refreshDeviceStatus(info.snCode)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                checkKickEx(e)
+                toastMessage = "获取设备信息失败，请重试"
+            }
+        }
+    }
+
+    private fun updateHomeLayout(change: (HomeDeviceLayout) -> HomeDeviceLayout) {
+        val owner = NetworkModule.session().owner
+        if (!PrefsHelper.isLoggedIn || homeLayoutOwner != owner) return
+        val updated = change(homeDeviceLayout)
+        if (updated == homeDeviceLayout) return
+        HomeDevicePreferences.save(owner, updated)
+        homeDeviceLayout = updated
     }
 
     // ════════════════════════════════════════════
@@ -826,8 +977,10 @@ class MainViewModel : ViewModel() {
      * 把账单快照存给小组件。
      * 小组件自己拉不了账单，2x4 的「账单」页读的就是这份数据，界面上会标同步时间。
      */
-    private fun cacheBillsForWidget(recent: List<BillItem>) {
-        val list = recent.map { b ->
+    private fun cacheBillsForWidget() {
+        val balanceRows = balanceBills.toSet()
+        val list = (billList.take(2) + balanceBills).distinct().map { b ->
+            val useForBalance = b in balanceRows
             CachedBill(
                 emoji = b.consumeBillDTO.deviceEmoji,
                 name = b.consumeBillDTO.displayDesc,
@@ -835,8 +988,8 @@ class MainViewModel : ViewModel() {
                 moneyText = "-¥ " + b.consumeBillDTO.consumeMoney,
                 // 原始值一并存下来：小组件的余额估算要拿它们做减法，
                 // 靠上面那两个格式化字符串反解是解不出来的
-                rawTimeMs = BalanceEstimator.billTimeMs(b.consumeBillDTO.consumeDate),
-                rawMoney = b.consumeBillDTO.consumeMoney.toDoubleOrNull() ?: 0.0
+                rawTimeMs = BalanceEstimator.billTimeMs(b.consumeBillDTO.consumeDate).takeIf { useForBalance },
+                rawMoney = b.consumeBillDTO.consumeMoney.toDoubleOrNull().takeIf { useForBalance }
             )
         }
         PrefsHelper.widgetBillJson = gson.toJson(list)
@@ -887,7 +1040,6 @@ class MainViewModel : ViewModel() {
     private fun syncActiveOrdersFromPrefs() {
         val saved = PrefsHelper.getActiveOrders()
         activeOrders.clear(); activeOrders.addAll(saved)
-        activeDeviceSnCodes.clear(); saved.forEach { activeDeviceSnCodes.add(it.snCode) }
     }
 
     /** 开阀后订单号还没生成，轮询把它补上 */
@@ -896,14 +1048,18 @@ class MainViewModel : ViewModel() {
         orderPollJob = sessionScope().launch {
             for (i in 0..10) {
                 delay(800)
-                if (currentOrderNo != null) break
+                if (showerSnCode != snCode || currentOrderNo != null) break
                 try {
-                    val p = NetworkModule.apiService.queryUsingSafe(snCode = snCode, auth = NetworkModule.authFields())
-                    if (p.errorCode == 307 || (p.success && p.data?.orderNo != null)) {
-                        currentOrderNo = p.data?.orderNo
-                        updateOrderNo(snCode, currentOrderNo ?: "")
-                    } else checkKick(p.displayMessage)
-                } catch (e: Exception) { checkKickEx(e) }
+                    val p = NetworkModule.apiService.queryUsingSafe(snCode = snCode,
+                        auth = com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode).fields())
+                    if (showerSnCode != snCode || currentOrderNo != null) break
+                    val orderNo = p.ownedOrderNo(snCode)
+                    if (orderNo != null) {
+                        currentOrderNo = orderNo
+                        updateOrderNo(snCode, orderNo)
+                    } else if (p.deviceInUse != true) checkKick(p.displayMessage)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { checkKickEx(e) }
             }
         }
     }
@@ -920,7 +1076,6 @@ class MainViewModel : ViewModel() {
         currentOrderNo = orderNo; isShowering = true
         showerPreDeduct = device.withholdMoney; showerConsumed = 0.0
         showerRemaining = MoneyFormat.format(device.withholdMoney)
-        activeDeviceSnCodes.add(snCode)
         // 开阀时间戳可能刚刚才写入（开阀成功时），这里读一次再刷新桌面，计时才对得上
         refreshWidgets()
 
@@ -1028,6 +1183,7 @@ class MainViewModel : ViewModel() {
         // 先把 Prefs 里的活跃订单读回内存：小组件那边开了阀又关了，
         // 这个 ViewModel 的内存副本一直是旧的
         syncActiveOrdersFromPrefs()
+        ownerBySn.remove(e.snCode)
 
         if (!isShowering || showerSnCode != e.snCode) return
 
@@ -1122,21 +1278,21 @@ class MainViewModel : ViewModel() {
         }
 
         isStopping = true
-        // 立刻把通知切成「正在结束」。关阀确认要轮询最多 5 秒，
-        // 不切的话用户点完还得盯着「正在使用 · 秒数还在走」干等。
+        // 关阀等待状态确认期间，通知也显示「正在结束」。
         appContext?.let { Notifier.showStopping(it, lastDeviceName.ifEmpty { "热水器" }) }
         sessionScope().launch {
             try {
                 // ⚠️ orderNo 必须在**关阀之前**敲定：关阀成功后订单就没了，
                 // `queryUsing` 再也问不出来。而开阀后 orderNo 是异步轮询补上的，
                 // 「开完水马上停」时本地可能还是空串——那就白丢了结算用的那个直答接口。
+                val settlementContext = com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode)
                 val settledNo = ShowerController.resolveOrderNo(snCode).ifEmpty { oNo }
                 // 关阀 + 确认 + 清本地状态都在 ShowerController 里，小组件的「停止使用」走同一份逻辑
                 val outcome = ShowerController.closeValve(snCode, settledNo)
                 checkKick(outcome.kickHint)
 
                 if (outcome is CloseOutcome.Failed) {
-                    toastMessage = "关闭结果未确认，设备可能仍在出水"
+                    toastMessage = com.hualala.linyu.utils.UserFeedback.message(outcome.message, "关闭失败，请重试")
                     isStopping = false
                     return@launch
                 }
@@ -1169,7 +1325,8 @@ class MainViewModel : ViewModel() {
                         settledNo,
                         startTime,
                         snCode,
-                        lastDeviceName
+                        lastDeviceName,
+                        settlementContext
                     )
                     toastMessage = when {
                         // null = 两条路都没拿到金额，是「还不知道」而不是「没花钱」
@@ -1406,7 +1563,7 @@ class MainViewModel : ViewModel() {
         // 从活跃列表移除
         activeOrders.removeAll { it.snCode == snCode }
         saveOrders()
-        activeDeviceSnCodes.remove(snCode)
+        ownerBySn.remove(snCode)
 
         if (consumed != null && consumed > 0) {
             toastMessage = "已停止，本次消费 ${MoneyFormat.withSymbol(consumed)}"
@@ -1459,13 +1616,13 @@ class MainViewModel : ViewModel() {
         kickedOut = false
         selectedDevice = null
         showDeviceDetail = false
+        homeLayoutOwner = ""
+        homeDeviceLayout = HomeDeviceLayout()
+        deviceDetailJob = null
         nearbyDevices.clear()
         activeOrders.clear()
-        activeDeviceSnCodes.clear()
-        billList = emptyList()
-        billHistory = emptyList()
-        // 一起复位：下一轮登录要重新等账单到位，不能沿用上一次的「已加载」
-        billsLoaded = false
+        ownerBySn.clear()
+        resetBillHistory()
         useCodeData = null
         walletInfo = null
         // 账号信息是跟人走的，换账号必须清掉，否则会显示上一任的姓名/学号/余额
@@ -1513,7 +1670,7 @@ class MainViewModel : ViewModel() {
 
     private fun saveOrders() { PrefsHelper.saveActiveOrders(activeOrders.toList()) }
 
-    fun isDeviceActive(snCode: String) = snCode in activeDeviceSnCodes
+    fun isDeviceActive(snCode: String) = ownerBySn.containsKey(snCode) || activeOrders.any { it.snCode == snCode }
 
     // ── 寝室绑定 / 设备筛选 ──
 
@@ -1642,6 +1799,7 @@ class MainViewModel : ViewModel() {
         if (kickedOut) return
         kickedOut = true
         stopTimer()
+        resetBillHistory()
         PrefsHelper.clear(preserveActiveRecovery = true)
         appContext?.let(ShowerWatchService::stop)
         // 和 logout() 同理：账号已经失效，上一任的未支付账单和代扣锁都不能留
@@ -1687,6 +1845,8 @@ class MainViewModel : ViewModel() {
     fun beginSession() {
         sessionJob.cancel()
         sessionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
+        ownerBySn.clear()
+        resetBillHistory()
         stopTimer()
         try { mqttManager?.disconnect() } catch (_: Exception) {}
         kickedOut = false
@@ -2181,28 +2341,33 @@ class MainViewModel : ViewModel() {
     /**
      * 拉一卡通真实余额。
      *
-     * **拿不到就保持 null**，界面回退到本地估算——服务端只在学生签约过
-     * 校园卡免密支付时才给 `amount`。
+     * 服务端明确不能提供余额时清除上次结果，临时请求失败时保留。
      */
     fun loadCampusBalance() {
         if (!PrefsHelper.isLoggedIn) return
-        sessionScope().launch {
+        val session = NetworkModule.session()
+        campusBalanceLoadJob?.cancel()
+        campusBalanceLoadJob = sessionScope().launch {
             try {
-                val d = NetworkModule.apiService.getCampusUserInfoSafe().data ?: return@launch
-                val amount = d.amount?.toDoubleOrNull()
-                if (amount != null) {
-                    campusBalance = amount
-                    PrefsHelper.campusBalance = d.amount.orEmpty()
-                    PrefsHelper.campusBalanceTime = System.currentTimeMillis()
-                    // 桌面小组件的余额是**渲染时**从 Prefs 读的，不会自己知道值变了。
-                    // 不推一次刷新，它会一直顶着上次渲染的估算值——
-                    // 用户看到的就是「App 里是真余额、桌面上还是估算」。
-                    appContext?.let { LinYuWidget.refreshAll(it) }
+                val response = NetworkModule.apiService.getCampusUserInfoSafe()
+                ProjectAuthRepository.requireCurrent(session)
+                val amount = when (val update = BalanceEstimator.campusBalanceUpdate(response)) {
+                    CampusBalanceUpdate.Keep -> return@launch
+                    CampusBalanceUpdate.Clear -> null
+                    is CampusBalanceUpdate.Set -> update.amount
                 }
+                PrefsHelper.campusBalance = amount?.toString().orEmpty()
+                PrefsHelper.campusBalanceTime = if (amount == null) 0L else System.currentTimeMillis()
+                campusBalance = amount
+                refreshWidgets()
                 // 这个接口顺带也给姓名和学号。它是从**校园卡**那边查的，
                 // 和 /account/info 的数据来源不同——学校没同步学籍时前者为 null、
                 // 这里却有值，正好互补。以前只取了学号，把姓名漏了。
-                applyIdentity(d.studentName, d.studentNumber, null)
+                if (response.success) response.data?.let {
+                    applyIdentity(it.studentName, it.studentNumber, null)
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {}
         }
     }
@@ -2247,51 +2412,106 @@ class MainViewModel : ViewModel() {
                 if (resp.success && resp.data != null) {
                     val info = resp.data; val i = nearbyDevices.indexOfFirst { it.mac == mac }
                     if (i >= 0) nearbyDevices[i] = nearbyDevices[i].copy(deviceInfo = info)
-                    try {
-                        val q = NetworkModule.apiService.queryUsingSafe(snCode = info.snCode, auth = NetworkModule.authFields())
-                        if (q.errorCode == 307 || (q.success && q.data?.orderNo != null)) {
-                            activeDeviceSnCodes.add(info.snCode)
-                            val owner = q.data?.isOwner ?: true
-                            if (owner && activeOrders.none { it.snCode == info.snCode }) {
-                                activeOrders.add(ActiveOrder(info.snCode, q.data?.orderNo ?: "", info.displayName, info.macAddress, info.typeEmoji, info.withholdMoney))
-                                saveOrders()
-                            }
-                        }
-                    } catch (_: Exception) {}
+                    refreshDeviceStatus(info.snCode, info)
                 } else checkKick(resp.displayMessage)
-            } catch (e: Exception) { checkKickEx(e) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { checkKickEx(e) }
         }
     }
 
     // ── 账单 ──
+    private fun resetBillHistory() {
+        billLoadSequence++
+        billLoadJob?.cancel()
+        billLoadJob = null
+        billList = emptyList()
+        billHistory = emptyList()
+        balanceBills = emptyList()
+        billRefreshFailed = false
+        isLoadingBills = false
+        billsLoaded = false
+    }
+
+    private fun publishBillHistory(bills: List<BillItem>, defaultBills: List<BillItem>, defaultLoaded: Boolean) {
+        billHistory = BillHistoryCache.newestFirst(bills)
+        billList = billHistory.take(20)
+        balanceBills = BillHistoryCache.newestFirst(defaultBills)
+        billsLoaded = defaultLoaded
+    }
+
+    private data class BillMonthResult(
+        val source: ProjectAuthContext,
+        val bills: List<BillItem>,
+        val refreshed: Boolean
+    )
+
+    private suspend fun loadBillMonth(
+        session: ProjectAuthContext,
+        source: ProjectAuthContext,
+        month: YearMonth
+    ): BillMonthResult {
+        val cacheKey = BillHistoryCache.monthAccountKey(session.owner, source, month)
+        val fresh = try {
+            val response = NetworkModule.apiService.getProjectBillListSafe(month.toString(), session, source)
+            if (response.success) {
+                BillHistoryCache.fromProject(response.data.orEmpty(), source)
+            } else null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 其他项目的权限或接口异常不能使默认账号退出登录。
+            if (source == session) checkKickEx(e)
+            null
+        }
+        ProjectAuthRepository.requireCurrent(session)
+        if (fresh != null) PrefsHelper.saveCachedBills(cacheKey, fresh)
+        val bills = fresh ?: PrefsHelper.getCachedBills(cacheKey)
+        return BillMonthResult(source, bills, fresh != null)
+    }
+
     fun loadBills() {
-        sessionScope().launch {
+        val session = NetworkModule.session()
+        if (session.loginCode.isBlank()) return
+        val sequence = ++billLoadSequence
+        billLoadJob?.cancel()
+        billLoadJob = sessionScope().launch {
             isLoadingBills = true
-            val cacheKey = PrefsHelper.userId.ifEmpty { PrefsHelper.telephone }
-            val cached = PrefsHelper.getCachedBills(cacheKey)
-            if (cached.isNotEmpty()) {
-                billHistory = cached
-                billList = cached.take(20)
-                billsLoaded = true
-            }
             try {
-                val fmt = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.getDefault())
-                val cal = java.util.Calendar.getInstance()
-                val all = mutableListOf<BillItem>()
-                var allRequestsSucceeded = true
-                for (i in 0..2) {
-                    val month = fmt.format(cal.time)
-                    val resp = NetworkModule.apiService.getBillListSafe(month = month)
-                    if (!resp.success) allRequestsSucceeded = false
-                    if (resp.success && !resp.data.isNullOrEmpty()) all.addAll(resp.data)
-                    cal.add(java.util.Calendar.MONTH, -1)
+                val currentMonth = YearMonth.now()
+                val months = (0L..2L).map(currentMonth::minusMonths)
+                val cached = ProjectAuthRepository.knownAccounts(session).flatMap { source ->
+                    months.flatMap { month ->
+                        PrefsHelper.getCachedBills(BillHistoryCache.monthAccountKey(session.owner, source, month))
+                    }
                 }
-                billHistory = all.toList()
-                billList = all.take(20)
-                billsLoaded = true
-                if (allRequestsSucceeded) PrefsHelper.saveCachedBills(cacheKey, all)
+                if (cached.isNotEmpty()) {
+                    val defaultCached = cached.filter(::isDefaultProjectBill)
+                    publishBillHistory(cached, defaultCached, billsLoaded || defaultCached.isNotEmpty())
+                }
+
+                // 升级后的旧会话也会发现可查账单的项目，无需重新登录。
+                ProjectAuthRepository.refreshAccounts(session)
+                val accounts = ProjectAuthRepository.knownAccounts(session)
+                val results = accounts.flatMap { source -> months.map { source to it } }.chunked(3).flatMap { batch ->
+                    coroutineScope {
+                        batch.map { (source, month) -> async { loadBillMonth(session, source, month) } }.awaitAll()
+                    }
+                }
+                ProjectAuthRepository.requireCurrent(session)
+                val defaultMonths = results.filter { it.source == session }
+                val defaultBills = defaultMonths.flatMap { it.bills }
+                publishBillHistory(
+                    results.flatMap { it.bills },
+                    defaultBills,
+                    defaultMonths.any { it.refreshed || it.bills.isNotEmpty() }
+                )
+                billRefreshFailed = results.any { !it.refreshed }
+                cacheBillsForWidget()
+                refreshWidgets()
+
+                val freshDefaultBills = defaultMonths.filter { it.refreshed }.flatMap { it.bills }
                 val pendingBefore = PrefsHelper.getPendingSettlements()
-                val reconciliation = SettlementReconciler.reconcile(pendingBefore, all)
+                val reconciliation = SettlementEngine.reconcilePending(pendingBefore, freshDefaultBills)
                 val pendingBySn = pendingBefore.associateBy { it.snCode }
                 reconciliation.updates.forEach { update ->
                     PrefsHelper.recordConsume(update.snCode, update.amount, pendingBySn[update.snCode]?.createdAt ?: 0L)
@@ -2317,32 +2537,24 @@ class MainViewModel : ViewModel() {
                         )
                     }
                 }
-                PrefsHelper.savePendingSettlements(reconciliation.remaining)
+                val pendingNow = PrefsHelper.getPendingSettlements()
+                PrefsHelper.savePendingSettlements(pendingNow.filter { it !in pendingBefore || it in reconciliation.remaining })
                 // 遍历已拉取的账单找该设备的最新有效消费，不要求它恰好是整个账户的第一笔。
                 val lastSn = PrefsHelper.lastDeviceSnCode
-                if (lastSn.isNotEmpty()) {
-                    ConsumptionCachePolicy.latestForDevice(all, PrefsHelper.lastDeviceRawName,
+                if (lastSn.isNotEmpty() && com.hualala.linyu.data.ProjectAuthRepository.knownContext(lastSn)?.projectId == PrefsHelper.projectId) {
+                    ConsumptionCachePolicy.latestForDevice(freshDefaultBills, PrefsHelper.lastDeviceRawName,
                         PrefsHelper.lastDeviceName, PrefsHelper.lastDeviceTypeName)?.let {
                         PrefsHelper.recordConsume(lastSn, it.amount, it.atMs)
                     }
                 }
-                // ⚠️ 必须和上面 billList 用的条数一致。
-                // 小组件用这份缓存算「初始余额 − 消费」的估算值，
-                // 只给 2 笔的话减数偏小，桌面上的余额会比 App 里高出一截。
-                // 界面上只渲染 2 行，多存的不影响显示。
-                cacheBillsForWidget(all.take(20))
                 refreshWidgets()
-            } catch (e: Exception) { 
-                checkKickEx(e)
-                val msg = e.message ?: ""
-                if (msg.contains("Unable to resolve host", ignoreCase = true) ||
-                    msg.contains("No address associated", ignoreCase = true) ||
-                    msg.contains("Network is unreachable", ignoreCase = true) ||
-                    msg.contains("Failed to connect", ignoreCase = true)) {
-                    toastMessage = "网络连接失败，请检查网络"
-                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                if (NetworkModule.session() == session) billRefreshFailed = true
+            } finally {
+                if (sequence == billLoadSequence) isLoadingBills = false
             }
-            finally { isLoadingBills = false }
         }
     }
 }

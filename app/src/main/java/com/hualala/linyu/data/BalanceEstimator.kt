@@ -1,6 +1,8 @@
 package com.hualala.linyu.data
 
+import com.hualala.linyu.model.BaseResponse
 import com.hualala.linyu.model.BillItem
+import com.hualala.linyu.model.CampusUserInfo
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.PrefsHelper
 
@@ -32,6 +34,19 @@ import com.hualala.linyu.utils.PrefsHelper
  * 于是「App 里余额变了、桌面上不变」。抽到这里，三处共用一份，不会再各算各的。
  */
 object BalanceEstimator {
+    internal fun campusBalanceUpdate(response: BaseResponse<CampusUserInfo>): CampusBalanceUpdate {
+        if (!response.success) {
+            return if (response.errorCode == 12 && response.displayMessage?.trim() == "无效支付配置") {
+                CampusBalanceUpdate.Clear
+            } else {
+                CampusBalanceUpdate.Keep
+            }
+        }
+        val data = response.data
+        val amount = data?.amount?.toDoubleOrNull()?.takeIf { it.isFinite() }
+        return if (data?.signStatus == 0 || amount == null) CampusBalanceUpdate.Clear
+        else CampusBalanceUpdate.Set(amount)
+    }
 
     /**
      * 真实余额：一卡通优先，其次趣智校园钱包；都拿不到返回 null。
@@ -73,12 +88,16 @@ object BalanceEstimator {
     }
 
     /** App 内用：直接吃接口返回的账单。有真实余额就直接返回它 */
-    fun estimate(bills: List<BillItem>): Double = estimateFromEntries(
+    fun estimate(bills: List<BillItem>): Double = estimateFromEntries(billEntries(bills))
+
+    /** 账单页的一卡通视图在两种真实余额都不可用时可以显示手动估算值。 */
+    fun estimateManually(bills: List<BillItem>): Double = estimateManualFromEntries(billEntries(bills))
+
+    private fun billEntries(bills: List<BillItem>): List<Pair<Long, Double>> =
         bills.map {
             billTimeMs(it.consumeBillDTO.consumeDate) to
                 (it.consumeBillDTO.consumeMoney.toDoubleOrNull() ?: 0.0)
         }
-    )
 
     /**
      * 小组件用：吃本地快照折算出来的 (时间, 金额)。
@@ -91,6 +110,10 @@ object BalanceEstimator {
      */
     fun estimateFromEntries(entries: List<Pair<Long, Double>>): Double {
         realBalance()?.let { return it }
+        return estimateManualFromEntries(entries)
+    }
+
+    private fun estimateManualFromEntries(entries: List<Pair<Long, Double>>): Double {
         val initial = PrefsHelper.manualBalance
         if (initial.isEmpty()) return 0.0
         val since = PrefsHelper.manualBalanceTime
@@ -113,4 +136,10 @@ object BalanceEstimator {
      * 不再各自 `%.2f`（那会把 0.025 显示成 0.03）。
      */
     fun formatMoney(value: Double): String = MoneyFormat.format(value)
+}
+
+internal sealed interface CampusBalanceUpdate {
+    data object Keep : CampusBalanceUpdate
+    data object Clear : CampusBalanceUpdate
+    data class Set(val amount: Double) : CampusBalanceUpdate
 }

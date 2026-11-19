@@ -129,10 +129,20 @@ object PrefsHelper {
         set(v) = prefs.edit().putString("walletBalance", v).apply()
     var schoolName: String get() = prefs.getString("schoolName", "") ?: ""; set(v) = prefs.edit().putString("schoolName", v).apply()
     val isLoggedIn: Boolean get() = loginCode.isNotEmpty()
+    var projectRoutingJson: String get() = prefs.getString("projectRoutingJson", "") ?: ""
+        set(value) = prefs.edit().putString("projectRoutingJson", value).apply()
     fun saveAuth(lc: String, uid: String, aid: String, pid: String, phone: String, name: String?) {
-        loginCode = lc; userId = uid; accountId = aid; projectId = pid; telephone = phone; userName = name ?: ""
+        if (userId != uid || accountId != aid || projectId != pid) {
+            projectRoutingJson = ""
+            com.hualala.linyu.data.ProjectAuthRepository.clear()
+        }
+        prefs.edit().putString("loginCode", lc).putString("userId", uid)
+            .putString("accountId", aid).putString("projectId", pid)
+            .putString("telephone", phone).putString("userName", name ?: "").apply()
     }
     fun clear(preserveActiveRecovery: Boolean = false) {
+        com.hualala.linyu.api.NetworkModule.updateAuth("", "", "", "", "")
+        com.hualala.linyu.data.ProjectAuthRepository.clear()
         // 保留余额和填写时间
         val bal = manualBalance; val btime = manualBalanceTime
         try {
@@ -146,7 +156,7 @@ object PrefsHelper {
                 .remove("lastConsumeMoney").remove("lastConsumeTime")
                 .remove("widgetNearbyJson").remove("widgetBillJson")
                 .remove("widgetNearbyTime").remove("widgetBillTime")
-                .remove("pendingSettlements")
+                .remove("pendingSettlements").remove("projectRoutingJson")
                 // 占用状态是跟设备走的，换账号后不适用
                 .remove("occupiedSnCode")
                 // 学号和余额是账号数据，换账号必须清掉，否则会显示上一任的
@@ -251,6 +261,13 @@ object PrefsHelper {
     var userProfileHiddenCards: String get() = prefs.getString("userProfileHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userProfileHiddenCards", v).apply()
     var userSettingsCardOrder: String get() = prefs.getString("userSettingsCardOrder", "") ?: ""; set(v) = prefs.edit().putString("userSettingsCardOrder", v).apply()
     var userSettingsHiddenCards: String get() = prefs.getString("userSettingsHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userSettingsHiddenCards", v).apply()
+
+    internal fun homeDeviceLayoutJson(owner: String): String =
+        prefs.getString("homeDeviceLayout_$owner", "").orEmpty()
+
+    internal fun saveHomeDeviceLayoutJson(owner: String, value: String) {
+        prefs.edit().putString("homeDeviceLayout_$owner", value).apply()
+    }
 
     // ── 自定义背景：两套独立配置（scope = home / shower），与深浅模式完全无关 ──
     fun bgGetBool(scope: String, name: String, def: Boolean) = prefs.getBoolean("bg_${scope}_$name", def)

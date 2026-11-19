@@ -10,8 +10,8 @@ class UserReleaseNotesTest {
 
     @Test fun allPublishedVersionsAreBrief() {
         val notes = UserReleaseNotes.parse(document())
-        assertEquals(15, notes.size)
-        assertEquals("v3.1.1", notes.first().version)
+        assertEquals(16, notes.size)
+        assertEquals("v3.1.2", notes.first().version)
         assertEquals("v1.0", notes.last().version)
         assertFalse(notes.any { it.date == "待发布" })
         assertTrue(notes.all { it.items.size in 1..5 && it.items.all { text -> text.length <= 50 } })

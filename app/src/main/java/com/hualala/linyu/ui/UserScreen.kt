@@ -37,7 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -179,9 +180,10 @@ fun UserScreen(
             if (migrateLegacyLayout) legacyHiddenCards else loadHiddenCards(PrefsHelper.userSettingsHiddenCards)
         )
     }
-    var themeMode by LocalThemeMode.current
+    val themeMode by LocalThemeMode.current
     val themeReveal = LocalThemeReveal.current
-    var themeBtnPos by remember { mutableStateOf(Offset.Zero) }
+    val iconMode = themeReveal.pendingMode ?: themeMode
+    var themeButtonBounds by remember { mutableStateOf(Rect.Zero) }
 
     LaunchedEffect(showSettings) { onSettingsVisibilityChanged(showSettings) }
     LaunchedEffect(migrateLegacyLayout) {
@@ -238,16 +240,20 @@ fun UserScreen(
         ) {
             Text("我的账号", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { editMode = !editMode }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Text(if (editMode) "完成" else "编辑", fontSize = 14.sp, color = AppColors.Accent)
-                }
-                IconButton(
-                    onClick = { themeReveal.toggle(themeBtnPos) },
-                    modifier = Modifier.onGloballyPositioned { coords ->
-                        themeBtnPos = coords.boundsInRoot().center
-                    }
+                EditModeButton(editMode, onClick = { editMode = !editMode })
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .onGloballyPositioned { themeButtonBounds = it.boundsInRoot() }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            role = Role.Button,
+                            onClickLabel = if (iconMode == ThemeMode.DARK) "切换浅色" else "切换深色"
+                        ) { themeReveal.toggle(themeButtonBounds) },
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text(if (themeMode == ThemeMode.DARK) "🌙" else "☀️", fontSize = 20.sp)
+                    Text(if (iconMode == ThemeMode.DARK) "🌙" else "☀️", fontSize = 20.sp)
                 }
                 IconButton(onClick = { showSettings = true }) {
                     Icon(Icons.Default.Settings, contentDescription = "打开设置", tint = AppColors.TextSecondary)
@@ -380,9 +386,7 @@ private fun SettingsScreen(
             }
             Text("设置", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = { editMode = !editMode }) {
-                Text(if (editMode) "完成" else "编辑", color = AppColors.Accent)
-            }
+            EditModeButton(editMode, onClick = { editMode = !editMode })
         }
         Spacer(Modifier.height(16.dp))
         val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }

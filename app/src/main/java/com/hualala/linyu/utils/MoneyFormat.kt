@@ -1,5 +1,7 @@
 package com.hualala.linyu.utils
 
+import java.util.Locale
+
 /**
  * 金额显示的统一格式化。
  *
@@ -14,10 +16,19 @@ package com.hualala.linyu.utils
  */
 object MoneyFormat {
 
-    /** 金额数字（不带货币符号）：`0.025` → `"0.025"`，`5.0` → `"5.0"` */
+    /** 金额数字（不带货币符号）：`0.025` → `"0.025"`，`5.0` → `"5.00"` */
     fun format(value: Double): String {
-        val s = "%.3f".format(value)
+        val s = String.format(Locale.ROOT, "%.3f", value)
         return if (s.endsWith('0')) s.dropLast(1) else s
+    }
+
+    fun formatOrNull(value: String?): String? =
+        value?.toDoubleOrNull()?.takeIf { it.isFinite() }?.let(::format)
+
+    /** 消费记录的金额文案。服务端缺少金额时保留未知状态。 */
+    fun billAmount(value: String?): String {
+        val amount = value?.toDoubleOrNull()?.takeIf { it.isFinite() } ?: return "¥ —"
+        return if (amount < 0) "¥ ${format(-amount)}" else "-¥ ${format(amount)}"
     }
 
     /** 带 ¥ 前缀：`0.025` → `"¥0.025"` */

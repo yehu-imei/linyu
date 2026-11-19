@@ -1,10 +1,10 @@
 package com.hualala.linyu.ui.theme
 
 import androidx.compose.foundation.LocalIndication
+import androidx.compose.material.ripple
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.material.ripple.rememberRipple
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.hualala.linyu.utils.BackgroundManager
@@ -104,7 +104,7 @@ fun LinYuThemeSpecific(mode: ThemeMode, content: @Composable () -> Unit) {
     CompositionLocalProvider(
         LocalAppColors provides set,
         // 全局提供更明显的点击涟漪（默认涟漪太淡，感知不到）
-        LocalIndication provides rememberRipple(color = set.Accent.copy(alpha = 0.35f))
+        LocalIndication provides ripple(color = set.Accent.copy(alpha = 0.35f))
     ) {
         MaterialTheme(colorScheme = scheme, content = content)
     }

@@ -18,15 +18,17 @@ import com.hualala.linyu.utils.MoneyFormat
 fun DeviceDetailDialog(
     device: DeviceInfo?,
     isActive: Boolean = false,
-    isOwner: Boolean = true,
+    isOwner: Boolean = false,
     onDismiss: () -> Unit,
-    onConfirm: () -> Unit
+    onConfirm: () -> Unit,
+    isFavorite: Boolean = false,
+    onFavorite: (() -> Unit)? = null
 ) {
     if (device == null) return
 
     val emoji = device.typeEmoji
     val type = when {
-        device.isDrinkingWater -> if (device.isHotWater) "饮水（热水）" else "饮水（冷水）"
+        device.isDrinkingWater -> device.waterTemperature?.let { "饮水（$it）" } ?: "饮水"
         device.typeName == "洗手台" -> "洗漱"
         else -> "沐浴"
     }
@@ -49,7 +51,11 @@ fun DeviceDetailDialog(
                     // 白图标直接压在对话框的浅色背景上，等于看不见。
                     Text(emoji, fontSize = 22.sp)
                     Spacer(Modifier.width(6.dp))
-                    Text(type, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text(type, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f, fill = false))
+                    if (onFavorite != null) {
+                        Spacer(Modifier.width(4.dp))
+                        FavoriteButton(isFavorite, onFavorite)
+                    }
                 }
                 Text(location, fontSize = 15.sp, color = Color.Gray, fontWeight = FontWeight.Medium)
             }
@@ -75,7 +81,7 @@ fun DeviceDetailDialog(
         confirmButton = {
             val canUse = !isActive || isOwner
             val txt = when {
-                isActive && !isOwner -> "他人使用中"
+                isActive && !isOwner -> "占用中"
                 isActive -> "恢复使用"
                 else -> startText
             }

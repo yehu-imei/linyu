@@ -341,7 +341,7 @@ object Notifier {
         // 放在标题里会把通知栏那一行占满，一眼看不出是"发生了什么"
         postEvent(context, ID_OCCUPIED, alert = alert,
             title = "设备占用中",
-            body = "${shortName(deviceName)}正在被他人使用")
+            body = "${shortName(deviceName)}正在使用中")
     }
 
     /**

@@ -20,9 +20,10 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.hypot
 import kotlin.math.max
 
-/** 主题切换触发器：传入点击位置（屏幕坐标）执行切换 */
+/** 主题切换触发器：从按钮的根布局范围开始揭示。 */
 data class ThemeRevealController(
-    val toggle: (Offset) -> Unit = {}
+    val toggle: (Rect) -> Unit = {},
+    val pendingMode: ThemeMode? = null
 )
 
 val LocalThemeReveal = staticCompositionLocalOf { ThemeRevealController() }
@@ -47,7 +48,7 @@ fun CircularRevealThemeHost(
     // 与 isAnimating 分离：isAnimating 只表示"遮罩存在"，animationStarted 才表示"动画可以跑了"
     var animationStarted by remember { mutableStateOf(false) }
     var previewApplied by remember { mutableStateOf(false) }
-    var animOrigin by remember { mutableStateOf(Offset.Zero) }
+    var revealBounds by remember { mutableStateOf(Rect.Zero) }
     var targetMode by remember { mutableStateOf(currentMode) }
     val animProgress = remember { Animatable(0f) }
 
@@ -56,18 +57,19 @@ fun CircularRevealThemeHost(
     val screenWidthPx = with(density) { config.screenWidthDp.dp.toPx() }
     val screenHeightPx = with(density) { config.screenHeightDp.dp.toPx() }
 
-    val controller = remember(currentMode, isAnimating) {
+    val controller = remember(currentMode, isAnimating, targetMode) {
         ThemeRevealController(
-            toggle = { origin ->
+            toggle = { bounds ->
                 if (!isAnimating) {
                     targetMode = if (currentMode == ThemeMode.LIGHT) ThemeMode.DARK else ThemeMode.LIGHT
-                    animOrigin = origin
+                    revealBounds = bounds
                     // 同步重置，避免上一轮动画结束时的残留进度影响首帧显示
                     animationStarted = false
                     previewApplied = false
                     isAnimating = true
                 }
-            }
+            },
+            pendingMode = targetMode.takeIf { isAnimating }
         )
     }
 
@@ -137,9 +139,11 @@ fun CircularRevealThemeHost(
             // 之后圆形半径从 0 扩散到全屏，新主题从点击点铺开。
             if (isAnimating) {
                 val oldBg = if (targetMode == ThemeMode.LIGHT) DarkColors.Background else LightColors.Background
-                val originX = if (animOrigin == Offset.Zero) screenWidthPx - with(density) { 36.dp.toPx() } else animOrigin.x
-                val originY = if (animOrigin == Offset.Zero) with(density) { 48.dp.toPx() } else animOrigin.y
-                val center = Offset(originX, originY)
+                val center = if (revealBounds == Rect.Zero) {
+                    with(density) { Offset(screenWidthPx - 36.dp.toPx(), 48.dp.toPx()) }
+                } else revealBounds.center
+                // 动画全程露出按钮，点击后更新的图标不会被过渡遮罩盖住。
+                val startRadius = (revealBounds.topLeft - revealBounds.center).getDistance()
                 // ×1.15：多覆盖一点，避免圆角/边缘处残留旧主题的色块
                 val maxRadius = max(
                     max(hypot(center.x, center.y), hypot(screenWidthPx - center.x, center.y)),
@@ -152,7 +156,8 @@ fun CircularRevealThemeHost(
                             // 在「绘制阶段」读取动画进度：动画每帧只触发重绘，不再触发重组
                             val progress = animProgress.value
                             val maskAlpha = (progress / 0.2f).coerceIn(0f, 1f)
-                            val radius = ((progress - 0.2f) / 0.8f).coerceIn(0f, 1f) * maxRadius
+                            val fraction = ((progress - 0.2f) / 0.8f).coerceIn(0f, 1f)
+                            val radius = startRadius + fraction * (maxRadius - startRadius).coerceAtLeast(0f)
                             val path = Path().apply {
                                 addOval(Rect(center = center, radius = radius))
                             }

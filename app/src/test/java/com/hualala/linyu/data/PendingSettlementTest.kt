@@ -29,15 +29,17 @@ class PendingSettlementTest {
     }
 
     @Test
-    fun `zero bill completes pending record without overwriting previous amount`() {
-        val result = SettlementReconciler.reconcile(
-            listOf(pending("device-a", "order-a")),
-            listOf(bill("order-a", "测试热水器", "2026-09-22 17:00:00", "0.00")),
-            now
-        )
+    fun `zero placeholder stays pending until the real amount arrives`() {
+        val waiting = pending("device-a", "order-a")
+        val placeholder = bill("order-a", "测试热水器", "2026-09-22 17:00:00", "0.00")
+        val first = SettlementReconciler.reconcile(listOf(waiting), listOf(placeholder), now)
+        assertTrue(first.updates.isEmpty())
+        assertEquals(listOf(waiting), first.remaining)
 
-        assertTrue(result.updates.isEmpty())
-        assertTrue(result.remaining.isEmpty())
+        val confirmed = placeholder.copy(consumeBillDTO = placeholder.consumeBillDTO.copy(consumeMoney = "0.41"))
+        val second = SettlementReconciler.reconcile(first.remaining, listOf(confirmed), now + 1000)
+        assertEquals(listOf(SettlementUpdate("device-a", 0.41)), second.updates)
+        assertTrue(second.remaining.isEmpty())
     }
 
     @Test
@@ -73,6 +75,19 @@ class PendingSettlementTest {
 
         assertEquals(listOf(SettlementUpdate("device-a", 0.48)), result.updates)
         assertTrue(result.remaining.isEmpty())
+    }
+
+    @Test
+    fun `legacy record stays pending when multiple same-device bills match`() {
+        val legacy = pending("device-a", "")
+        val bills = listOf(
+            bill("order-a", "测试热水器", "2026-09-22 17:00:03", "0.48"),
+            bill("order-b", "测试热水器", "2026-09-22 17:01:00", "0.90")
+        )
+
+        val result = SettlementReconciler.reconcile(listOf(legacy), bills, now)
+        assertTrue(result.updates.isEmpty())
+        assertEquals(listOf(legacy), result.remaining)
     }
 
     private fun pending(sn: String, order: String, createdAt: Long = now) = PendingSettlement(

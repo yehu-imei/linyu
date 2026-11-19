@@ -2,6 +2,7 @@ package com.hualala.linyu.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -19,20 +20,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.hualala.linyu.R
 import com.hualala.linyu.data.BalanceEstimator
 import com.hualala.linyu.model.BillDTO
 import com.hualala.linyu.model.BillItem
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.ui.theme.AppColors
+import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.PrefsHelper
 import kotlinx.coroutines.launch
 
@@ -42,6 +48,7 @@ fun WalletScreen(viewModel: MainViewModel) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         viewModel.loadBills()
+        if (viewModel.walletBalance == null) viewModel.refreshWallet()
         // 一卡通真实余额只在这里和主页各拉一次（「我的」页面也有）——
         // 漏了这个页面的话，先开钱包页会一直按「估算」渲染
         viewModel.loadCampusBalance()
@@ -54,6 +61,7 @@ fun WalletScreen(viewModel: MainViewModel) {
     LaunchedEffect(Unit) { viewModel.loadUnpaidBills() }
     var showEditDialog by remember { mutableStateOf(false) }
     var editValue by remember { mutableStateOf("") }
+    var showWalletBalance by rememberSaveable { mutableStateOf(false) }
 
     // 消费趋势开关：进页面时读一次。设置页改完切回来，本页会被重建（AnimatedContent），
     // remember 重新初始化，读到最新值——和通知开关（NotifyCard）同一套模型。
@@ -72,21 +80,17 @@ fun WalletScreen(viewModel: MainViewModel) {
         }
     )
 
-    // 余额：接口拿得到就用真实的，拿不到才回退「初始余额 − 之后产生的消费」。
-    // 算法和主页、桌面小组件共用一份。
-    //
-    // 账单没到位时给 null，避免先把初始余额亮出来再跳变（见 MainViewModel.billsLoaded）——
-    // 但**真实余额不受这个限制**：它是现成的数字，不是减出来的，不用等账单。
-    // ⚠️ 必须把钱包余额也算进「有真实余额」——只认一卡通的话，
-    // 没接一卡通的学校会被误判成「只能估算」，明明钱包里有确切数字却让用户手填。
-    val hasReal = viewModel.campusBalance != null || viewModel.walletBalance != null
-    val displayBalance = remember(
-        viewModel.billList, viewModel.billsLoaded, viewModel.campusBalance,
-        viewModel.walletBalance,
-        PrefsHelper.manualBalance, PrefsHelper.manualBalanceTime
-    ) {
-        if (hasReal || viewModel.billsLoaded) BalanceEstimator.estimate(viewModel.billList) else null
+    val balanceTitle = if (showWalletBalance) "趣智校园余额" else "一卡通余额"
+    val selectedBalance = if (showWalletBalance) viewModel.walletBalance else viewModel.campusBalance
+    val canEstimate = !showWalletBalance && viewModel.campusBalance == null && viewModel.walletBalance == null
+    val manualBalance = PrefsHelper.manualBalance
+    val estimate = remember(canEstimate, viewModel.balanceBills, viewModel.billsLoaded,
+        manualBalance, PrefsHelper.manualBalanceTime) {
+        if (canEstimate && viewModel.billsLoaded && manualBalance.isNotBlank()) {
+            BalanceEstimator.estimateManually(viewModel.balanceBills)
+        } else null
     }
+    val displayBalance = selectedBalance ?: estimate
 
     Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
         Column(
@@ -96,12 +100,23 @@ fun WalletScreen(viewModel: MainViewModel) {
                 .verticalScroll(rememberScrollState())
                 .padding(20.dp)
         ) {
-            // 标题按**钱在哪**写：一卡通 → 「一卡通余额」，趣智校园钱包 → 「趣智校园余额」。
-            // （卡片内那行「账户余额 (元)」保持不动。）
-            Text(
-                BalanceEstimator.title(),
-                fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary
-            )
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        role = Role.Button,
+                        onClickLabel = if (showWalletBalance) "查看一卡通余额" else "查看趣智校园余额"
+                    ) { showWalletBalance = !showWalletBalance }
+                    .padding(end = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(balanceTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                Icon(painterResource(R.drawable.ic_swap_balance), contentDescription = null,
+                    tint = AppColors.TextSecondary, modifier = Modifier.size(18.dp))
+            }
             Spacer(Modifier.height(16.dp))
 
             Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
@@ -116,7 +131,7 @@ fun WalletScreen(viewModel: MainViewModel) {
                         //
                         // ⚠️ 用 Text + clickable 而不是 TextButton：TextButton 自带
                         // 48dp 最小高度，会把这一行顶高、下面的余额数字跟着往下掉。
-                        if (!hasReal) {
+                        if (canEstimate) {
                             Text(
                                 "手动填写", color = AppColors.Accent, fontSize = 13.sp,
                                 modifier = Modifier
@@ -137,13 +152,13 @@ fun WalletScreen(viewModel: MainViewModel) {
                     Text(displayBalance?.let { "¥ ${BalanceEstimator.formatMoney(it)}" } ?: "¥ —",
                         fontSize = 36.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
                     Spacer(Modifier.height(8.dp))
-                    // 三个来源要分别说清是哪来的：都写成「校园卡」的话，
-                    // 显示趣智校园钱包余额的学校会对不上账。
                     Text(
                         when {
-                            viewModel.campusBalance != null -> "来自校园卡账户的实时余额"
-                            hasReal -> "来自趣智校园账户的实时余额"
-                            else -> "仅通过初始金额和账单进行估算，并非真实余额"
+                            selectedBalance != null && showWalletBalance -> "来自趣智校园账户的实时余额"
+                            selectedBalance != null -> "来自校园卡账户的实时余额"
+                            estimate != null -> "仅通过初始金额和账单进行估算，并非真实余额"
+                            showWalletBalance -> "暂未获取到趣智校园余额"
+                            else -> "暂未获取到一卡通余额"
                         },
                         color = AppColors.TextSecondary, fontSize = 11.sp
                     )
@@ -155,7 +170,7 @@ fun WalletScreen(viewModel: MainViewModel) {
             if (trendEnabled) {
                 SpendingTrendCard(
                     bills = viewModel.billHistory,
-                    loading = viewModel.isLoadingBills && !viewModel.billsLoaded
+                    loading = viewModel.isLoadingBills && viewModel.billHistory.isEmpty()
                 )
                 Spacer(Modifier.height(24.dp))
             }
@@ -164,13 +179,21 @@ fun WalletScreen(viewModel: MainViewModel) {
             Text("最近20次消费记录", fontSize = 12.sp, color = AppColors.TextSecondary)
             Spacer(Modifier.height(12.dp))
 
-            if (viewModel.isLoadingBills) {
+            if (viewModel.isLoadingBills && viewModel.billList.isEmpty()) {
                 Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(Modifier.size(24.dp), color = AppColors.Accent, strokeWidth = 2.dp)
                 }
             } else if (viewModel.billList.isEmpty()) {
-                Text("暂无账单数据", color = AppColors.TextSecondary, modifier = Modifier.padding(top = 8.dp))
+                Text(
+                    if (viewModel.billRefreshFailed) "账单加载失败，请下拉重试" else "暂无账单数据",
+                    color = AppColors.TextSecondary,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
             } else {
+                if (viewModel.billRefreshFailed && !viewModel.isLoadingBills) {
+                    Text("部分账单暂未更新", color = AppColors.TextSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.height(8.dp))
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // ⚠️ 在循环外取一次。unpaidConsumeDates 是计算属性，
                     // 写在 forEach 里的话每渲染一行就重建一次整个 Set
@@ -179,7 +202,7 @@ fun WalletScreen(viewModel: MainViewModel) {
                         val dto = bill.consumeBillDTO
                         BillCard(
                             bill = bill,
-                            unpaid = dto.consumeDate in unpaidDates,
+                            unpaid = viewModel.isDefaultProjectBill(bill) && dto.consumeDate in unpaidDates,
                             deducting = viewModel.deductingConsumeDate == dto.consumeDate,
                             onDeduct = { pendingDeduct = dto.consumeDate to dto.consumeMoney },
                             onClick = { detailBill = dto }
@@ -275,7 +298,7 @@ fun WalletScreen(viewModel: MainViewModel) {
                     val dname = if (name.isNotEmpty()) DeviceInfo.formatDeviceName(name) else dto.description
                     WDetailRow("设备名", dname)
                     WDetailRow("设备类型", dto.deviceTypeLabel)
-                    WDetailRow("消费金额", "-¥ ${dto.consumeMoney}")
+                    WDetailRow("消费金额", MoneyFormat.billAmount(dto.consumeMoney))
                     WDetailRow("消费时间", dto.consumeDate.take(19))
                     WDetailRow("订单号", dto.orderId)
                 }
@@ -312,7 +335,8 @@ private fun BillCard(
                 Text(dto.consumeDate.take(16), fontSize = 12.sp, color = AppColors.TextSecondary)
             }
             Column(horizontalAlignment = Alignment.End) {
-                Text("-¥ ${dto.consumeMoney}", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = AppColors.Danger)
+                Text(MoneyFormat.billAmount(dto.consumeMoney), fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold, color = AppColors.Danger)
                 // 只有服务端说这条**没扣成功**时才出现按钮。判断依据是
                 // /order/weixinScorePay/unPay/queryBill 的返回，不去猜账单里的字段含义。
                 if (unpaid) {

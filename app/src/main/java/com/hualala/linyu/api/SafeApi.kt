@@ -1,6 +1,7 @@
 package com.hualala.linyu.api
 
 import com.google.gson.Gson
+import com.google.gson.JsonElement
 import com.google.gson.JsonParser
 import com.hualala.linyu.model.AccountInfo
 import com.hualala.linyu.model.BaseResponse
@@ -68,7 +69,11 @@ private fun <T> parse(json: String, dataClass: Class<T>): BaseResponse<T> {
     return BaseResponse(success, data, errorCode, errorMessage, msg)
 }
 
-private fun <T> parseList(json: String, elementClass: Class<T>): BaseResponse<List<T>> {
+private fun <T> parseList(
+    json: String,
+    elementClass: Class<T>,
+    include: (JsonElement) -> Boolean = { true }
+): BaseResponse<List<T>> {
     val obj = JsonParser().parse(json).asJsonObject
     val success = obj.get("success")?.asBoolean ?: false
     val errorCode = obj.get("errorCode")?.asInt ?: 0
@@ -78,7 +83,7 @@ private fun <T> parseList(json: String, elementClass: Class<T>): BaseResponse<Li
     val data: List<T>? = if (dataElement != null && !dataElement.isJsonNull && dataElement.isJsonArray) {
         val result = mutableListOf<T>()
         for (item in dataElement.asJsonArray) {
-            result.add(gson.fromJson(item, elementClass))
+            if (include(item)) result.add(gson.fromJson(item, elementClass))
         }
         result
     } else null
@@ -96,8 +101,15 @@ suspend fun QzxyService.loginSafe(
 suspend fun QzxyService.getWalletSafe(): BaseResponse<WalletData> =
     parse(getWallet().awaitString(), WalletData::class.java)
 
-suspend fun QzxyService.getDeviceInfoSafe(mac: String): BaseResponse<DeviceInfo> =
-    parse(getDeviceInfo(mac).awaitString(), DeviceInfo::class.java)
+suspend fun QzxyService.getUserProjectsSafe(auth: Map<String, String>): BaseResponse<List<UserProjectItem>> =
+    parseList(getUserProjects(auth).awaitString(), UserProjectItem::class.java)
+
+suspend fun QzxyService.getDeviceInfoSafe(mac: String): BaseResponse<DeviceInfo> {
+    val response = parse(getDeviceInfo(mac).awaitString(), DeviceInfo::class.java)
+    return if (response.success && response.data?.hasDeviceIdentity == false) {
+        response.copy(success = false, data = null, errorMessage = "设备信息不完整，请刷新后重试")
+    } else response
+}
 
 suspend fun QzxyService.downRateSafe(
     xfModel: Int = 0,
@@ -161,8 +173,31 @@ suspend fun QzxyService.queryUsingSafe(
 
 suspend fun QzxyService.getBillListSafe(
     month: String,
-    billRequestType: Int = 2
-): BaseResponse<List<BillItem>> = parseList(getBillList(month, billRequestType).awaitString(), BillItem::class.java)
+    billRequestType: Int = 2,
+    auth: Map<String, String> = emptyMap()
+): BaseResponse<List<BillItem>> = parseList(
+    getBillList(month, billRequestType, auth).awaitString(), BillItem::class.java
+) { element ->
+    if (!element.isJsonObject) return@parseList false
+    val row = element.asJsonObject
+    row.get("consumeBillDTO")?.isJsonObject == true &&
+        nonConsumptionBillFields.none { row.get(it)?.isJsonNull == false }
+}
+
+private val nonConsumptionBillFields = listOf(
+    "rechargeBillDTO", "refundBillDTO", "monthCardBillDTO", "laundryBillDTO"
+)
+
+/** 跨项目账单采用 MudLife 的全类型查询，由解析器只保留用水消费记录。 */
+suspend fun QzxyService.getProjectBillListSafe(
+    month: String,
+    session: ProjectAuthContext,
+    source: ProjectAuthContext
+): BaseResponse<List<BillItem>> = getBillListSafe(
+    month = month,
+    billRequestType = if (source.projectId == session.projectId) 2 else 0,
+    auth = source.fields()
+)
 
 suspend fun QzxyService.getBillDetailSafe(
     orderId: String,

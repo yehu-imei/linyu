@@ -10,8 +10,11 @@ import retrofit2.http.FormUrlEncoded
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Query
+import retrofit2.http.QueryMap
 
 interface QzxyService {
+    @GET("/user/project/list")
+    fun getUserProjects(@QueryMap auth: Map<String, String>): Call<ResponseBody>
 
     @FormUrlEncoded
     @POST("/user/login")
@@ -81,7 +84,8 @@ interface QzxyService {
     @GET("/order/query/account/bill/list")
     fun getBillList(
         @Query("month") month: String,
-        @Query("billRequestType") billRequestType: Int = 2
+        @Query("billRequestType") billRequestType: Int = 2,
+        @QueryMap auth: Map<String, String> = emptyMap()
     ): Call<ResponseBody>
 
     @GET("/order/query/account/bill/detail")
@@ -252,8 +256,7 @@ interface QzxyService {
     //  · tcpDevice：云端把指令推给设备（要求设备自带 4G）——本项目原有实现
     //  · bluetooth：**手机当网关**，服务端只下发费率包，阀由手机蓝牙写进设备
     //
-    //  后者对应的设备在服务端 `isBle` 为真（或 smallTypeId == 1），
-    //  对它们调 tcpDevice 必然回 `306 设备不在线`。
+    //  后者按服务端 isBle 标记或用户确认选择；smallTypeId 不是通信通道判据。
     //  详见 docs/蓝牙表适配调研.md
     // ════════════════════════════════════════════
 

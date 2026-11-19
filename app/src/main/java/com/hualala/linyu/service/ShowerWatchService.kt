@@ -7,6 +7,7 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.api.queryUsingSafe
+import com.hualala.linyu.data.deviceInUse
 import com.hualala.linyu.data.CloseDisposition
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.KeyedTaskRegistry
@@ -129,6 +130,7 @@ class ShowerWatchService : Service() {
             delay(if (remain in 1..14) remain * 1000L else 15_000L)
 
             if (!PrefsHelper.isLoggedIn) break
+            if (ShowerController.isClosing(snCode)) continue
 
             // ⚠️ 蓝牙表**不能**用云端订单判断：它没有 4G，服务端 tcpDevice 通道
             // 里根本没有它的订单，queryUsing 永远回 data=null → 会被当成
@@ -137,12 +139,12 @@ class ShowerWatchService : Service() {
             val running: Boolean? =
                 if (PrefsHelper.isBleDevice(snCode)) ShowerController.isRunning(snCode)
                 else orderRunning(snCode)
+            if (ShowerController.isClosing(snCode)) continue
 
             when (running) {
                 true -> Unit                    // 还在用，继续
                 false -> {                      // 订单没了 → 结束
-                    finish(snCode)
-                    return
+                    if (finish(snCode)) return
                 }
                 null -> Unit                    // 请求失败，不确定，下轮再说
             }
@@ -160,32 +162,31 @@ class ShowerWatchService : Service() {
      */
     private suspend fun orderRunning(snCode: String): Boolean? = try {
         val q = NetworkModule.apiService.queryUsingSafe(
-            snCode = snCode, auth = NetworkModule.authFields()
+            snCode = snCode, auth = com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode).fields()
         )
-        when {
-            q.errorCode == 307 || (q.success && q.data?.orderNo != null) -> true
-            q.success -> false
-            else -> null
-        }
+        q.deviceInUse
     } catch (_: Exception) {
         null
     }
 
-    /** 检测到用水结束：结算 → 清理本地状态 → 刷新小组件 → 通知 */
-    private suspend fun finish(snCode: String) {
+    /** 检测到用水结束。手动关阀正在等待确认时，继续监控，不抢先结算。 */
+    private suspend fun finish(snCode: String): Boolean {
         // 已经被别处清理过了（比如用户在 App 里手动停的）——不重复处理
         if (!ShowerController.isRunning(snCode)) {
-            return
+            return true
         }
 
         val startedAt = PrefsHelper.getStartedAt(snCode)
         val elapsed = elapsedSec(startedAt)
         val deviceName = deviceNameFor(snCode)
         val orderNo = ShowerController.activeOrderFor(snCode)?.orderNo ?: ""
+        val settlementContext = try { com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode) }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (_: Exception) { return true }
 
         // ⚠️ 顺序要紧：先清本地状态，小组件的 isRunning() 才会变 false。
         // 以前没有这一步，所以自动关停后小组件永远停在「使用中」。
-        ShowerController.markFinished(snCode)
+        if (!ShowerController.markFinishedFromWatch(snCode)) return !ShowerController.isRunning(snCode)
         LinYuWidget.refreshAll(this)
 
         // 结算要轮询账单（最多约 7 秒），放在清理之后——金额晚一点到没关系，
@@ -194,7 +195,7 @@ class ShowerWatchService : Service() {
         Notifier.showSettling(this, Notifier.ID_AUTO_CLOSED, "设备已自动关停 · $deviceName", elapsed)
 
         val money = try {
-            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName)
+            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName, settlementContext)
         } catch (_: Exception) { null }
         LinYuWidget.refreshAll(this)
 
@@ -206,12 +207,13 @@ class ShowerWatchService : Service() {
         ShowerEvents.notifyFinished(
             ShowerEvents.Finished(snCode, deviceName, elapsed, money, autoClosed = true)
         )
+        return true
     }
 
     /**
      * 用户主动结束用水。
      *
-     * 关阀确认要 5 秒、账单结算最多再要 7 秒，合起来超过小组件广播
+     * 关阀确认和账单结算合起来可能超过小组件广播
      * `goAsync()` 约 10 秒的预算——在广播里做的话，最后那条带金额的通知发不出去。
      * 服务没有这个时限，所以整条流程都在这儿。
      */
@@ -248,12 +250,18 @@ class ShowerWatchService : Service() {
         // 因为订单已经没了）。而开阀后 orderNo 是异步轮询补上的，
         // 「开完水马上停」时本地存的还是空串，那就白丢了结算用的那个直答接口。
         val orderNo = ShowerController.resolveOrderNo(snCode)
+        val settlementContext = try { com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode) }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) {
+            WidgetBridge.clearBusy()
+            LinYuWidget.refreshAll(this)
+            Notifier.showCloseFailed(this, deviceName, e.message ?: "设备账户不可用")
+            return
+        }
 
-        // 先暂时清掉本地状态，让小组件显示「正在关闭」。如果关阀失败，下面会把
-        // 订单和计时完整恢复；App 只有在确认成功后才会收到结束事件。
-        ShowerController.markFinished(snCode)
+        // 保留原订单、项目账户和开始时间直到关阀确认；小组件 busy 提供“正在关闭”反馈。
         // ⚠️ 这里**故意不清 busy**：清了小组件会立刻变成「空闲」，
-        // 用户在关阀那 5 秒里看不到任何"正在进行"的反馈。
+        // 用户在等待关阀确认时看不到操作进度。
         // 留着它，卡片会一直显示「正在关闭…」，等关阀完再一起清（见下）。
         LinYuWidget.refreshAll(this)
 
@@ -302,7 +310,7 @@ class ShowerWatchService : Service() {
         Notifier.showSettling(this, Notifier.ID_FINISHED, "使用结束 · $deviceName", elapsed)
 
         val money = try {
-            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName)
+            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName, settlementContext)
         } catch (_: Exception) { null }
         LinYuWidget.refreshAll(this)
 

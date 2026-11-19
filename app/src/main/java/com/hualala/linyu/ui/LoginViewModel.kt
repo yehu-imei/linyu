@@ -29,11 +29,13 @@ class LoginViewModel : ViewModel() {
     var loginResult by mutableStateOf<Result<LoginData>?>(null)
     var errorMessage by mutableStateOf<String?>(null)
     var smsSent by mutableStateOf(false)
+    val canEditFields: Boolean get() = !isLoading && loginResult?.isSuccess != true
 
     /** 独立的倒计时协程，和发送请求解耦，所以能点击即开始 */
     private var countdownJob: Job? = null
 
     fun login() {
+        if (!canEditFields) return
         if (phone.isBlank()) return
         if (phone.length != 11) { errorMessage = "请输入 11 位手机号"; return }
         if (isSmsMode) {
@@ -63,7 +65,8 @@ class LoginViewModel : ViewModel() {
                     }
                 }
             } finally {
-                password = LoginSecretPolicy.clearPassword(password)
+                // 成功时由登录页先提交系统自动填充会话，再立即清空内存中的输入。
+                if (loginResult?.isSuccess != true) password = LoginSecretPolicy.clearPassword(password)
                 isLoading = false
             }
         }
@@ -127,10 +130,14 @@ class LoginViewModel : ViewModel() {
     }
 
     fun switchMode() {
+        if (!canEditFields) return
         isSmsMode = !isSmsMode
         errorMessage = null
         password = ""
         smsCode = ""
     }
-    fun resetResult() { loginResult = null }
+    fun resetResult() {
+        password = LoginSecretPolicy.clearPassword(password)
+        loginResult = null
+    }
 }

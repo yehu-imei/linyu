@@ -22,14 +22,14 @@ object DeviceInfoCache {
     private const val TTL_MS = 60_000L
     private const val MAX_ENTRIES = 64
 
-    private data class Entry(val at: Long, val info: DeviceInfo)
+    private data class Entry(val at: Long, val owner: String, val info: DeviceInfo)
 
     private val map = LinkedHashMap<String, Entry>()
 
     @Synchronized
-    private fun cached(mac: String): DeviceInfo? {
+    private fun cached(mac: String, owner: String): DeviceInfo? {
         val e = map[mac] ?: return null
-        if (System.currentTimeMillis() - e.at > TTL_MS) {
+        if (e.owner != owner || System.currentTimeMillis() - e.at > TTL_MS) {
             map.remove(mac)
             return null
         }
@@ -37,12 +37,12 @@ object DeviceInfoCache {
     }
 
     @Synchronized
-    private fun store(mac: String, info: DeviceInfo) {
+    private fun store(mac: String, owner: String, info: DeviceInfo) {
         // 简单 LRU：超限就丢最早插入的那个
         if (map.size >= MAX_ENTRIES) {
             map.keys.firstOrNull()?.let { map.remove(it) }
         }
-        map[mac] = Entry(System.currentTimeMillis(), info)
+        map[mac] = Entry(System.currentTimeMillis(), owner, info)
     }
 
     /**
@@ -66,15 +66,18 @@ object DeviceInfoCache {
      * @param force 强制刷新（忽略缓存）
      */
     suspend fun load(mac: String, force: Boolean = false): BaseResponse<DeviceInfo> {
+        val session = NetworkModule.session()
         if (mac.isEmpty()) return BaseResponse(false, null)
-        if (!force) cached(mac)?.let { return BaseResponse(true, it) }
+        if (!force) cached(mac, session.owner)?.let { return BaseResponse(true, it) }
 
         var first: BaseResponse<DeviceInfo>? = null
         for ((index, candidate) in MacFormat.lookupVariants(mac).withIndex()) {
             val resp = NetworkModule.apiService.getDeviceInfoSafe(candidate)
             if (index == 0) first = resp
-            resp.data?.let {
-                store(mac, it)
+            resp.data?.takeIf { resp.success }?.let {
+                ProjectAuthRepository.requireCurrent(session)
+                ProjectAuthRepository.rememberDevice(it, session)
+                store(mac, session.owner, it)
                 return resp
             }
             // 服务端**明确报错**（如被挤下线）换写法也是同样的错，原样返回交给上层 checkKick；

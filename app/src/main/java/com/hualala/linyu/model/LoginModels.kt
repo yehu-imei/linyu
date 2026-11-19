@@ -76,12 +76,17 @@ data class OrderStatus(
     val orderNo: String? = null,
     val state: Int? = null,
     val snCode: String? = null,
-    val isOwner: Boolean = true
+    val isOwner: Boolean? = null
 )
 
 data class BillItem(
-    val consumeBillDTO: BillDTO
-)
+    val consumeBillDTO: BillDTO,
+    val sourceProjectId: String? = null,
+    val sourceAccountId: String? = null
+) {
+    fun belongsTo(projectId: String, accountId: String): Boolean =
+        sourceProjectId == projectId && sourceAccountId == accountId
+}
 
 data class BillDTO(
     /** 账单**序号**（7 位，如 `9564403`）。⚠️ 和 `orderNo` 不是一回事，别拿来互相比 */
@@ -95,7 +100,12 @@ data class BillDTO(
      * 以前没解析它，`settleAmount` 只能拿 `orderId` 去比 `orderNo`，永远匹配不上，
      * 于是结束通知永远显示「无消费」。字段可空：Gson 反序列化时缺字段就是 null。
      */
-    val orderNo: String? = null
+    val orderNo: String? = null,
+    val deviceTypeName: String? = null,
+    val deviceDescription: String? = null,
+    val dealDate: String? = null,
+    val createTime: String? = null,
+    val thirdTradeMoney: String? = null
 ) {
     /** 设备名：龙川北苑 3号楼南 320房 */
     val displayDesc: String get() {
@@ -104,8 +114,13 @@ data class BillDTO(
     }
 
     /** 是否饮水机账单 */
-    val isDrinkingWater: Boolean get() =
-        description.contains("饮水") || description.contains("直饮") || description.contains("冷水")
+    val isDrinkingWater: Boolean get() {
+        val name = description.substringAfter(':')
+        return listOf(description, deviceTypeName.orEmpty(), deviceDescription.orEmpty()).any {
+            it.contains("饮水") || it.contains("直饮") || it.contains("冷水") || it.contains("开水机") ||
+                it.contains("开水器")
+        } || listOf("开水", "温水").any { name.startsWith(it) || deviceTypeName == it }
+    }
 
     /** 设备类型标签：饮水机 / 洗手台热水器 / 卫生间热水器 */
     val deviceTypeLabel: String get() {

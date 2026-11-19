@@ -17,6 +17,18 @@ import org.junit.Test
  * 而且刻意用**多种命名变体**来测，避免以后又变成打地鼠。
  */
 class DeviceTypeTest {
+    @Test fun `drinking warm cold and hot follow names not numeric small type IDs`() {
+        val warm = device("饮水机-测试楼", bigTypeId = 5, smallTypeId = 3).copy(smallTypeName = "温水")
+        assertEquals("直饮水机 · 温水", warm.typeLabel)
+        assertEquals("正在接温水", warm.statusText)
+        assertEquals("🚰", warm.typeEmoji)
+        assertFalse(warm.isHotWater)
+        assertFalse(warm.needsBluetoothControl)
+        assertEquals("直饮水机 · 热水", warm.copy(smallTypeId = 99, smallTypeName = "开水").typeLabel)
+        assertEquals("直饮水机 · 冷水", warm.copy(smallTypeId = 2, smallTypeName = "冷水").typeLabel)
+        assertEquals("直饮水机", warm.copy(smallTypeName = null).typeLabel)
+        assertEquals("正在接水", warm.copy(smallTypeName = null).statusText)
+    }
 
     private fun device(
         name: String,

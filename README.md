@@ -3,10 +3,10 @@
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Kotlin-blue.svg)](https://kotlinlang.org)
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose-purple.svg)](https://developer.android.com/jetpack/compose)
-[![Version](https://img.shields.io/badge/Version-v3.1.1-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
+[![Version](https://img.shields.io/badge/Version-v3.1.2-orange.svg)](https://github.com/yehu-imei/linyu/releases/latest)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**⬇️ [下载 linyu-v3.1.1](https://github.com/yehu-imei/linyu/releases/tag/v3.1.1)**
+**⬇️ [下载 linyu-v3.1.2](https://github.com/yehu-imei/linyu/releases/tag/v3.1.2)**
 
 > Android 支持 Android 8.0+、arm64-v8a；iOS 主应用需 iOS 16+，桌面小组件需 iOS 17+
 >
@@ -14,7 +14,7 @@
 
 趣智校园第三方 Android 客户端，用于控制校园热水器。相比官方 App，提供更简洁的界面和更流畅的操作体验
 
-iOS 独立客户端：[GitHub 仓库](https://github.com/yehu-imei/linyu-ios) · [Gitee 镜像](https://gitee.com/yehu-imei/linyu-ios) · [IPA 发行](https://github.com/yehu-imei/linyu-ios/releases/tag/v3.1.1)
+iOS 独立客户端：[GitHub 仓库](https://github.com/yehu-imei/linyu-ios) · [Gitee 镜像](https://gitee.com/yehu-imei/linyu-ios) · [IPA 发行](https://github.com/yehu-imei/linyu-ios/releases/tag/v3.1.2)
 
 iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guides/blob/main/Tutorial/.ipa%E7%9A%84%E5%AE%89%E8%A3%85.md)，使用桌面小组件时须独立安装 App，并保留小组件扩展和共享权限
 
@@ -24,7 +24,7 @@ iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guid
 
 ### 背景装扮
 
-把喜欢的图片设成界面背景，App 会自动从图里提取主题色作为强调色；主页与使用页各存一套，互不影响。
+把喜欢的图片设成界面背景，App 会自动从图里提取主题色作为强调色；主页与使用页各存一套，互不影响
 
 | 背景设置 | 主页 | 使用页 |
 |---|---|---|
@@ -34,7 +34,7 @@ iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guid
 
 ### 桌面小组件
 
-在桌面直接启停热水，不用打开 App。
+在桌面直接启停热水，不用打开 App
 
 | 2x2 · 空闲 | 2x2 · 使用中 | 2x4 · 设备控制 |
 |---|---|---|
@@ -92,7 +92,7 @@ iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guid
 ### 🔧 其他
 
 - 📜 **内置运行日志** — 内存 + 文件双缓冲，敏感信息自动打码，崩溃自动捕获，可一键分享导出
-- 🔄 **应用内更新** — 自动读取 GitHub Release 比对版本，更新日志读取独立的 [精简文档](docs/APP_CHANGELOG.md)，并可直接在应用内下载安装
+- 🔄 **应用内更新** — 自动比对 GitHub Release，更新日志读取独立的 [精简文档](docs/APP_CHANGELOG.md)，并可直接在应用内下载安装
   - **下载默认走 Gitee 镜像**，更新卡片里可切回 GitHub
   - 更新日志默认只列最近 3 个版本，点「展开全部」看其余
 - 🔐 **加密存储** — 登录凭证加密存储（EncryptedSharedPreferences）
@@ -107,79 +107,6 @@ iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guid
 | [API-qzxy.md](API-qzxy.md) | 趣智校园 API 逆向工程完整参考 |
 | [开发者指南.md](开发者指南.md) | 面向第三方开发者的开发指南 |
 
-## 🔧 适配你的学校
-
-趣智校园在各地的部署不一样，按需要的改动量可以分三类。**先直接下载发行版试，能用就不用管下面的内容。**
-
-### ✅ 多数学校：直接装就能用
-
-**projectId 不需要手动填，也不需要抓包。** 它由服务器在登录时下发，客户端自动获取并沿用到后续所有请求——项目里没有硬编码任何学校的 projectId。
-
-短信验证码登录的 `secret` 同理，是按手机号在本地算出来的（见 `utils/SignUtils.kt`），任何学校、任何手机号都能用：
-
-```
-secret = MD5( 手机号前3位 + 手机号后4位 + "klcx" )
-```
-
-### ⚠️ 部分学校：可用设备类型不同
-
-各校接入的设备不一样，已适配的有三类，App 会自动识别并区分显示：
-
-| 设备 | 识别方式 | 界面表现 |
-|---|---|---|
-| 热水器 | 蓝牙广播名 `KLCXKJ-Water` | 🚿 蓝色，正在沐浴中 |
-| 洗手台 | 设备名以「洗手台」开头 | 🪥 橙色，正在洗漱中 |
-| 直饮水机 | `bigTypeId == 5` | ❄️ / ♨️ 绿色，正在接凉水 / 热水 |
-
-如果设备名格式特殊，设备名简化和类型识别可能不准，可以在 `model/DeviceModels.kt` 里补规则。
-
-### 🔧 少数学校：需要自行改代码重新编译
-
-只有部署方式与常见情况不同时才需要动，一共两处：
-
-| 位置 | 当前值 | 不改会怎样 |
-|---|---|---|
-| BLE 设备名过滤 | `KLCXKJ-Water` | 扫不到附近设备（扫码绑定不受影响，仍可用） |
-| MQTT 服务器 | `tcp://47.107.37.60:1883` | 收不到订单结束后的消费事件（不影响开关阀，HTTP 查询仍可用；无使用中实时扣费） |
-
-改完自行编译即可，构建方法见 [PROJECT.md](PROJECT.md#构建说明)。
-
----
-
-## ⚠️ 已知问题与限制
-
-下面这些多数受服务器或系统限制，当前无法解决。已修复的历史问题见 [CHANGELOG](CHANGELOG.md)。
-
-| 问题 | 说明 |
-|---|---|
-| **挤号检测有延迟** | 靠心跳轮询实现，被挤下线最多 25 秒后才提示 |
-| **无实时扣费** | MQTT 仅在订单结束时推送消费金额，洗澡中看不到实时扣费。官方 App 也是如此 |
-| **一卡通余额需已签约** | 未签约免密支付的学生拿不到真实余额，会自动回退到本地估算并在界面上注明 |
-
-### 🏫 兼容性
-
-| 问题 | 说明 |
-|---|---|
-| **仅支持 64 位设备** | v2.2.2 起安装包只包含 arm64-v8a，纯 32 位的老机型装不上 |
-| **各校部署有差异** | 已在多所学校被实际使用，但各校网络请求接口信息可能不同 |
-| **饮水机功能未实机验证** | 饮水机识别与 UI 已实现，但作者所在学校无直饮水机，实际控制流程未验证 |
-| **Android 12 以下仍需定位权限** | 系统对蓝牙发现的硬性规定，无法绕过；引导卡片里说明了原因 |
-| **自动填充依赖手机密码管理器** | 不同厂商 ROM 行为差异较大，未在多数机型上验证 |
-
-### 🔒 安全
-
-| 问题 | 说明 |
-|---|---|
-| **MQTT 明文** | 趣智校园 MQTT 服务器不支持 TLS，通信内容未加密 |
-| **密码 MD5** | 趣智校园使用 MD5 取后 10 位，安全性低（官方协议限制） |
-
-### 🎨 体验
-
-| 问题 | 说明 |
-|---|---|
-| **深色模式不全** | 登录页和洗澡页为硬编码颜色切换，非完全跟随系统；扫码页固定深色 |
-| **仅中文界面** | 无多语言支持 |
-
 > 欢迎提 Issue 或 PR 帮助改进！
 
 ## 🙏 感谢
@@ -193,7 +120,7 @@ secret = MD5( 手机号前3位 + 手机号后4位 + "klcx" )
 | [@XiaoLoad](https://github.com/XiaoLoad) | 项目优化的宝贵建议 |
 | 各位同学们 | 软件的测试与体验反馈 |
 
-> 每一段代码、每一条建议、每一次测试，都在让「淋浴」变得更好。谢谢你们 🙌
+> 每一段代码、每一条建议、每一次测试，都在让「淋浴」变得更好！谢谢你们 🙌
 
 ## 📄 许可证
 

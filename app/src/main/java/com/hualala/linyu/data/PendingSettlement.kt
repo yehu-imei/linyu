@@ -1,7 +1,6 @@
 package com.hualala.linyu.data
 
 import com.hualala.linyu.model.BillItem
-import kotlin.math.abs
 
 data class PendingSettlement(
     val snCode: String,
@@ -15,7 +14,10 @@ data class PendingSettlement(
      * 事后对账补通知时已经拿不到准确的结束时刻了（服务早就收工、界面也退了），
      * 所以得在这儿存一份，否则补发的通知只能写「消费 ¥x.xx」而写不出用时。
      */
-    val elapsedSec: Int = 0
+    val elapsedSec: Int = 0,
+    val projectId: String? = null,
+    val accountId: String? = null,
+    val authOwner: String? = null
 )
 
 data class SettlementUpdate(
@@ -44,32 +46,19 @@ object SettlementReconciler {
         pending.forEach { item ->
             if (nowMs - item.createdAt > MAX_AGE_MS) return@forEach
 
-            val matched = if (item.orderNo.isNotBlank()) {
-                available.firstOrNull { it.consumeBillDTO.orderNo == item.orderNo }
-            } else {
-                available
-                    .filter { bill ->
-                        val dto = bill.consumeBillDTO
-                        val billTime = BillDateParser.toEpochMillis(dto.consumeDate)
-                        item.deviceName.isNotBlank() &&
-                            dto.displayDesc == item.deviceName &&
-                            billTime >= item.startedAt - TIME_SLACK_MS &&
-                            billTime <= item.createdAt + TIME_SLACK_MS
-                    }
-                    .minByOrNull { bill ->
-                        abs(BillDateParser.toEpochMillis(bill.consumeBillDTO.consumeDate) - item.startedAt)
-                    }
-            }
-
-            val amount = matched?.consumeBillDTO?.consumeMoney?.toDoubleOrNull()
-                ?.takeIf { it.isFinite() && it >= 0.0 }
+            val matched = matchSettlementBill(
+                available, item.orderNo, item.deviceName,
+                fromMs = if (item.startedAt > 0) item.startedAt - TIME_SLACK_MS else 0L,
+                untilMs = item.createdAt + TIME_SLACK_MS
+            )
+            val amount = matched?.confirmedSettlementAmount()
             if (matched == null || amount == null) {
                 remaining += item
                 return@forEach
             }
 
             available.remove(matched)
-            if (amount > 0.0) updates += SettlementUpdate(item.snCode, amount)
+            updates += SettlementUpdate(item.snCode, amount)
         }
 
         return SettlementReconciliation(updates, remaining)

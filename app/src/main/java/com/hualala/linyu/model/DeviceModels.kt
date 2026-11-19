@@ -13,8 +13,7 @@ data class DeviceInfo(
     val bigTypeId: Int? = null,
     val bigTypeName: String? = null,
     /**
-     * 服务端的小类 id。`=1`（名称通常是「热水表」）那类是**只能靠手机蓝牙直连**
-     * 控制的水表，本项目未实现该通道。见 [needsBluetoothControl]。
+     * 服务端的小类 id。编号不代表通信通道，也不能跨项目推定水温。
      */
     val smallTypeId: Int? = null,
     val smallTypeName: String? = null,
@@ -24,15 +23,24 @@ data class DeviceInfo(
      * 比 [smallTypeId] 靠谱：那是我们自己从样本里归纳的规律（样本仅 2 校），
      * 而这个字段是服务端的明确标记。
      *
-     * ⚠️ 可空：旧接口或某些学校可能不返回它。**取不到时不能当成 false**
-     * （会漏判），所以 [needsBluetoothControl] 里是和 [smallTypeId] 取「或」。
+     * 可空：缺失时不推定蓝牙通道。见 [needsBluetoothControl] 的保守判据。
      */
     val isBle: Boolean? = null,
     /** 通信类型 id（服务端字段 `communicationTypeId`），暂未使用，留作诊断 */
     val communicationTypeId: Int? = null,
     /** 真实 MAC。部分设备 `macAddress` 是虚拟的，优先用这个 */
-    val realMac: String? = null
+    val realMac: String? = null,
+    /** 设备所属项目，可能不同于登录默认项目。 */
+    val projectId: Long? = null
 ) {
+    internal val hasDeviceIdentity: Boolean
+        get() {
+            // Gson 可能给未下发的字段赋 null，即使 Kotlin 模型声明为非空。
+            val sn: String? = snCode
+            val mac: String? = macAddress
+            return !sn.isNullOrBlank() && !mac.isNullOrBlank()
+        }
+
     /**
      * 是否属于「只能靠手机蓝牙直连控制」的水表。
      *
@@ -97,9 +105,20 @@ data class DeviceInfo(
             //    （「直饮冷水」已被 ② 的「直饮」覆盖，这里是给只叫「冷水-xxx」的学校兜底）
             deviceName.contains("冷水")
 
-    /** 饮水机是否出热水（否则为冷水） */
+    /** 不按 smallTypeId 猜温度，不同项目的编号可能不同。优先使用明确的类型名称。 */
+    val waterTemperature: String? get() {
+        fun classify(name: String): String? = when {
+            name.contains("温水") -> "温水"
+            name.contains("冷水") || name.contains("凉水") -> "冷水"
+            name.contains("热水") || name.contains("开水") -> "热水"
+            else -> null
+        }
+        return classify(smallTypeName.orEmpty()) ?: classify(deviceName)
+    }
+
+    /** 饮水机是否明确出热水；不能将否直接理解成冷水。 */
     val isHotWater: Boolean get() =
-        deviceName.contains("热") || deviceName.contains("开水") || bigTypeName?.contains("热") == true
+        waterTemperature == "热水"
 
     /** 设备类型名称 */
     val typeName: String get() = when {
@@ -109,7 +128,7 @@ data class DeviceInfo(
     }
 
     val typeEmoji: String get() = when {
-        isDrinkingWater -> if (isHotWater) "♨️" else "❄️"
+        isDrinkingWater -> when (waterTemperature) { "热水" -> "♨️"; "冷水" -> "❄️"; else -> "🚰" }
         deviceName.startsWith("洗手台") -> "🪥"
         else -> "🚿"
     }
@@ -119,7 +138,7 @@ data class DeviceInfo(
      * 措辞与账单里的 [com.hualala.linyu.model.BillDTO.deviceTypeLabel] 保持一致。
      */
     val typeLabel: String get() = when {
-        isDrinkingWater -> if (isHotWater) "直饮水机 · 热水" else "直饮水机 · 冷水"
+        isDrinkingWater -> waterTemperature?.let { "直饮水机 · $it" } ?: "直饮水机"
         deviceName.startsWith("洗手台") -> "洗手台热水器"
         else -> "卫生间热水器"
     }
@@ -131,7 +150,7 @@ data class DeviceInfo(
     }
 
     val statusText: String get() = when {
-        isDrinkingWater -> if (isHotWater) "正在接热水" else "正在接凉水"
+        isDrinkingWater -> waterTemperature?.let { "正在接$it" } ?: "正在接水"
         deviceName.startsWith("洗手台") -> "正在洗漱中"
         else -> "正在沐浴中"
     }

@@ -627,7 +627,7 @@ object WidgetRenderer {
         // 拿到真实余额之后文案也不会变，看着就像一直没生效。
         views.setTextViewText(
             R.id.widget_balance_label,
-            if (BalanceEstimator.hasRealBalance()) "一卡通余额" else "一卡通余额（估算）"
+            if (BalanceEstimator.hasRealBalance()) BalanceEstimator.title() else "一卡通余额（估算）"
         )
 
         val rowIds = arrayOf(
@@ -647,7 +647,7 @@ object WidgetRenderer {
                 views.setTextViewText(rowIds[i][0], b.emoji ?: "🚿")
                 views.setTextViewText(rowIds[i][1], b.name ?: "")
                 views.setTextViewText(rowIds[i][2], b.timeText ?: "")
-                views.setTextViewText(rowIds[i][3], b.moneyText ?: "")
+                views.setTextViewText(rowIds[i][3], MoneyFormat.billAmount(b.moneyText?.removePrefix("-¥ ")))
             }
         }
     }
@@ -782,7 +782,7 @@ object WidgetRenderer {
          * 文案刻意短——小组件的忙碌面板只有一行，2x2 上大约只放得下 5 个字。
          * 「可以再点」这个意思靠徽章变成「占用中」+ 按钮仍然可点来传达。
          */
-        IN_USE_BY_OTHERS("他人使用中"),
+        IN_USE_BY_OTHERS("占用中"),
 
         /**
          * 开阀失败（服务端拒绝、余额不足之类）。

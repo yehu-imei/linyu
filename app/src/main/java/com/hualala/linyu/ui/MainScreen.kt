@@ -2,6 +2,7 @@ package com.hualala.linyu.ui
 
 import android.content.Intent
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -17,27 +18,35 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.ExperimentalMaterialApi
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.pullrefresh.PullRefreshIndicator
 import androidx.compose.material.pullrefresh.pullRefresh
 import androidx.compose.material.pullrefresh.rememberPullRefreshState
-import androidx.compose.material.ripple.rememberRipple
+import androidx.compose.material.ripple
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -46,6 +55,7 @@ import androidx.compose.ui.res.painterResource
 import com.hualala.linyu.QrScanActivity
 import com.hualala.linyu.R
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.data.HomeDeviceSection
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.model.NearbyDevice
 import com.hualala.linyu.ui.theme.AppColors
@@ -61,6 +71,9 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var visible by remember { mutableStateOf(false) }
+    var editMode by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = editMode && !viewModel.isShowering) { editMode = false }
+    val layout = viewModel.homeDeviceLayout
     // 是否已获得扫描权限。做成状态：用户授权后要立刻反映到界面上
     var hasScanPerm by remember { mutableStateOf(ScanPermission.granted(context)) }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -153,14 +166,14 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     // 直接显示出来会先亮一个错数字再跳变。宁可先显示「—」——
     // 但真实余额不用等账单，它是现成的数字。
     val displayBalance = remember(
-        viewModel.billList, viewModel.billsLoaded, viewModel.campusBalance,
+        viewModel.balanceBills, viewModel.billsLoaded, viewModel.campusBalance,
         viewModel.walletBalance,
         PrefsHelper.manualBalance, PrefsHelper.manualBalanceTime
     ) {
         // 真实余额（一卡通或钱包）不用等账单，是现成的数字；
         // 只有要走估算时才必须等账单到位，否则减数为 0 会先亮一个错数字。
         if (viewModel.campusBalance != null || viewModel.walletBalance != null || viewModel.billsLoaded)
-            BalanceEstimator.estimate(viewModel.billList)
+            BalanceEstimator.estimate(viewModel.balanceBills)
         else null
     }
 
@@ -197,6 +210,12 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                                     Text("Hualala", color = AppColors.TextSecondary, fontSize = 14.sp)
                                 }
                                 Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(40.dp).clip(CircleShape).background(AppColors.Card),
+                                        contentAlignment = Alignment.Center) {
+                                        EditModeButton(editMode, onClick = { editMode = !editMode },
+                                            modifier = Modifier.size(40.dp))
+                                    }
+                                    Spacer(Modifier.width(8.dp))
                                     // 扫码按钮
                                     Box(Modifier.size(40.dp).clip(CircleShape).background(AppColors.Card),
                                         contentAlignment = Alignment.Center) {
@@ -229,83 +248,48 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                             viewModel.activeOrders.forEach { order ->
                                 item { ActiveOrderCard(order, viewModel, phone) }
                             }
-                        } else if (viewModel.lastDeviceMac.isNotEmpty()) {
-                            item {
-                                Text("上次使用设备", fontWeight = FontWeight.Bold, fontSize = 18.sp,
-                                    color = AppColors.TextPrimary)
-                            }
-                            item { LastDeviceCard(viewModel, phone) }
                         }
 
-                        item {
-                            Row(Modifier.fillMaxWidth().padding(top = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Text("附近设备", fontWeight = FontWeight.Bold, fontSize = 18.sp,
-                                    color = AppColors.TextPrimary)
-                                // 余额在 LazyColumn 外已算好并缓存
-                                Text(displayBalance?.let { "${BalanceEstimator.title()} ¥${BalanceEstimator.formatMoney(it)}" } ?: "${BalanceEstimator.title()} ¥ —",
-                                    color = AppColors.TextSecondary, fontSize = 14.sp)
-                            }
-                        }
+                        val sections = layout.orderedSections
+                        sections.forEachIndexed { index, section ->
+                            val sectionVisible = layout.isVisible(section)
+                            if (!editMode && !sectionVisible) return@forEachIndexed
+                            if (!editMode && section == HomeDeviceSection.LAST_USED &&
+                                (viewModel.activeOrders.isNotEmpty() || viewModel.lastDeviceMac.isBlank())
+                            ) return@forEachIndexed
 
-                        // 寝室筛选状态
-                        if (viewModel.hasBoundRoom) {
-                            item {
-                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                    // 存的就是寝室键，但老版本存过 `320房` / 完整设备名，
-                                    // 过一遍 roomKey 让两种历史值都显示成同一个样子
-                                    Text("🏠 已筛选：${DeviceInfo.roomKey(viewModel.boundRoom) ?: viewModel.boundRoom}",
-                                        color = AppColors.Accent, fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium)
-                                    Spacer(Modifier.width(8.dp))
-                                    TextButton(onClick = {
-                                        viewModel.applyBoundRoom("")
-                                        viewModel.toastMessage = "已取消寝室筛选"
-                                    }, contentPadding = PaddingValues(0.dp)) {
-                                        Text("取消筛选", fontSize = 12.sp, color = AppColors.TextSecondary)
+                            item("home-section:${section.name}") {
+                                HomeDeviceSectionHeader(
+                                    title = section.title,
+                                    editing = editMode,
+                                    visible = sectionVisible,
+                                    canMoveUp = index > 0,
+                                    canMoveDown = index < sections.lastIndex,
+                                    onMove = { viewModel.moveHomeSection(section, it) },
+                                    onToggle = { viewModel.toggleHomeSection(section) }
+                                ) {
+                                    if (section == HomeDeviceSection.NEARBY) {
+                                        val title = BalanceEstimator.title()
+                                        val amount = displayBalance?.let(BalanceEstimator::formatMoney) ?: "—"
+                                        Text("$title ¥$amount", color = AppColors.TextSecondary, fontSize = 14.sp,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
                             }
-                        }
-
-                        if (viewModel.isScanning) {
-                            item {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = AppColors.Accent)
-                                        Spacer(Modifier.width(8.dp))
-                                        Text("扫描中...", fontSize = 13.sp, color = AppColors.TextSecondary)
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        LegendDot(AppColors.Success, "强")
-                                        Spacer(Modifier.width(8.dp))
-                                        LegendDot(AppColors.Warning, "中")
-                                        Spacer(Modifier.width(8.dp))
-                                        LegendDot(AppColors.Danger, "弱")
-                                    }
+                            when (section) {
+                                HomeDeviceSection.LAST_USED -> item("last-device") {
+                                    LastUsedDeviceCard(viewModel, phone, editMode, sectionVisible)
                                 }
+                                HomeDeviceSection.FAVORITES -> favoriteDeviceItems(viewModel, editMode, sectionVisible)
+                                HomeDeviceSection.NEARBY -> nearbyDeviceItems(
+                                    viewModel = viewModel,
+                                    devices = if (editMode) viewModel.nearbyDevices.toList() else filteredDevices,
+                                    editing = editMode,
+                                    visible = sectionVisible,
+                                    hasScanPerm = hasScanPerm,
+                                    onScan = ::scanWithPermission
+                                )
                             }
-                        }
-
-                        if (!hasScanPerm) {
-                            // 未授权时不自动弹系统对话框，改为显式按钮，用户自己决定何时授权
-                            item { ScanPermissionCard { scanWithPermission() } }
-                        } else if (filteredDevices.isEmpty() && !viewModel.isScanning) {
-                            item {
-                                Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        if (viewModel.hasBoundRoom) "未找到寝室内的热水器"
-                                        else "未发现热水器",
-                                        color = AppColors.TextSecondary
-                                    )
-                                }
-                            }
-                        }
-
-                        items(filteredDevices, key = { it.mac }) { device ->
-                            DeviceCard(device) { viewModel.fetchDeviceInfo(device.mac) }
                         }
 
                         item { Spacer(Modifier.height(110.dp)) }
@@ -324,10 +308,17 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     }
 
     if (viewModel.showDeviceDetail) {
-        val isActive = viewModel.selectedDevice?.snCode?.let { viewModel.isDeviceActive(it) } ?: false
-        DeviceDetailDialog(viewModel.selectedDevice, isActive, viewModel.isOwner,
-            onDismiss = { viewModel.showDeviceDetail = false },
-            onConfirm = { viewModel.startShower(phone) })
+        viewModel.selectedDevice?.let { device ->
+            val favorite = viewModel.favoriteFor(device)
+            DeviceDetailDialog(device, viewModel.isDeviceActive(device.snCode), viewModel.isOwner,
+                onDismiss = { viewModel.showDeviceDetail = false },
+                onConfirm = { viewModel.startShower(phone) },
+                isFavorite = favorite != null,
+                onFavorite = {
+                    if (favorite != null) viewModel.removeFavorite(favorite.key)
+                    else viewModel.addFavorite(device.macAddress, device)
+                })
+        }
     }
 
     // ── 开阀失败 ──
@@ -368,7 +359,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                         Spacer(Modifier.height(6.dp))
                         bills.forEach { bill ->
                             Text(
-                                "· ¥${bill.consumeMoney ?: "?"}   ${bill.consumeDate?.take(16) ?: ""}",
+                                "· ¥${MoneyFormat.formatOrNull(bill.consumeMoney) ?: "?"}   ${bill.consumeDate?.take(16) ?: ""}",
                                 color = AppColors.TextSecondary, fontSize = 12.sp
                             )
                         }
@@ -578,15 +569,152 @@ private fun ActiveOrderCard(order: com.hualala.linyu.model.ActiveOrder, viewMode
     }
 }
 
+private fun LazyListScope.favoriteDeviceItems(viewModel: MainViewModel, editing: Boolean, visible: Boolean) {
+    val favorites = viewModel.homeDeviceLayout.favorites
+    if (favorites.isEmpty()) {
+        item("favorites-empty") {
+            Text("点编辑，从设备列表添加常用设备", color = AppColors.TextSecondary, fontSize = 13.sp)
+        }
+    }
+    itemsIndexed(favorites, key = { _, favorite -> "favorite:${favorite.key}" }) { index, favorite ->
+        val info = favorite.device
+        HomeDeviceCard(
+            info.displayName, info.macAddress, info.typeEmoji,
+            modifier = Modifier.alpha(if (visible) 1f else 0.45f),
+            onClick = if (editing) null else { { viewModel.openFavorite(favorite) } }
+        ) {
+            if (editing) {
+                HomeMoveButtons(index > 0, index < favorites.lastIndex) { viewModel.moveFavorite(favorite.key, it) }
+                FavoriteButton(true) { viewModel.removeFavorite(favorite.key) }
+            } else {
+                Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.KeyboardArrowRight, null, tint = AppColors.TextSecondary)
+                }
+            }
+        }
+    }
+}
+
+private fun LazyListScope.nearbyDeviceItems(
+    viewModel: MainViewModel,
+    devices: List<NearbyDevice>,
+    editing: Boolean,
+    visible: Boolean,
+    hasScanPerm: Boolean,
+    onScan: () -> Unit
+) {
+    if (!editing && viewModel.hasBoundRoom) item("nearby-room") {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("🏠 已筛选：${DeviceInfo.roomKey(viewModel.boundRoom) ?: viewModel.boundRoom}",
+                color = AppColors.Accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.width(8.dp))
+            TextButton(onClick = {
+                viewModel.applyBoundRoom("")
+                viewModel.toastMessage = "已取消寝室筛选"
+            }, contentPadding = PaddingValues(0.dp)) {
+                Text("取消筛选", fontSize = 12.sp, color = AppColors.TextSecondary)
+            }
+        }
+    }
+
+    if (viewModel.isScanning) item("nearby-scanning") {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = AppColors.Accent)
+                Spacer(Modifier.width(8.dp))
+                Text("扫描中...", fontSize = 13.sp, color = AppColors.TextSecondary)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                LegendDot(AppColors.Success, "强")
+                Spacer(Modifier.width(8.dp))
+                LegendDot(AppColors.Warning, "中")
+                Spacer(Modifier.width(8.dp))
+                LegendDot(AppColors.Danger, "弱")
+            }
+        }
+    }
+
+    if (!hasScanPerm) {
+        item("nearby-permission") { ScanPermissionCard(onScan) }
+    } else if (devices.isEmpty() && !viewModel.isScanning) {
+        item("nearby-empty") {
+            Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    if (viewModel.hasBoundRoom && !editing) "未找到寝室内的设备" else "未发现附近设备",
+                    color = AppColors.TextSecondary
+                )
+            }
+        }
+    }
+
+    items(devices, key = { "nearby:${it.mac}" }) { device ->
+        DeviceCard(
+            device,
+            modifier = Modifier.alpha(if (visible) 1f else 0.45f),
+            onClick = if (editing) null else { { viewModel.fetchDeviceInfo(device.mac) } }
+        ) {
+            if (editing) {
+                val favorite = viewModel.favoriteFor(device.deviceInfo)
+                FavoriteButton(favorite != null) {
+                    if (favorite != null) viewModel.removeFavorite(favorite.key)
+                    else viewModel.addFavorite(device.mac, device.deviceInfo)
+                }
+            } else {
+                Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.KeyboardArrowRight, null, tint = AppColors.TextSecondary)
+                }
+            }
+        }
+    }
+}
+
 @Composable
-private fun LastDeviceCard(viewModel: MainViewModel, phone: String) {
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+private fun LastUsedDeviceCard(viewModel: MainViewModel, phone: String, editing: Boolean, visible: Boolean) {
+    if (viewModel.lastDeviceMac.isBlank()) {
+        Text("暂无使用记录", color = AppColors.TextSecondary, fontSize = 13.sp)
+        return
+    }
+    HomeDeviceCard(
+        name = viewModel.lastDeviceName.ifEmpty { "热水器" },
+        mac = viewModel.lastDeviceMac,
+        emoji = viewModel.lastDeviceEmoji,
+        modifier = Modifier.alpha(if (visible) 1f else 0.45f)
+    ) {
+        if (editing) {
+            val favorite = viewModel.lastDeviceFavorite()
+            FavoriteButton(favorite != null) {
+                if (favorite != null) viewModel.removeFavorite(favorite.key)
+                else viewModel.addFavorite(viewModel.lastDeviceMac, expectedSn = viewModel.lastDeviceSnCode)
+            }
+        } else {
+            Button(
+                onClick = { viewModel.startLastDevice(phone) },
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Accent)
+            ) { Text("开始") }
+        }
+    }
+}
+
+@Composable
+private fun HomeDeviceCard(
+    name: String,
+    mac: String,
+    emoji: String,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    actions: @Composable RowScope.() -> Unit
+) {
+    val shape = RoundedCornerShape(22.dp)
+    val clickModifier = if (onClick == null) Modifier else Modifier.clip(shape).clickable(onClick = onClick)
+    Card(modifier.fillMaxWidth().then(clickModifier), shape = shape,
         colors = CardDefaults.cardColors(containerColor = AppColors.Card),
         border = BorderStroke(0.8.dp, AppColors.Border), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(48.dp).clip(RoundedCornerShape(14.dp))
                 .background(
-                    when (viewModel.lastDeviceEmoji) {
+                    when (emoji) {
                         "🪥" -> Color(0xFFFFCC80)
                         "❄️", "♨️", "🚰" -> Color(0xFF10B981)
                         // 固定色，与「附近设备」卡片保持一致；不跟随背景主题色变化
@@ -594,7 +722,7 @@ private fun LastDeviceCard(viewModel: MainViewModel, phone: String) {
                     }
                 ),
                 contentAlignment = Alignment.Center) {
-                DeviceGlyph(viewModel.lastDeviceEmoji, emojiSize = 22.sp, iconSize = 26.dp)
+                DeviceGlyph(emoji, emojiSize = 22.sp, iconSize = 26.dp)
             }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
@@ -602,23 +730,72 @@ private fun LastDeviceCard(viewModel: MainViewModel, phone: String) {
                 // （房号在末尾、MAC 的厂商前缀是固定的）。同时彻底不换行——
                 // 有的手机系统字体调到很大，普通 Text 会折成两三行把卡片撑变形。
                 TailEllipsisText(
-                    text = viewModel.lastDeviceName.ifEmpty { "热水器" },
+                    text = name,
                     modifier = Modifier.fillMaxWidth(),
                     fontWeight = FontWeight.SemiBold,
                     color = AppColors.TextPrimary
                 )
                 Spacer(Modifier.height(4.dp))
                 TailEllipsisText(
-                    text = "MAC: ${viewModel.lastDeviceMac}",
+                    text = "MAC: $mac",
                     modifier = Modifier.fillMaxWidth(),
                     color = AppColors.TextSecondary,
                     fontSize = 12.sp
                 )
             }
-            Button(onClick = { viewModel.startLastDevice(phone) },
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Accent)) { Text("开始") }
+            actions()
         }
+    }
+}
+
+@Composable
+private fun HomeMoveButtons(canMoveUp: Boolean, canMoveDown: Boolean, onMove: (Int) -> Unit) {
+    IconButton(onClick = { onMove(-1) }, enabled = canMoveUp, modifier = Modifier.size(36.dp)) {
+        Icon(Icons.Default.KeyboardArrowUp, "上移", tint =
+            if (canMoveUp) AppColors.Accent else AppColors.TextSecondary.copy(alpha = 0.3f))
+    }
+    IconButton(onClick = { onMove(1) }, enabled = canMoveDown, modifier = Modifier.size(36.dp)) {
+        Icon(Icons.Default.KeyboardArrowDown, "下移", tint =
+            if (canMoveDown) AppColors.Accent else AppColors.TextSecondary.copy(alpha = 0.3f))
+    }
+}
+
+@Composable
+private fun HomeDeviceSectionHeader(
+    title: String,
+    editing: Boolean,
+    visible: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onMove: (Int) -> Unit,
+    onToggle: () -> Unit,
+    trailing: @Composable RowScope.() -> Unit
+) {
+    // 浏览与编辑共用标题行的高度，右侧出现 36dp 工具按钮时卡片不会被向下挤。
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 36.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(if (visible) title else "$title（已隐藏）", Modifier.weight(1f),
+            fontSize = 18.sp, fontWeight = FontWeight.Bold,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            color = if (visible) AppColors.TextPrimary else AppColors.TextSecondary)
+        if (editing) {
+            HomeMoveButtons(canMoveUp, canMoveDown, onMove)
+            IconButton(onClick = onToggle, modifier = Modifier.size(36.dp)) {
+                Icon(painterResource(if (visible) R.drawable.ic_visibility_off else R.drawable.ic_visibility),
+                    if (visible) "隐藏$title" else "显示$title",
+                    tint = if (visible) AppColors.TextSecondary else AppColors.Success)
+            }
+        } else trailing()
+    }
+}
+
+@Composable
+internal fun FavoriteButton(selected: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+        Icon(Icons.Default.Star, if (selected) "取消收藏" else "收藏设备",
+            tint = if (selected) AppColors.Accent else AppColors.TextSecondary)
     }
 }
 
@@ -661,7 +838,12 @@ private fun ScanPermissionCard(onGrant: () -> Unit) {
 }
 
 @Composable
-private fun DeviceCard(device: NearbyDevice, onClick: () -> Unit) {
+private fun DeviceCard(
+    device: NearbyDevice,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)?,
+    actions: @Composable RowScope.() -> Unit
+) {
     val signalColor = when {
         device.rssi >= -70 -> AppColors.Success
         device.rssi >= -85 -> AppColors.Warning
@@ -678,14 +860,15 @@ private fun DeviceCard(device: NearbyDevice, onClick: () -> Unit) {
     )
 
     Card(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .scale(pressScale)
             .clip(RoundedCornerShape(22.dp)) // 让点击涟漪也贴合卡片圆角
             .clickable(
+                enabled = onClick != null,
                 interactionSource = interactionSource,
-                indication = rememberRipple(color = AppColors.Accent.copy(alpha = 0.25f)),
-                onClick = onClick
+                indication = ripple(color = AppColors.Accent.copy(alpha = 0.25f)),
+                onClick = { onClick?.invoke() }
             ),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = AppColors.Card),
@@ -705,7 +888,7 @@ private fun DeviceCard(device: NearbyDevice, onClick: () -> Unit) {
                 Spacer(Modifier.height(2.dp))
                 Text(device.mac, color = AppColors.TextSecondary, fontSize = 12.sp)
             }
-            Icon(Icons.Default.KeyboardArrowRight, null, tint = AppColors.TextSecondary)
+            actions()
         }
     }
 }
