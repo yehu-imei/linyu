@@ -42,6 +42,16 @@ class ParityPrefsTest {
 
     @After fun tearDown() { field.set(PrefsHelper, previous) }
 
+    @Test fun `keep screen on defaults to enabled and reads the persisted choice`() {
+        assertTrue(PrefsHelper.keepScreenOnDuringUse)
+        PrefsHelper.keepScreenOnDuringUse = false
+        assertEquals(false, values["keepScreenOnDuringUse"])
+        assertFalse(PrefsHelper.keepScreenOnDuringUse)
+        // 读取持久化值而非仅在界面内记忆，重新进入页面仍遵循用户选择。
+        values["keepScreenOnDuringUse"] = true
+        assertTrue(PrefsHelper.keepScreenOnDuringUse)
+    }
+
     @Test fun `quota is isolated by account and project and survives same account relogin`() {
         PrefsHelper.accountId = "account-a"
         PrefsHelper.projectId = "school-a"

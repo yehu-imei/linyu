@@ -189,6 +189,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                     location = viewModel.selectedDevice?.locationOnly ?: "",
                     remaining = viewModel.showerRemaining,
                     elapsedSec = viewModel.showerElapsedSec,
+                    isUsing = viewModel.isShowerDeviceActive,
                     autoDisConSec = viewModel.autoDisConSec,
                     isStopping = viewModel.isStopping,
                     onStopClick = { viewModel.stopShower() },
