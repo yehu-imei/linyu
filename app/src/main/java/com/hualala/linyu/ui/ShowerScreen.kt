@@ -12,20 +12,26 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.hualala.linyu.ui.theme.AppColors
 import com.hualala.linyu.ui.theme.LocalThemeMode
 import com.hualala.linyu.ui.theme.ThemeMode
 import com.hualala.linyu.utils.BackgroundManager
 import com.hualala.linyu.utils.BackgroundState
+import com.hualala.linyu.utils.PrefsHelper
 
 @Composable
 fun ShowerScreen(
@@ -34,11 +40,14 @@ fun ShowerScreen(
     location: String,
     remaining: String,
     elapsedSec: Int,
+    isUsing: Boolean,
     autoDisConSec: Int = 0,
     isStopping: Boolean = false,
     onStopClick: () -> Unit,
     onMinimizeClick: () -> Unit = {}
 ) {
+    val keepScreenOn = PrefsHelper.keepScreenOnDuringUse
+    KeepScreenOnDuringUse(isUsing && keepScreenOn)
     BackHandler(onBack = onMinimizeClick)
     val minutes = elapsedSec / 60
     val seconds = elapsedSec % 60
@@ -120,6 +129,10 @@ fun ShowerScreen(
                 }
             }
 
+            Spacer(Modifier.height(8.dp))
+            Text(if (keepScreenOn) "屏幕常亮：开" else "屏幕常亮：关",
+                fontSize = 12.sp, color = AppColors.TextSecondary)
+
             // 自动关停倒计时
             if (autoDisConSec > 0) {
                 val dMin = autoDisConSec / 60
@@ -189,6 +202,26 @@ fun ShowerScreen(
                 contentDescription = "返回（不结束用水）",
                 tint = AppColors.TextPrimary
             )
+        }
+    }
+}
+
+/** 使用页退出组合或进入后台时释放；不唤醒屏幕，也不干预电源键锁屏。 */
+@Composable
+internal fun KeepScreenOnDuringUse(enabled: Boolean) {
+    val view = LocalView.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(view, lifecycle, enabled) {
+        val previous = view.keepScreenOn
+        fun update() {
+            view.keepScreenOn = enabled && lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        val observer = LifecycleEventObserver { _, _ -> update() }
+        lifecycle.addObserver(observer)
+        update()
+        onDispose {
+            lifecycle.removeObserver(observer)
+            view.keepScreenOn = previous
         }
     }
 }

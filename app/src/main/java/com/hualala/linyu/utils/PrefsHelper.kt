@@ -418,6 +418,10 @@ object PrefsHelper {
     var notifyAlert: Boolean get() = prefs.getBoolean("notifyAlert", true)
         set(v) = prefs.edit().putBoolean("notifyAlert", v).apply()
 
+    /** 仅在使用页前台显示期间保持屏幕常亮，默认开启。 */
+    var keepScreenOnDuringUse: Boolean get() = prefs.getBoolean("keepScreenOnDuringUse", true)
+        set(v) = prefs.edit().putBoolean("keepScreenOnDuringUse", v).apply()
+
     /**
      * 「消费趋势」卡片（钱包页那张统计图）是否显示。
      *

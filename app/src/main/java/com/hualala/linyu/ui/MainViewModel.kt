@@ -236,6 +236,9 @@ class MainViewModel : ViewModel() {
 
     // 用于当前洗澡的设备 snCode
     private var showerSnCode: String? = null
+    /** 自动关停后页面可能仍等待确认，以当前设备的活跃订单判断是否还在使用。 */
+    val isShowerDeviceActive: Boolean
+        get() = activeOrders.any { it.snCode == showerSnCode }
 
     private var currentOrderNo: String? = null
     /** 本轮扫描里已经发起过设备信息查询的 MAC（见 [addDevice]）；[startScan] 时清空 */

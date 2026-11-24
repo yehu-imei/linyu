@@ -390,6 +390,10 @@ private fun SettingsScreen(
         }
         Spacer(Modifier.height(16.dp))
         val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }
+        if (UserCardType.NOTIFY !in visibleCards) {
+            KeepScreenOnCard()
+            Spacer(Modifier.height(16.dp))
+        }
         visibleCards.forEachIndexed { index, type ->
             EditableCardSlot(
                 editMode = editMode,
@@ -415,6 +419,10 @@ private fun SettingsScreen(
                 UserCardContent(type, phone, useCode, viewModel, onShowBackground, onShowLog)
             }
             Spacer(Modifier.height(16.dp))
+            if (type == UserCardType.NOTIFY) {
+                KeepScreenOnCard()
+                Spacer(Modifier.height(16.dp))
+            }
         }
         OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(14.dp),

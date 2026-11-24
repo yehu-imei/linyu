@@ -248,6 +248,27 @@ internal fun TrendToggleCard() {
 }
 
 @Composable
+internal fun KeepScreenOnCard() {
+    var enabled by remember { mutableStateOf(PrefsHelper.keepScreenOnDuringUse) }
+    BaseCard {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("使用时保持屏幕常亮", modifier = Modifier.weight(1f), fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold, color = AppColors.TextPrimary)
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = enabled,
+                onCheckedChange = { enabled = it; PrefsHelper.keepScreenOnDuringUse = it },
+                colors = SwitchDefaults.colors(checkedTrackColor = AppColors.Accent)
+            )
+        }
+    }
+}
+
+@Composable
 internal fun NotifyRow(title: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
