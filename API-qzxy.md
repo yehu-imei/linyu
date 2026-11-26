@@ -1,6 +1,6 @@
 # 趣智校园第三方客户端开发指南
 
-本文档介绍如何通过趣智校园 API 开发自己的第三方校园热水器客户端。基于淋浴 (LinYu) 项目的逆向工程成果。
+本文档介绍如何通过趣智校园 API 开发自己的第三方校园热水器客户端，并补充了部分联网吹风机的实测接口。基于淋浴 (LinYu) 项目的逆向工程成果及社区贡献。
 
 ---
 
@@ -36,6 +36,8 @@
 | 登录 | POST | `/user/login` | ❌ | 获取 loginCode 等认证信息 |
 | 钱包余额 | GET | `/account/wallet` | ✅ | 获取趣智校园钱包余额 |
 | 设备信息 | GET | `/device/info/mac` | ✅ | 通过 MAC 地址获取设备详情 |
+| 吹风套餐 | GET | `/device/mode/list` | ✅ | 获取可选套餐、价格和时长，见 [4.12](#412-联网吹风机) |
+| 按套餐启动 | POST | `/order/tcpDevice/downRate/modeOrder` | ✅ | 启动联网吹风机，`xfModel` 传所选套餐的 `modeId`，见 [4.12](#412-联网吹风机) |
 | 开始洗澡 | POST | `/order/tcpDevice/downRate/rateOrder` | ✅ | 开启热水器 |
 | 开阀结果确认 | POST | `/order/tcpDevice/query/downRateResult` | ✅ | 确认开阀是否成功，**`orderNo` 在这里就能拿到**（v1.2.0 新增，v3.0.3 修正）|
 | 停止洗澡 | POST | `/order/tcpDevice/closeOrder` | ✅ | 提交关水指令，结果由设备订单状态复核 |
@@ -915,6 +917,73 @@ snCode=QZXY20230001&orderNo=13200000000000000001&loginCode=xxx&userId=xxx&...
 > ⚠️ 响应里**没有** `consumeMoneyStr`，也**没有** `state` / `result` / `status`
 > ——那几个是 `downRateResult` 的字段，别混。客户端早期版本照隔壁接口的模型解析这个响应，
 > 属于没样本时的猜测。
+
+### 4.12 联网吹风机
+
+以下流程已在湖北大学的联网扫码型吹风机上验证，包含启动、关停和结算。不同学校或机型的套餐可能不同；蓝牙直连吹风机和独立烘干机未在此流程中验证。示例中的设备和订单标识为虚构值。
+
+#### 扫码和查询套餐
+
+实测二维码格式为 `KLCXKJ-Water,W,<12 位 MAC>`。提取 MAC 后按 [4.2 设备信息](#42-设备信息) 查询设备，使用接口返回的 `snCode`、`deviceId`、`smallTypeId` 和项目对应的账户。实测联网吹风机的 `bigTypeId` 为 `7`，`communicationTypeId` 为 `5`；以设备详情为准，不能只凭二维码里的字母下单。
+
+```http
+GET /device/mode/list?smallTypeId=58&deviceId=10001
+```
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `smallTypeId` | 是 | 设备的小类 ID，使用设备详情返回值 |
+| `deviceId` | 否 | 有设备 ID 时一并传入 |
+
+GET 和 POST 都带上 [认证参数](#完整认证参数-map)，下文示例省略这些字段。
+
+```json
+{
+  "success": true,
+  "errorCode": 0,
+  "data": [
+    {
+      "id": 20001,
+      "modeId": 29,
+      "modeName": "电吹风模式一",
+      "modeMoney": 100,
+      "modeMoneyYuan": 0.10,
+      "modeTimeMinute": "1",
+      "modeTimeQuantity": 60
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `modeId` | 下单使用的套餐 ID；不要用列表项的 `id` |
+| `modeMoney` / `modeMoneyYuan` | 分别为厘和元，例如 `100` 厘 = `0.10` 元 |
+| `modeTimeMinute` / `modeTimeQuantity` | 分别为分钟和秒 |
+
+#### 确认套餐并启动
+
+向用户展示实时价格和时长，经确认后提交一次启动请求。吹风机使用 `modeOrder`；实测用 [热水器的 `rateOrder`](#43-开始洗澡) 启动吹风机时返回了 `501`。
+
+```http
+POST /order/tcpDevice/downRate/modeOrder
+Content-Type: application/x-www-form-urlencoded
+
+snCode=A0B1C2D3E4F5&xfModel=29
+```
+
+| 参数 | 说明 |
+|---|---|
+| `snCode` | 设备详情返回的序列号 |
+| `xfModel` | 选中的 `modeId`，以套餐列表当次返回值为准 |
+
+成功响应示例：`{"success":true,"errorCode":0,"data":null}`。它没有 `orderNo`，也不能单凭它确认设备已经开始运行。
+
+#### 查询启动结果、关停与结算
+
+1. 发出启动请求后，按 [4.3.1](#431-开阀结果确认) 用 `snCode` 查询 `downRateResult`。已启动的响应可返回 `orderNo`、`deviceSnCode`、`xfModelName`，成功启动样本为 `state=1`、`result=0`。应核对设备和本次订单；`errorCode=1` 且提示「网络通讯慢」时，表示未拿到结果，可以短暂重查。超时后先核对设备或官方订单，别自动重发下单请求。
+2. 如需提前停止，按 [4.4](#44-停止洗澡) 向 `closeOrder` 提交当前设备的 `snCode` 和已确认的 `orderNo`。`success: true` 只表示请求有响应，不能单凭它确认停机。
+3. 套餐到时或手动关停后，复查启动结果和 [4.11 消费结果](#411-消费结果查询)。启动结果可能延迟；同一设备、同一订单已返回结算结果时，可以解除本地待核对提醒。实测热水器的 `query/rateOrder/using` 对吹风机可返回 `data: null`，不能据此判断吹风机是否已停。
 
 ---
 

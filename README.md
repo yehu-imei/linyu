@@ -119,6 +119,7 @@ iOS 包需自签安装，详见 [安装教程](https://github.com/yehu-imei/Guid
 | [@Cainite07](https://github.com/Cainite07) | 短信登录的实现 |
 | [@SubmergeDQ](https://github.com/SubmergeDQ) | 蓝牙阀控制的实现 |
 | [@XiaoLoad](https://github.com/XiaoLoad) | 项目优化的宝贵建议 |
+| [@Light-dark-max](https://github.com/Light-dark-max) | 联网吹风机接口文档与真机验证 |
 | 各位同学们 | 软件的测试与体验反馈 |
 
 > 每一段代码、每一条建议、每一次测试，都在让「淋浴」变得更好！谢谢你们 🙌
