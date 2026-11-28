@@ -7,19 +7,21 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.hualala.linyu.api.NetworkModule
-import com.hualala.linyu.api.getDeviceInfoSafe
 import com.hualala.linyu.ble.BleConnectResult
 import com.hualala.linyu.ble.BleController
 import com.hualala.linyu.data.BleArbiter
 import com.hualala.linyu.data.BleShowerController
+import com.hualala.linyu.data.RoomBindingPlugin
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
+import com.hualala.linyu.data.ShowerOrderTarget
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
 import com.hualala.linyu.widget.LinYuWidget
 import com.hualala.linyu.widget.WidgetBridge
+import com.hualala.linyu.widget.WidgetStartTarget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -57,25 +59,27 @@ class WidgetBleService : Service() {
         // 冷启动进来的话 PrefsHelper / NetworkModule / AppLogger 都还没初始化
         ensureInit()
         val action = intent?.action
-        val sn = intent?.getStringExtra(EXTRA_SNCODE)?.takeIf { it.isNotEmpty() }
-            ?: PrefsHelper.lastDeviceSnCode
-        if (action == null || sn.isEmpty()) {
-            stopSelf()
+        val start = if (intent != null && action == ACTION_OPEN) WidgetStartTarget.fromIntent(intent) else null
+        val stop = if (intent != null && action == ACTION_CLOSE) ShowerOrderTarget.fromIntent(intent) else null
+        val sn = start?.takeIf { it.canStart() }?.snCode ?: stop?.currentOrder()?.snCode
+        if (sn == null) {
+            // 系统已按前台服务启动，即使动作失效也要先完成前台服务交接。
+            startForeground(ID_IGNORED_REQUEST, Notifier.minimal(this))
+            WidgetBridge.clearBusy()
+            LinYuWidget.refreshAll(this)
+            stopSelf(startId)
             return START_NOT_STICKY
         }
 
         // ⚠️ startForegroundService 起的服务，5 秒内必须挂前台通知；否则被系统直接杀。
         // 挂完再按用户的通知开关决定要不要摘掉（同 ShowerWatchService 的做法）。
         startForeground(Notifier.ID_IN_USE, Notifier.showStopping(this, deviceName(sn)))
-        if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyInUse) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        }
 
         scope.launch {
             try {
-                when (action) {
-                    ACTION_OPEN -> doOpen(sn, intent)
-                    ACTION_CLOSE -> doClose(sn)
+                when {
+                    start != null -> doOpen(start, intent?.getStringExtra(EXTRA_MAC).orEmpty())
+                    stop != null -> doClose(stop)
                 }
             } catch (t: Throwable) {
                 AppLogger.e("小组件蓝牙操作异常（$action）", t)
@@ -94,7 +98,7 @@ class WidgetBleService : Service() {
                 // 此时重绘会直接落到「空闲」，不会先闪一下「使用中」。
                 if (!WidgetBridge.consumeDelegated()) WidgetBridge.clearBusy()
                 LinYuWidget.refreshAll(this@WidgetBleService)
-                stopSelf()
+                stopSelf(startId)
             }
         }
         return START_NOT_STICKY
@@ -106,17 +110,23 @@ class WidgetBleService : Service() {
     }
 
     // ── 开阀 ──
-    private suspend fun doOpen(snCode: String, intent: Intent) {
+    private suspend fun doOpen(target: WidgetStartTarget, mac: String) {
+        val snCode = target.snCode
+        val auth = NetworkModule.session()
+        if (auth.owner != target.owner || !target.canStart()) return
         val name = deviceName(snCode)
-        val mac = intent.getStringExtra(EXTRA_MAC)?.takeIf { it.isNotEmpty() }
-            ?: PrefsHelper.lastDeviceMac
         if (mac.isEmpty()) {
             Notifier.showOpenFailed(this, name, "缺少设备信息，请先在 App 里连接一次该设备")
             return
         }
         val device = runCatching { DeviceInfoCache.load(mac).data }.getOrNull()
+        if (NetworkModule.session().loginCode != auth.loginCode || !target.canStart()) return
         if (device == null) {
             Notifier.showOpenFailed(this, name, "获取设备信息失败，请检查网络")
+            return
+        }
+        if (device.snCode != snCode || !RoomBindingPlugin.allows(device.deviceName.orEmpty())) {
+            AppLogger.w("小组件蓝牙开阀：设备已变化，已刷新小组件")
             return
         }
 
@@ -129,18 +139,19 @@ class WidgetBleService : Service() {
             BleShowerController.openValve(
                 ble = BleController(this),
                 device = device,
-                loginCode = PrefsHelper.loginCode,
-                telephone = PrefsHelper.telephone
+                loginCode = auth.loginCode,
+                telephone = auth.telephone,
+                canStartNewOrder = { target.canStart() && RoomBindingPlugin.allows(device.deviceName.orEmpty()) }
             )
         } finally {
             BleArbiter.end(snCode)
         }
+        if (NetworkModule.session().loginCode != auth.loginCode || PrefsHelper.loginCode != auth.loginCode) return
         when (outcome) {
             is BleShowerController.OpenOutcome.Opened -> {
                 PrefsHelper.bleSessionJson = gson.toJson(outcome.session)
                 PrefsHelper.markBleDevice(snCode)
-                PrefsHelper.lastDeviceSnCode = snCode
-                PrefsHelper.lastDeviceMac = mac
+                if (PrefsHelper.lastDeviceSnCode == snCode) PrefsHelper.lastDeviceMac = mac
                 AppLogger.i("小组件蓝牙开阀成功 $snCode")
                 Notifier.showInUse(this, snCode, device.displayName, System.currentTimeMillis())
                 ShowerWatchService.start(this, snCode)
@@ -168,18 +179,26 @@ class WidgetBleService : Service() {
     }
 
     // ── 关阀（不依赖 App 进程）──
-    private suspend fun doClose(snCode: String) {
-        val name = deviceName(snCode)
+    private suspend fun doClose(target: ShowerOrderTarget) {
+        val snCode = target.snCode
+        val auth = NetworkModule.session()
+        if (auth.owner != target.owner) return
+        val order = target.currentOrder() ?: return
+        val name = order.deviceName.ifEmpty { deviceName(snCode) }
+        val sessionJson = PrefsHelper.bleSessionJson
         val session = runCatching {
-            gson.fromJson(PrefsHelper.bleSessionJson, BleShowerController.Session::class.java)
+            gson.fromJson(sessionJson, BleShowerController.Session::class.java)
         }.getOrNull()
 
         if (session == null || session.snCode != snCode) {
             // 没有会话（App 还没连过 / 会话已清理）→ 退回原有路径
             AppLogger.w("小组件蓝牙关阀缺少会话，退回 ShowerWatchService $snCode")
-            ShowerWatchService.finishShower(this, snCode)
+            ShowerWatchService.finishShower(this, snCode, target)
             return
         }
+        if ((session.authOwner != null && session.authOwner != target.owner) ||
+            (order.orderNo.isNotBlank() && session.orderNo.isNotBlank() && session.orderNo != order.orderNo)
+        ) return
 
         // ⚠️ App 还活着（MainViewModel 存活）时，它握着内存里那条 BLE 连接；
         // 小组件再 connectGatt 会和它抢。转交 App 用它的连接关阀更稳
@@ -191,7 +210,7 @@ class WidgetBleService : Service() {
             // 卡片弹回「使用中」继续计时、过一两秒才变空闲——看着就像关闭被取消了。
             // App 那边在停止尝试结束时收尾（见 MainViewModel.endStopAttempt）。
             WidgetBridge.markDelegated()
-            ShowerEvents.notifyStopBleRequest(snCode)
+            ShowerEvents.notifyStopBleRequest(snCode, target)
             return
         }
 
@@ -202,8 +221,8 @@ class WidgetBleService : Service() {
         }
 
         val elapsed = ShowerController.elapsedSeconds(snCode)
+        val ble = BleController(this)
         val outcome = try {
-            val ble = BleController(this)
             val conn = try {
                 ble.connect(session.mac)
             } catch (t: Throwable) {
@@ -215,27 +234,41 @@ class WidgetBleService : Service() {
                 Notifier.showCloseFailed(this, name, "蓝牙连接失败，请靠近设备后重试")
                 return
             }
+            if (target.currentOrder() == null || PrefsHelper.bleSessionJson != sessionJson ||
+                NetworkModule.session().loginCode != auth.loginCode || PrefsHelper.loginCode != auth.loginCode
+            ) return
             BleShowerController.closeAndSettle(
                 ble = ble,
                 session = session,
-                loginCode = PrefsHelper.loginCode,
-                telephone = PrefsHelper.telephone
+                loginCode = auth.loginCode,
+                telephone = auth.telephone
             )
         } finally {
+            ble.disconnect()
             BleArbiter.end(snCode)
         }
+        if (target.currentOrder() == null || NetworkModule.session().loginCode != auth.loginCode ||
+            PrefsHelper.loginCode != auth.loginCode
+        ) return
         when (outcome) {
             is BleShowerController.SettleOutcome.Uploaded -> {
-                PrefsHelper.bleSessionJson = ""
+                if (PrefsHelper.bleSessionJson == sessionJson) PrefsHelper.bleSessionJson = ""
                 ShowerController.markFinished(snCode)
                 // 服务端金额单位是**厘**，换算成元再交给通知（显示 3 位小数的准确值）
                 val money = MoneyFormat.milliToYuan(outcome.rawUpMoney)
                 // 立即记一笔「上次消费」，否则桌面卡片要等下次拉账单才更新
                 if (money != null && money > 0) PrefsHelper.recordConsume(snCode, money)
                 AppLogger.i("小组件蓝牙关阀+结算完成 $snCode 金额=$money")
+                ShowerEvents.notifyFinished(ShowerEvents.Finished(snCode, name, elapsed, money, autoClosed = false, target = target))
                 Notifier.showFinished(this, name, elapsed, money)
             }
-            else -> {
+            is BleShowerController.SettleOutcome.PartialSettlement -> {
+                ShowerController.markFinished(snCode)
+                AppLogger.w("小组件蓝牙关阀已完成，结算待处理 $snCode")
+                ShowerEvents.notifyFinished(ShowerEvents.Finished(snCode, name, elapsed, null, autoClosed = false, target = target))
+                Notifier.showFinished(this, name, elapsed, null)
+            }
+            is BleShowerController.SettleOutcome.CloseFailed -> {
                 AppLogger.w("小组件蓝牙关阀未完成：$outcome")
                 Notifier.showCloseFailed(this, name, "关闭设备未确认，请打开 App 重试")
             }
@@ -244,7 +277,7 @@ class WidgetBleService : Service() {
 
     private fun deviceName(snCode: String): String =
         (if (PrefsHelper.lastDeviceSnCode == snCode) PrefsHelper.lastDeviceName else "")
-            .ifEmpty { PrefsHelper.lastDeviceName.ifEmpty { "热水器" } }
+            .ifEmpty { "热水器" }
 
     private fun ensureInit() {
         if (!PrefsHelper.isInitialized) PrefsHelper.init(applicationContext)
@@ -253,26 +286,26 @@ class WidgetBleService : Service() {
     }
 
     companion object {
-        const val EXTRA_SNCODE = "snCode"
-        const val EXTRA_MAC = "mac"
+        private const val EXTRA_MAC = "mac"
+        private const val ID_IGNORED_REQUEST = 1007
         private const val ACTION_OPEN = "com.hualala.linyu.service.WIDGET_BLE_OPEN"
         private const val ACTION_CLOSE = "com.hualala.linyu.service.WIDGET_BLE_CLOSE"
 
         /** 小组件请求开阀（蓝牙表） */
-        fun open(context: Context, snCode: String, mac: String) {
+        internal fun open(context: Context, target: WidgetStartTarget, mac: String) {
             val i = Intent(context, WidgetBleService::class.java).apply {
                 action = ACTION_OPEN
-                putExtra(EXTRA_SNCODE, snCode)
+                target.putInto(this)
                 putExtra(EXTRA_MAC, mac)
             }
             ContextCompat.startForegroundService(context, i)
         }
 
         /** 小组件请求关阀（蓝牙表） */
-        fun close(context: Context, snCode: String) {
+        internal fun close(context: Context, target: ShowerOrderTarget) {
             val i = Intent(context, WidgetBleService::class.java).apply {
                 action = ACTION_CLOSE
-                putExtra(EXTRA_SNCODE, snCode)
+                target.putInto(this)
             }
             ContextCompat.startForegroundService(context, i)
         }

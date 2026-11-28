@@ -10,8 +10,12 @@ import android.widget.RemoteViews
 import com.google.gson.Gson
 import com.hualala.linyu.MainActivity
 import com.hualala.linyu.R
+import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.data.BalanceEstimator
+import com.hualala.linyu.data.RoomBindingPlugin
+import com.hualala.linyu.data.InstalledPlugins
 import com.hualala.linyu.data.ShowerController
+import com.hualala.linyu.data.ShowerOrderTarget
 import com.hualala.linyu.model.CachedBill
 import com.hualala.linyu.model.CachedDevice
 import com.hualala.linyu.model.DeviceInfo
@@ -32,15 +36,14 @@ enum class WidgetSize(val label: String) {
 }
 
 /** 小组件展示状态 */
-sealed interface WidgetState {
+internal sealed interface WidgetState {
     data object LoggedOut : WidgetState
     data object NoDevice : WidgetState
 
     data class Idle(
         val deviceName: String,
         val deviceDesc: String,
-        /** 当前控制设备的序列号。「上次消费」是按设备分开存的，要靠它取对应的一条 */
-        val snCode: String,
+        val target: WidgetStartTarget,
         /**
          * 设备上有人正在用，但**不是机主**。
          *
@@ -54,7 +57,8 @@ sealed interface WidgetState {
         val deviceName: String,
         val deviceDesc: String,
         val preDeduct: Double,
-        val startedAtMs: Long
+        val startedAtMs: Long,
+        val target: ShowerOrderTarget?
     ) : WidgetState
 }
 
@@ -89,8 +93,11 @@ object WidgetRenderer {
      */
     const val TAB_NEARBY = 1
 
-    fun readState(): WidgetState {
-        if (!PrefsHelper.isLoggedIn) return WidgetState.LoggedOut
+    internal fun readState(): WidgetState {
+        val session = NetworkModule.session()
+        if (!PrefsHelper.isLoggedIn || session.loginCode != PrefsHelper.loginCode) {
+            return WidgetState.LoggedOut
+        }
 
         val snCode = PrefsHelper.lastDeviceSnCode
         if (snCode.isNullOrEmpty()) return WidgetState.NoDevice
@@ -98,7 +105,8 @@ object WidgetRenderer {
         val name = PrefsHelper.lastDeviceName.ifEmpty { "上次使用的设备" }
         val desc = deviceDesc()
 
-        return if (ShowerController.isRunning(snCode)) {
+        val order = ShowerController.activeOrderFor(snCode)
+        return if (order != null) {
             // ⚠️ **正在用水时不受寝室筛选影响**，无条件照实显示。
             //
             // 用水中的卡片是用户**唯一的停止入口**。要是绑了别的寝室就把它藏成
@@ -107,22 +115,21 @@ object WidgetRenderer {
             WidgetState.Running(
                 deviceName = name,
                 deviceDesc = desc,
-                preDeduct = ShowerController.activeOrderFor(snCode)?.preDeduct ?: 0.0,
-                startedAtMs = ShowerController.startedAt(snCode)
+                preDeduct = order.preDeduct,
+                startedAtMs = ShowerController.startedAt(snCode),
+                target = ShowerOrderTarget.capture(order)?.takeIf { it.owner == session.owner }
             )
-        } else if (!DeviceInfo.inSameRoom(PrefsHelper.boundRoom, ShowerController.roomFilterName())) {
+        } else if (!RoomBindingPlugin.allows(ShowerController.roomFilterName())) {
             // 空闲时：这台设备在别的寝室 → 当作还没选设备。
             //
             // 复用 NoDevice 是有意的：它的按钮**本来就不开阀**（2x4 翻到附近设备页、
             // 2x2 打开 App），正是这里要的行为。
             //
-            // ⚠️ 这只挡住「显示」。真正开阀的是 LinYuWidgetProvider.handleAction，
-            // 它自己直接读 lastDeviceSnCode、不走这里——那边必须加同一道判断，
-            // 否则会出现「桌面显示未选设备、点下去却把别寝室的阀开了」。
+            // WidgetStartTarget 在实际开阀前也会检查寝室筛选。
             WidgetState.NoDevice
         } else {
             WidgetState.Idle(
-                name, desc, snCode,
+                name, desc, WidgetStartTarget(snCode, session.owner),
                 // 记住的占用设备就是当前这台、**且标记没过期**才显示「占用中」。
                 // occupiedFor 会在过期时顺手把陈旧标记清掉（并记一条日志）。
                 occupied = PrefsHelper.occupiedFor(snCode)
@@ -135,7 +142,7 @@ object WidgetRenderer {
      *                 所以桌面上所有淋浴小组件会同时进入「正在开启…」，不会只有一个在转
      * @param tab      仅 2x4 使用：当前显示第几页
      */
-    fun build(
+    internal fun build(
         context: Context,
         size: WidgetSize,
         state: WidgetState,
@@ -158,20 +165,15 @@ object WidgetRenderer {
         // 小组件压在用户的壁纸上，深浅切换要么看不出变化、要么和壁纸撞色，
         // 不如固定成一个自带背景的高对比卡片——任何壁纸下都一样清楚。
         val views = RemoteViews(context.packageName, layoutRes(size))
+        val nearbyInstalled = InstalledPlugins.isInstalled(InstalledPlugins.NEARBY)
 
         // 整张卡片 → 打开 App 首页
         views.setOnClickPendingIntent(R.id.widget_root, openAppIntent(context, appWidgetId, TAB_HOME))
 
-        /** [explicit] 用来顶掉按 action 拼出来的点击行为（「没有设备」时按钮要换成翻页） */
-        fun bindAct(
-            running: Boolean,
-            disabled: DisabledReason?,
-            action: String,
-            explicit: PendingIntent? = null
-        ) {
+        fun bindAct(running: Boolean, explicit: PendingIntent? = null) {
             bindPillAction(
                 views, running,
-                explicit ?: actionIntent(context, appWidgetId, disabled, action)
+                explicit ?: actionIntent(context, appWidgetId, disabled, state)
             )
         }
 
@@ -190,14 +192,14 @@ object WidgetRenderer {
             WidgetState.LoggedOut -> {
                 bindHeader(views, "未登录", "点此打开淋浴", running = false, showDot = false)
                 bindPanels(context, views, appWidgetId, idleText = "—", runningText = null, busyText = noticeText)
-                bindAct(running = false, disabled = disabled, action = "")
+                bindAct(running = false)
             }
 
             WidgetState.NoDevice -> {
                 // 没选过设备时，按钮不该去开阀（没设备可开），而是直接把用户送到能选设备的地方：
                 // 2x4 有自己的「附近设备」页，就地翻过去；2x2 没有页面，只能开 App。
                 // 以前这里 action 是空串，按钮等于摆设——点了什么都不会发生。
-                val wide = size == WidgetSize.WIDE
+                val wide = size == WidgetSize.WIDE && nearbyInstalled
                 // 文案不能写「还没有用过设备」：绑定寝室后上次用的设备被清掉时也会落到
                 // 这个状态，而用户明明用过设备，只是它不在这个寝室里。
                 bindHeader(
@@ -207,7 +209,7 @@ object WidgetRenderer {
                 )
                 bindPanels(context, views, appWidgetId, idleText = "—", runningText = null, busyText = noticeText)
                 bindAct(
-                    running = false, disabled = disabled, action = "",
+                    running = false,
                     explicit = if (wide) tabIntent(context, appWidgetId, TAB_NEARBY)
                     else openAppIntent(context, appWidgetId, TAB_HOME)
                 )
@@ -218,11 +220,11 @@ object WidgetRenderer {
                     running = false, showDot = true, occupied = state.occupied)
                 bindPanels(
                     context, views, appWidgetId,
-                    idleText = lastConsumeText(state.snCode),
+                    idleText = lastConsumeText(state.target.snCode),
                     runningText = null,
                     busyText = noticeText
                 )
-                bindAct(running = false, disabled = disabled, action = LinYuWidgetProvider.ACTION_START)
+                bindAct(running = false)
             }
 
             is WidgetState.Running -> {
@@ -235,15 +237,17 @@ object WidgetRenderer {
                     timerText = null,
                     chronometerBase = chronometerBase(state.startedAtMs),
                     chronometerRunning = state.startedAtMs > 0L,
-                    busyText = noticeText
+                    busyText = noticeText,
+                    runningClick = actionIntent(context, appWidgetId, disabled, state)
                 )
-                bindAct(running = true, disabled = disabled, action = LinYuWidgetProvider.ACTION_STOP)
+                bindAct(running = true)
             }
         }
 
         if (size == WidgetSize.WIDE) {
-            bindTabs(views, context, appWidgetId, tab)
-            bindPage(context, views, appWidgetId, tab)
+            val visibleTab = if (tab == TAB_NEARBY && !nearbyInstalled) TAB_HOME else tab
+            bindTabs(views, context, appWidgetId, visibleTab, nearbyInstalled)
+            bindPage(context, views, appWidgetId, visibleTab)
         }
         return views
     }
@@ -311,15 +315,15 @@ object WidgetRenderer {
         val idleClick = when {
             !showIdle -> null
             needsApp -> openAppIntent(context, appWidgetId, TAB_HOME)
-            else -> actionIntent(context, appWidgetId, disabled, LinYuWidgetProvider.ACTION_START)
+            else -> actionIntent(context, appWidgetId, disabled, state)
         }
         val usingClick =
-            if (running && !spinning) actionIntent(context, appWidgetId, null, LinYuWidgetProvider.ACTION_STOP)
+            if (running && !spinning) actionIntent(context, appWidgetId, null, state)
             else null
         // 占用中仍然让点：服务端会拒绝，App 那边会把它记成「占用中」并把通知发出来。
         // 直接摘掉点击的话，用户点了没反应，更懵
         val occClick =
-            if (occupied && !spinning) actionIntent(context, appWidgetId, disabled, LinYuWidgetProvider.ACTION_START)
+            if (occupied && !spinning) actionIntent(context, appWidgetId, disabled, state)
             else null
 
         views.setOnClickPendingIntent(idle, idleClick)
@@ -403,7 +407,8 @@ object WidgetRenderer {
         chronometerBase: Long = 0L,
         /** 计时器要不要**走秒**（见下面对 startedAt 的说明）；拿不到开阀时间时必须是 false */
         chronometerRunning: Boolean = true,
-        busyText: String? = null
+        busyText: String? = null,
+        runningClick: PendingIntent? = null
     ) {
         // 三种面板叠在同一位置，切 visibility。
         // 忙碌时优先显示转圈面板——点完按钮最想看到的是"它在转"
@@ -452,11 +457,7 @@ object WidgetRenderer {
                 views.setChronometer(R.id.widget_timer, chronometerBase, null, chronometerRunning)
             }
             // 使用中点卡片 = 关阀（正在操作时不响应，避免重复触发）
-            views.setOnClickPendingIntent(
-                R.id.widget_panel_running,
-                if (busyText != null) null
-                else actionIntent(context, appWidgetId, null, LinYuWidgetProvider.ACTION_STOP)
-            )
+            views.setOnClickPendingIntent(R.id.widget_panel_running, runningClick)
         }
     }
 
@@ -480,7 +481,8 @@ object WidgetRenderer {
 
     // ── 2x4 侧边栏与三个页面 ──
 
-    private fun bindTabs(views: RemoteViews, context: Context, appWidgetId: Int, tab: Int) {
+    private fun bindTabs(views: RemoteViews, context: Context, appWidgetId: Int, tab: Int, nearbyInstalled: Boolean) {
+        views.setViewVisibility(R.id.widget_tab_nearby_slot, if (nearbyInstalled) View.VISIBLE else View.GONE)
         for (i in 0..2) {
             val onId = when (i) {
                 0 -> R.id.widget_tab0_on
@@ -538,9 +540,8 @@ object WidgetRenderer {
         // 也不用 [CachedDevice.name]（格式化过的显示名）来筛，用 [CachedDevice.rawName]：
         // 显示名里有「洗手台→房」这类凭空造的字，和首页用的原始名对不上。
         // 老快照没有 rawName 字段，回退到 name。
-        val list = cached.filter {
-            DeviceInfo.inSameRoom(PrefsHelper.boundRoom, it.rawName ?: it.name ?: "")
-        }.take(2)
+        val room = RoomBindingPlugin.effectiveRoom
+        val list = cached.filter { DeviceInfo.inSameRoom(room, it.rawName ?: it.name ?: "") }.take(2)
         val showList = blocker == null && list.isNotEmpty()
 
         views.setTextViewText(R.id.widget_near_synced, syncedAgoText())
@@ -807,7 +808,6 @@ object WidgetRenderer {
     // 与设计稿 CSS 变量一致的状态色
     private const val COLOR_IDLE = 0xFF22C55E.toInt()
     private const val COLOR_USING = 0xFF3B82F6.toInt()
-    private const val COLOR_USING_TEXT = 0xFF60A5FA.toInt()
     private const val COLOR_WARN = 0xFFF59E0B.toInt()
     private const val COLOR_DANGER = 0xFFEF4444.toInt()
 }

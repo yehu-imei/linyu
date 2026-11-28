@@ -3,7 +3,11 @@ package com.hualala.linyu
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -18,6 +22,7 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -61,6 +66,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -77,10 +83,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.google.mlkit.vision.barcode.BarcodeScanner
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -88,6 +90,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
 import androidx.compose.ui.graphics.Color as ComposeColor
 
 /**
@@ -96,7 +99,7 @@ import androidx.compose.ui.graphics.Color as ComposeColor
  * 趣智校园热水器上的二维码形如：KLCXKJ-Water,M,AABBCCDDEEFF
  * 解析最后一个字段（冒号去掉后为 12 位十六进制）作为设备 snCode。
  *
- * 返回：RESULT_OK + extra [EXTRA_SN_CODE]；失败时 RESULT_CANCELED + [EXTRA_ERROR]
+ * 识别设备后用 RESULT_OK 返回 [EXTRA_SN_CODE]。取消时不返回设备，识别错误在扫码页提示。
  *
  * ## 配色为什么写死
  *
@@ -116,26 +119,7 @@ class QrScanActivity : AppCompatActivity() {
     companion object {
         const val EXTRA_SN_CODE = "sn_code"
 
-        /**
-         * 失败原因。取值会直接显示给用户，所以是给人看的中文。
-         *
-         * 调用方在 `RESULT_CANCELED` 时读它——不读的话用户点了扫码、
-         * 黑屏一闪回到主页，完全不知道为什么。
-         */
-        const val EXTRA_ERROR = "error"
-
-        private const val DEVICE_PREFIX = "KLCXKJ-Water"
-
-        fun parseSnCode(raw: String?): String? {
-            if (raw.isNullOrBlank()) return null
-            val last = raw.split(",").lastOrNull()?.trim() ?: return null
-            val normalized = last.replace(":", "").uppercase()
-            // 12 位十六进制
-            if (normalized.length == 12 && normalized.matches(Regex("[0-9A-F]{12}"))) {
-                return normalized
-            }
-            return null
-        }
+        fun parseSnCode(raw: String?): String? = QrDecoder.parseSnCode(raw)
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -144,13 +128,15 @@ class QrScanActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
 
     /**
-     * ⚠️ 只建一次。以前是**每一帧**都 `BarcodeScanning.getClient()` 然后 close，
-     * 等于每帧重新初始化一次识别模型，白烧 CPU 还掉帧。
+     * 解码线程。**单线程**：同一时刻只解一帧，
+     * 既避免多帧并发抢 CPU/内存，也不会让识别结果乱序。
+     *
+     * （以前 ML Kit 会在内部用自己的线程池，换 ZXing 后这一步要自己管。）
      */
-    private var barcodeScanner: BarcodeScanner? = null
+    private val decoderExecutor = Executors.newSingleThreadExecutor()
 
-    private fun scanner(): BarcodeScanner =
-        barcodeScanner ?: BarcodeScanning.getClient().also { barcodeScanner = it }
+    /** 正在解帧。相机以 KEEP_ONLY_LATEST 供帧，忙时直接丢帧即可。 */
+    @Volatile private var decoding = false
 
     /** 已经识别到了，停止处理后续帧（避免重复触发返回） */
     @Volatile private var done = false
@@ -178,27 +164,10 @@ class QrScanActivity : AppCompatActivity() {
         // 退出时关灯
         runCatching { camera?.cameraControl?.enableTorch(false) }
         runCatching { cameraProvider?.unbindAll() }
-        // 没被触发过就别去初始化它了
-        runCatching { barcodeScanner?.close() }
+        runCatching { decoderExecutor.shutdownNow() }
     }
 
     // ── 识别 ──
-
-    /**
-     * 所有二维码解析的唯一入口——相机帧和相册图都走这儿。
-     *
-     * 以前解析逻辑写死在 `addOnSuccessListener` 里面，加相册就得抄一遍。
-     *
-     * @return 命中设备码返回 snCode，否则 null
-     */
-    private fun matchDeviceCode(barcodes: List<Barcode>): String? {
-        for (b in barcodes) {
-            val raw = b.rawValue ?: continue
-            if (!raw.contains(DEVICE_PREFIX, ignoreCase = true)) continue
-            parseSnCode(raw)?.let { return it }
-        }
-        return null
-    }
 
     /** 命中：震动一下、返回结果并关掉自己。**只应该生效一次** */
     private fun finishWithSn(sn: String) {
@@ -212,12 +181,6 @@ class QrScanActivity : AppCompatActivity() {
             window.decorView.performHapticFeedback(fb)
         }
         setResult(RESULT_OK, Intent().putExtra(EXTRA_SN_CODE, sn))
-        finish()
-    }
-
-    /** 放弃并带一句原因回去，让调用方 toast 出来 */
-    private fun finishWithError(message: String) {
-        setResult(RESULT_CANCELED, Intent().putExtra(EXTRA_ERROR, message))
         finish()
     }
 
@@ -240,16 +203,31 @@ class QrScanActivity : AppCompatActivity() {
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                analysis.setAnalyzer(ContextCompat.getMainExecutor(this)) { imageProxy ->
-                    if (done) { imageProxy.close(); return@setAnalyzer }
-                    val mediaImage = imageProxy.image
-                    if (mediaImage == null) { imageProxy.close(); return@setAnalyzer }
-                    val input = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                    scanner().process(input)
-                        .addOnSuccessListener { codes ->
-                            matchDeviceCode(codes)?.let { finishWithSn(it) }
+                analysis.setAnalyzer(decoderExecutor) { imageProxy ->
+                    if (done || decoding) { imageProxy.close(); return@setAnalyzer }
+                    val plane = imageProxy.planes.firstOrNull()
+                    if (plane == null) { imageProxy.close(); return@setAnalyzer }
+                    decoding = true
+                    try {
+                        val buffer = plane.buffer
+                        val y = ByteArray(buffer.remaining())
+                        buffer.get(y)
+                        val sn = QrDecoder.decodeCameraFrame(
+                            y = y,
+                            width = imageProxy.width,
+                            height = imageProxy.height,
+                            rowStride = plane.rowStride,
+                            rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                        )
+                        if (sn != null) {
+                            runOnUiThread { finishWithSn(sn) }
                         }
-                        .addOnCompleteListener { imageProxy.close() }
+                    } catch (_: Exception) {
+                        // 单帧解码失败不是错误，下一帧继续
+                    } finally {
+                        decoding = false
+                        imageProxy.close()
+                    }
                 }
                 provider.unbindAll()
                 camera = provider.bindToLifecycle(
@@ -274,23 +252,64 @@ class QrScanActivity : AppCompatActivity() {
     /**
      * 识别相册里的图。
      *
-     * `InputImage.fromFilePath` 会读 EXIF 处理旋转，是**阻塞 IO**，必须离开主线程，
-     * 否则相册里选一张大图会把界面卡住。
+     * 读图 + 解码都是**阻塞 IO/CPU**，必须离开主线程，否则相册里选一张大图会把界面卡住。
+     *
+     * ⚠️ 换 ZXing 后要**自己处理 EXIF 旋转**：相机拍的图很多是横向存储 + `Orientation=6/8`，
+     * 不旋转直接解会一直解不出来（ML Kit 的 `InputImage.fromFilePath` 内部替我们做了这一步）。
      */
     private fun analyzeImage(uri: Uri, onMiss: () -> Unit, onError: (String) -> Unit) {
         scope.launch {
             try {
-                val image = withContext(Dispatchers.IO) { InputImage.fromFilePath(this@QrScanActivity, uri) }
-                scanner().process(image)
-                    .addOnSuccessListener { codes ->
-                        val sn = matchDeviceCode(codes)
-                        if (sn != null) finishWithSn(sn) else onMiss()
-                    }
-                    .addOnFailureListener { onError("未识别到设备二维码，请换张图片") }
+                val bitmap = withContext(Dispatchers.IO) { loadBitmapForDecode(uri) }
+                if (bitmap == null) {
+                    onError("图片读取失败，请换张图片")
+                    return@launch
+                }
+                val sn = withContext(Dispatchers.Default) {
+                    QrDecoder.decodeBitmap(bitmap)
+                }
+                if (sn != null) finishWithSn(sn) else onMiss()
             } catch (_: Exception) {
                 onError("图片读取失败，请换张图片")
             }
         }
+    }
+
+    /**
+     * 读相册图：按 EXIF 旋转，并把长边限制在 2048 以内（再大对解码没有帮助，只会更慢）。
+     *
+     * 用框架自带的 `android.media.ExifInterface`（API 24+），不额外引 androidx 依赖。
+     */
+    private fun loadBitmapForDecode(uri: Uri): Bitmap? {
+        val resolver = contentResolver
+        val orientation = runCatching {
+            resolver.openInputStream(uri)?.use { input ->
+                ExifInterface(input).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL
+                )
+            } ?: ExifInterface.ORIENTATION_NORMAL
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2048) sample *= 2
+
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        val decoded = resolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, options)
+        } ?: return null
+
+        val degrees = when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+        if (degrees == 0) return decoded
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        return Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
     }
 
     // ── Compose 界面 ──
@@ -544,20 +563,21 @@ class QrScanActivity : AppCompatActivity() {
      */
     @Composable
     private fun TorchButton(on: Boolean, onClick: () -> Unit) {
-        Box(contentAlignment = Alignment.Center) {
-            // 光晕：开灯后才画，一圈比按钮大的半透明暖黄。
-            // 这是「灯亮了」最直观的表达——只换个图标颜色不够明显
-            if (on) {
-                Box(
-                    Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(TORCH_YELLOW.copy(alpha = 0.22f))
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(52.dp)
+        // ⚠️ 光晕必须用 `drawBehind` 画，**不能**再加一个 64.dp 的兄弟 Box：
+        // 那样按钮的外框会从 52 变成 64，整个底部 Row 的高度跟着变，
+        // 表现就是「一开灯，按钮被撑高、文字和按钮整体往上跳一下」（真机反馈过）。
+        // `drawBehind` 只在边界外绘制，不参与测量，开灯前后布局完全一致。
+        Box(
+            modifier = Modifier
+                .size(52.dp)
+                .drawBehind {
+                    if (on) {
+                        drawCircle(
+                            color = TORCH_YELLOW.copy(alpha = 0.22f),
+                            radius = size.minDimension / 2f + 6.dp.toPx()
+                        )
+                    }
+                }
                     .clip(CircleShape)
                     .background(if (on) TORCH_YELLOW else ComposeColor.White.copy(alpha = 0.10f))
                     .border(
@@ -565,17 +585,16 @@ class QrScanActivity : AppCompatActivity() {
                         if (on) ComposeColor.Transparent else ComposeColor.White.copy(alpha = 0.28f),
                         CircleShape
                     )
-                    .clickable(onClick = onClick),
-                contentAlignment = Alignment.Center
-            ) {
-                Image(
-                    painter = painterResource(
-                        if (on) R.drawable.ic_flashlight_on else R.drawable.ic_flashlight
-                    ),
-                    contentDescription = if (on) "关闭手电筒" else "打开手电筒",
-                    modifier = Modifier.size(22.dp)
-                )
-            }
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = painterResource(
+                    if (on) R.drawable.ic_flashlight_on else R.drawable.ic_flashlight
+                ),
+                contentDescription = if (on) "关闭手电筒" else "打开手电筒",
+                modifier = Modifier.size(22.dp)
+            )
         }
     }
 

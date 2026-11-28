@@ -238,7 +238,7 @@ fun CustomBackgroundScreen(onDismiss: () -> Unit) {
     }
 
     if (showResetConfirm) {
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = { showResetConfirm = false },
             shape = RoundedCornerShape(20.dp),
             containerColor = AppColors.SolidSurface,

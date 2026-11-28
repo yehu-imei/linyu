@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.hualala.linyu.data.InstalledPlugins
 import com.hualala.linyu.utils.BackgroundManager
 import com.hualala.linyu.utils.BackgroundState
 
@@ -25,6 +26,7 @@ import com.hualala.linyu.utils.BackgroundState
  */
 @Composable
 fun AppBackgroundLayer(scope: String) {
+    if (InstalledPlugins.BACKGROUND !in installedPluginIds()) return
     val cfg = BackgroundState.config(scope)
     if (!cfg.enabled) return
 

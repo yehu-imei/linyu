@@ -7,33 +7,31 @@ import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.Context
 import android.content.Intent
-import android.os.SystemClock
-import android.view.View
-import android.widget.RemoteViews
-import com.google.gson.Gson
+import android.net.Uri
 import com.hualala.linyu.MainActivity
 import com.hualala.linyu.R
-import com.hualala.linyu.data.BalanceEstimator
-import com.hualala.linyu.data.ShowerController
-import com.hualala.linyu.model.CachedBill
-import com.hualala.linyu.model.CachedDevice
-import com.hualala.linyu.model.DeviceInfo
-import com.hualala.linyu.utils.PrefsHelper
-import com.hualala.linyu.utils.ScanPermission
-import com.hualala.linyu.utils.MoneyFormat
+import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.data.ShowerOrderTarget
 
     internal fun actionIntent(
         context: Context,
         appWidgetId: Int,
         disabled: WidgetRenderer.DisabledReason?,
-        action: String
+        state: WidgetState
     ): PendingIntent? = when {
         // 没有 disabled，或只是「结果」提示（开阀失败 / 切换失败 / 他人使用中）→ 照常可点。
         // 用户在这些情况下多半就是想重试，把点击清掉会让小组件看起来坏了
-        disabled == null || disabled.isNotice ->
-            toggleIntent(context, appWidgetId, action)
+        disabled == null || disabled.isNotice -> when (state) {
+            is WidgetState.Idle -> toggleIntent(context, appWidgetId, LinYuWidgetProvider.ACTION_START, start = state.target)
+            is WidgetState.Running -> state.target?.let {
+                toggleIntent(context, appWidgetId, LinYuWidgetProvider.ACTION_STOP, stop = it)
+            } ?: openAppIntent(context, appWidgetId, WidgetRenderer.TAB_HOME)
+            else -> openAppIntent(context, appWidgetId, WidgetRenderer.TAB_HOME)
+        }
         disabled == WidgetRenderer.DisabledReason.UNKNOWN ->
-            toggleIntent(context, appWidgetId, LinYuWidgetProvider.ACTION_REFRESH)
+            (state as? WidgetState.Idle)?.let {
+                toggleIntent(context, appWidgetId, LinYuWidgetProvider.ACTION_REFRESH, start = it.target)
+            }
         else -> null
     }
 
@@ -74,10 +72,15 @@ import com.hualala.linyu.utils.MoneyFormat
         index: Int,
         mac: String
     ): PendingIntent {
+        val owner = NetworkModule.session().owner
         val intent = Intent(context, providerClass(context, appWidgetId)).apply {
             action = LinYuWidgetProvider.ACTION_PICK_DEVICE
             putExtra(LinYuWidgetProvider.EXTRA_APPWIDGET_ID, appWidgetId)
             putExtra(LinYuWidgetProvider.EXTRA_PICK_MAC, mac)
+            putExtra(LinYuWidgetProvider.EXTRA_PICK_OWNER, owner)
+            // 换绑或卸载后，旧行的“选用”仍指向当时显示的设备。
+            data = Uri.Builder().scheme("linyu-widget").authority("pick")
+                .appendPath(appWidgetId.toString()).appendPath(owner).appendPath(mac).build()
         }
         return PendingIntent.getBroadcast(
             context, 6000 + index * 100 + appWidgetId, intent,
@@ -89,10 +92,27 @@ import com.hualala.linyu.utils.MoneyFormat
      * ⚠️ 目标组件必须是 Manifest 里注册过的 receiver。
      * 指向未注册的基类会让广播被系统静默丢弃，表现就是「点按钮毫无反应」。
      */
-    internal fun toggleIntent(context: Context, appWidgetId: Int, action: String): PendingIntent {
+    private fun toggleIntent(
+        context: Context,
+        appWidgetId: Int,
+        action: String,
+        start: WidgetStartTarget? = null,
+        stop: ShowerOrderTarget? = null
+    ): PendingIntent {
         val intent = Intent(context, providerClass(context, appWidgetId)).apply {
             this.action = action
             putExtra(LinYuWidgetProvider.EXTRA_APPWIDGET_ID, appWidgetId)
+            start?.putInto(this)
+            stop?.putInto(this)
+            val owner = start?.owner ?: stop?.owner
+            val snCode = start?.snCode ?: stop?.snCode
+            if (owner != null && snCode != null) {
+                // PendingIntent 的匹配不看 extras。把目标加入 URI，避免新渲染覆盖旧按钮。
+                data = Uri.Builder().scheme("linyu-widget").authority("control")
+                    .appendPath(appWidgetId.toString()).appendPath(owner).appendPath(snCode)
+                    .appendPath(stop?.orderNo.orEmpty()).appendPath((stop?.startedAtMs ?: 0L).toString())
+                    .build()
+            }
         }
         val code = when (action) {
             LinYuWidgetProvider.ACTION_START -> 2000
@@ -120,8 +140,9 @@ import com.hualala.linyu.utils.MoneyFormat
 
     internal fun providerClass(context: Context, appWidgetId: Int): Class<*> {
         val manager = AppWidgetManager.getInstance(context)
-        val small = manager.getAppWidgetIds(
-            android.content.ComponentName(context, LinYuWidget2x2::class.java)
-        )
-        return if (appWidgetId in small) LinYuWidget2x2::class.java else LinYuWidget2x4::class.java
+        return when (manager.getAppWidgetInfo(appWidgetId)?.provider?.className) {
+            LinYuWidget1x1::class.java.name -> LinYuWidget1x1::class.java
+            LinYuWidget2x2::class.java.name -> LinYuWidget2x2::class.java
+            else -> LinYuWidget2x4::class.java
+        }
     }

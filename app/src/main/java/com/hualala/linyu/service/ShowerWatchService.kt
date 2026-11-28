@@ -6,13 +6,13 @@ import android.content.Intent
 import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.hualala.linyu.api.NetworkModule
-import com.hualala.linyu.api.queryUsingSafe
-import com.hualala.linyu.data.deviceInUse
 import com.hualala.linyu.data.CloseDisposition
 import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.KeyedTaskRegistry
+import com.hualala.linyu.data.OrderPresence
 import com.hualala.linyu.data.ShowerController
 import com.hualala.linyu.data.ShowerEvents
+import com.hualala.linyu.data.ShowerOrderTarget
 import com.hualala.linyu.data.closeDisposition
 import com.hualala.linyu.data.monitorSerials
 import com.hualala.linyu.utils.AppLogger
@@ -60,6 +60,7 @@ class ShowerWatchService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val watchJobs = KeyedTaskRegistry<Job>()
     private val finishingCount = AtomicInteger(0)
+    @Volatile private var attachedInUse = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -68,14 +69,56 @@ class ShowerWatchService : Service() {
         // PrefsHelper / NetworkModule / AppLogger 都还没初始化
         ensureInit()
 
+        if (intent?.action == ACTION_MONITOR_EXISTING_ORDER) {
+            val target = ShowerOrderTarget.fromIntent(intent)
+            val order = target?.currentOrder()
+            if (target == null || order == null) {
+                // 指令可能在启动前台服务后才失效。已有监控不应被这条旧指令覆盖。
+                if (watchJobs.isEmpty() && finishingCount.get() == 0) {
+                    startForeground(ID_STALE_STOP, Notifier.minimal(this))
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
+                return START_STICKY
+            }
+            if (finishingCount.get() == 0) {
+                val orders = PrefsHelper.getActiveOrders()
+                if (orders.size > 1) {
+                    attachForeground(inUseNotification(orders))
+                } else {
+                    attachForeground(Notifier.showInUse(
+                        this, target.snCode, order.deviceName.ifEmpty { "热水器" }, target.startedAtMs, target
+                    ))
+                }
+            }
+            startWatching(target.snCode)
+            return START_STICKY
+        }
+
+        // 关水进行中保留现有的前台状态，等关水流程结束时再刷新。
+        if (intent?.action == ACTION_REFRESH_NOTIFICATION && finishingCount.get() > 0) {
+            return START_STICKY
+        }
+
         // 两种「结束用水」请求，流程完全一样：
         //   ACTION_FINISH      —— 用户在小组件上点了停止
         //   ACTION_STOP_SHOWER —— 通知栏那条上的「结束使用」按钮
         if (intent?.action == ACTION_FINISH || intent?.action == Notifier.ACTION_STOP_SHOWER) {
-            val sn = intent.getStringExtra(EXTRA_SNCODE)?.takeIf { it.isNotEmpty() }
-                ?: PrefsHelper.lastDeviceSnCode
-            if (sn.isEmpty()) {
-                stopSelf()
+            val sn = intent.getStringExtra(EXTRA_SNCODE).orEmpty()
+            val target = ShowerOrderTarget.fromIntent(intent)
+            if (target == null || target.snCode != sn || target.currentOrder() == null) {
+                WidgetBridge.clearBusy()
+                LinYuWidget.refreshAll(this)
+                val orders = PrefsHelper.getActiveOrders()
+                if (orders.isEmpty()) {
+                    if (finishingCount.get() == 0 && watchJobs.isEmpty()) {
+                        startForeground(ID_STALE_STOP, Notifier.minimal(this))
+                        stopSelf(startId)
+                    }
+                } else {
+                    attachForeground(inUseNotification(orders))
+                    monitorSerials(orders).forEach(::startWatching)
+                }
                 return START_NOT_STICKY
             }
             finishingCount.incrementAndGet()
@@ -84,7 +127,7 @@ class ShowerWatchService : Service() {
             attachForeground(Notifier.showStopping(this, deviceNameFor(sn)))
             scope.launch {
                 try {
-                    doFinish(sn)
+                    doFinish(target)
                 } finally {
                     finishingCount.decrementAndGet()
                     if (PrefsHelper.isLoggedIn && ShowerController.isRunning(sn)) {
@@ -116,7 +159,7 @@ class ShowerWatchService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
-        Notifier.cancelInUse(this)
+        if (attachedInUse) Notifier.cancelInUse(this)
         super.onDestroy()
     }
 
@@ -131,82 +174,77 @@ class ShowerWatchService : Service() {
 
             if (!PrefsHelper.isLoggedIn) break
             if (ShowerController.isClosing(snCode)) continue
+            if (!ShowerController.isRunning(snCode)) break
+            val target = ShowerOrderTarget.capture(snCode) ?: continue
 
             // ⚠️ 蓝牙表**不能**用云端订单判断：它没有 4G，服务端 tcpDevice 通道
             // 里根本没有它的订单，queryUsing 永远回 data=null → 会被当成
             // 「订单没了」误触发自动结算（水其实还在流）。
             // 蓝牙表的结束只来自用户主动停止（App / 通知栏按钮），看本地状态即可。
-            val running: Boolean? =
-                if (PrefsHelper.isBleDevice(snCode)) ShowerController.isRunning(snCode)
-                else orderRunning(snCode)
-            if (ShowerController.isClosing(snCode)) continue
-
-            when (running) {
-                true -> Unit                    // 还在用，继续
-                false -> {                      // 订单没了 → 结束
-                    if (finish(snCode)) return
-                }
-                null -> Unit                    // 请求失败，不确定，下轮再说
+            val status = if (PrefsHelper.isBleDevice(snCode)) {
+                if (ShowerController.isRunning(snCode)) OrderPresence.Original(target.orderNo)
+                else OrderPresence.Ended()
+            } else {
+                ShowerController.orderPresence(snCode, target.orderNo)
             }
+            if (ShowerController.isClosing(snCode)) continue
+            if (target.currentOrder() == null) continue
+
+            if (status is OrderPresence.Ended && finish(target, status.replacingOrderOwner)) return
         }
         AppLogger.i("ShowerWatch 退出监控 $snCode")
     }
 
-    /**
-     * 服务端还有没有这个订单。
-     *
-     * @return true 有 / false **明确**没有 / null 请求失败、不确定
-     *
-     * ⚠️ 三态很重要：把「网络失败」当成「已结束」会在信号差的时候
-     * 凭空发一条「使用结束」并把小组件切回空闲，而水其实还在流。
-     */
-    private suspend fun orderRunning(snCode: String): Boolean? = try {
-        val q = NetworkModule.apiService.queryUsingSafe(
-            snCode = snCode, auth = com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode).fields()
-        )
-        q.deviceInUse
-    } catch (_: Exception) {
-        null
-    }
-
     /** 检测到用水结束。手动关阀正在等待确认时，继续监控，不抢先结算。 */
-    private suspend fun finish(snCode: String): Boolean {
+    private suspend fun finish(target: ShowerOrderTarget, replacingOrderOwner: Boolean?): Boolean {
+        val snCode = target.snCode
         // 已经被别处清理过了（比如用户在 App 里手动停的）——不重复处理
         if (!ShowerController.isRunning(snCode)) {
             return true
         }
 
-        val startedAt = PrefsHelper.getStartedAt(snCode)
+        val startedAt = target.startedAtMs
         val elapsed = elapsedSec(startedAt)
         val deviceName = deviceNameFor(snCode)
-        val orderNo = ShowerController.activeOrderFor(snCode)?.orderNo ?: ""
+        val orderNo = target.currentOrder()?.orderNo ?: return !ShowerController.isRunning(snCode)
         val settlementContext = try { com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode) }
         catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (_: Exception) { return true }
 
         // ⚠️ 顺序要紧：先清本地状态，小组件的 isRunning() 才会变 false。
         // 以前没有这一步，所以自动关停后小组件永远停在「使用中」。
-        if (!ShowerController.markFinishedFromWatch(snCode)) return !ShowerController.isRunning(snCode)
-        LinYuWidget.refreshAll(this)
+        if (!ShowerController.markFinishedFromWatch(target)) return !ShowerController.isRunning(snCode)
+        finishingCount.incrementAndGet()
+        // 旧账单结算期间，同一设备的新订单也能注册自己的监控。
+        currentCoroutineContext()[Job]?.let { watchJobs.remove(snCode, it) }
+        try {
+            LinYuWidget.refreshAll(this)
 
-        // 结算要轮询账单（最多约 7 秒），放在清理之后——金额晚一点到没关系，
-        // 状态先对上是第一位的
-        // 同上：先挂「结算中」，拿到金额后原地更新成自动关停通知
-        Notifier.showSettling(this, Notifier.ID_AUTO_CLOSED, "设备已自动关停 · $deviceName", elapsed)
+            // 状态先更新，金额到达后更新原通知。
+            val automatic = replacingOrderOwner == null
+            val noticeID = if (automatic) Notifier.ID_AUTO_CLOSED else Notifier.ID_FINISHED
+            val title = if (automatic) "设备已自动关停" else "使用结束"
+            Notifier.showSettling(this, noticeID, "$title · $deviceName", elapsed)
+            val finished = ShowerEvents.Finished(
+                snCode, deviceName, elapsed, null, autoClosed = automatic, target = target,
+                replacingOrderOwner = replacingOrderOwner
+            )
+            if (!automatic) ShowerEvents.notifyFinished(finished)
 
-        val money = try {
-            SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName, settlementContext)
-        } catch (_: Exception) { null }
-        LinYuWidget.refreshAll(this)
+            val money = try {
+                SettlementEngine.settleAmount(orderNo, startedAt, snCode, deviceName, settlementContext)
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { null }
+            LinYuWidget.refreshAll(this)
 
-        Notifier.showAutoClosed(this, deviceName, elapsed, money)
-        AppLogger.i("ShowerWatch 检测到结束 $snCode 用时 ${elapsed}s 消费 $money")
+            if (automatic) Notifier.showAutoClosed(this, deviceName, elapsed, money)
+            else Notifier.showFinished(this, deviceName, elapsed, money)
+            AppLogger.i("ShowerWatch 检测到结束 $snCode 用时 ${elapsed}s 消费 $money")
 
-        // 通知 App：如果洗澡界面正开着，让它把弹窗弹出来并同步内存状态。
-        // App 不在的话这个事件没人收，也不影响——状态和通知上面都处理完了。
-        ShowerEvents.notifyFinished(
-            ShowerEvents.Finished(snCode, deviceName, elapsed, money, autoClosed = true)
-        )
+            if (automatic) ShowerEvents.notifyFinished(finished.copy(money = money))
+        } finally {
+            finishingCount.decrementAndGet()
+        }
         return true
     }
 
@@ -217,12 +255,13 @@ class ShowerWatchService : Service() {
      * `goAsync()` 约 10 秒的预算——在广播里做的话，最后那条带金额的通知发不出去。
      * 服务没有这个时限，所以整条流程都在这儿。
      */
-    private suspend fun doFinish(snCode: String) {
+    private suspend fun doFinish(target: ShowerOrderTarget) {
+        val snCode = target.snCode
         // 压根没在用水就别走这套。
         // 少了这道检查，点一下通知栏的「结束用水」（那时已经没有活跃订单了）
         // 会跑完整个流程：closeValve 失败、settleAmount 因为 startedAt=0
         // 拿回上一次的账单金额，最后弹一条「用时 0 秒 · 消费 ¥上次的金额」的假通知。
-        if (!ShowerController.isRunning(snCode)) {
+        if (target.currentOrder() == null || ShowerController.isClosing(snCode)) {
             // 小组件的 busy 归服务管（见 LinYuWidgetProvider.markDelegated），
             // 这条提前返回也必须清掉，否则卡片会永远卡在「正在关闭…」
             WidgetBridge.clearBusy()
@@ -230,7 +269,7 @@ class ShowerWatchService : Service() {
             return
         }
 
-        val startedAt = PrefsHelper.getStartedAt(snCode)
+        val startedAt = target.startedAtMs
         val elapsed = elapsedSec(startedAt)
         val deviceName = deviceNameFor(snCode)
 
@@ -241,7 +280,7 @@ class ShowerWatchService : Service() {
             AppLogger.i("ShowerWatch 检测到蓝牙表 $snCode，转发给 App 走 BLE 关阀")
             WidgetBridge.clearBusy()
             LinYuWidget.refreshAll(this)
-            ShowerEvents.notifyStopBleRequest(snCode)
+            ShowerEvents.notifyStopBleRequest(snCode, target)
             return
         }
 
@@ -249,7 +288,7 @@ class ShowerWatchService : Service() {
         // 本地清理会把活跃订单删掉，之后就再也读不到（`queryUsing` 也问不出来了，
         // 因为订单已经没了）。而开阀后 orderNo 是异步轮询补上的，
         // 「开完水马上停」时本地存的还是空串，那就白丢了结算用的那个直答接口。
-        val orderNo = ShowerController.resolveOrderNo(snCode)
+        val orderNo = ShowerController.resolveOrderNo(snCode, target)
         val settlementContext = try { com.hualala.linyu.data.ProjectAuthRepository.forDevice(snCode) }
         catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (e: Exception) {
@@ -266,13 +305,12 @@ class ShowerWatchService : Service() {
         LinYuWidget.refreshAll(this)
 
         // 关阀结果决定后续分支；失败和未确认都不能进入结算或完成通知。
-        val closeResult = ShowerController.closeValve(snCode, orderNo)
+        val closeResult = ShowerController.closeValve(snCode, orderNo, target)
 
         when (closeDisposition(closeResult)) {
             CloseDisposition.RESTORE_FAILED -> {
                 val message = (closeResult as CloseOutcome.Failed).message
                 AppLogger.w("ShowerWatch 关阀失败 $snCode: $message")
-                ShowerController.restoreActiveOrder(snCode, orderNo, startedAt)
                 WidgetBridge.clearBusy()
                 LinYuWidget.refreshAll(this)
                 Notifier.showCloseFailed(this, deviceName, message)
@@ -283,7 +321,6 @@ class ShowerWatchService : Service() {
             CloseDisposition.RESTORE_UNCONFIRMED -> {
                 val message = (closeResult as CloseOutcome.Unconfirmed).message
                 AppLogger.w("ShowerWatch 停止未确认 $snCode: $message")
-                ShowerController.restoreActiveOrder(snCode, orderNo, startedAt)
                 WidgetBridge.clearBusy()
                 LinYuWidget.refreshAll(this)
                 Notifier.showCloseUnconfirmed(this, deviceName)
@@ -301,7 +338,8 @@ class ShowerWatchService : Service() {
 
         // 只有关阀确认成功后，App 才能退出使用页并展示完成状态。
         ShowerEvents.notifyFinished(
-            ShowerEvents.Finished(snCode, deviceName, elapsed, 0.0, autoClosed = false)
+            ShowerEvents.Finished(snCode, deviceName, elapsed, null, autoClosed = false, target = target,
+                replacingOrderOwner = (closeResult as CloseOutcome.Closed).replacingOrderOwner)
         )
 
         // 关阀已经确认，账单还在路上——先挂一条「结算中」。
@@ -318,26 +356,10 @@ class ShowerWatchService : Service() {
         AppLogger.i("ShowerWatch 用户结束 $snCode 用时 ${elapsed}s 消费 $money")
     }
 
-    /**
-     * 挂上前台通知。
-     *
-     * 通知总开关关掉时**先挂再摘**：Android 不允许前台服务没有通知，
-     * 而且用 `startForegroundService` 起的服务 5 秒内不挂就会被系统直接崩掉，
-     * 所以只能先满足它、再立刻把通知拿掉。
-     *
-     * 代价是服务降级成普通后台服务，被系统回收的概率会高一些——
-     * 极端情况下（内存紧张 / 国产 ROM 清后台）自动关停可能来不及跑。
-     */
+    /** 关闭常规提醒时也保留前台运行，由 Notifier 提供低优先级的后台提示。 */
     private fun attachForeground(n: android.app.Notification) {
         startForeground(Notifier.ID_IN_USE, n)
-        // 通知被关掉时（总开关，或单独关掉「用水状态通知」）**先挂再摘**。
-        // Android 不允许前台服务没有通知，而且用 startForegroundService 起的服务
-        // 5 秒内不挂还会被系统直接崩掉，所以只能先满足它、再立刻拿掉。
-        //
-        // 代价：服务降级成普通后台服务，被系统回收的概率会高一些。
-        if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyInUse) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        }
+        attachedInUse = true
     }
 
     private fun elapsedSec(startedAt: Long): Int =
@@ -400,8 +422,25 @@ class ShowerWatchService : Service() {
     }
 
     companion object {
+        private const val ID_STALE_STOP = 1006
         const val EXTRA_SNCODE = "snCode"
         const val ACTION_FINISH = "com.hualala.linyu.service.ACTION_FINISH"
+        private const val ACTION_REFRESH_NOTIFICATION = "com.hualala.linyu.service.REFRESH_NOTIFICATION"
+        private const val ACTION_MONITOR_EXISTING_ORDER = "com.hualala.linyu.service.MONITOR_EXISTING_ORDER"
+
+        /** 从设置页更新活跃订单的通知，已有监控任务由 watchJobs 去重。 */
+        internal fun refreshNotification(context: Context) {
+            if (PrefsHelper.getActiveOrders().isEmpty()) return
+            val intent = Intent(context, ShowerWatchService::class.java).setAction(ACTION_REFRESH_NOTIFICATION)
+            launch(context, intent, "refresh notification")
+        }
+
+        internal fun refreshNotification(context: Context, target: ShowerOrderTarget) {
+            if (target.currentOrder() == null) return
+            val intent = Intent(context, ShowerWatchService::class.java).setAction(ACTION_MONITOR_EXISTING_ORDER)
+            target.putInto(intent)
+            launch(context, intent, "monitor existing order")
+        }
 
         /** 开始（或确保正在）监控某台设备 */
         fun start(context: Context, snCode: String) {
@@ -418,11 +457,12 @@ class ShowerWatchService : Service() {
          * 之所以不直接在小组件里做：关阀 + 结算要 12 秒以上，
          * 超过广播 `goAsync()` 约 10 秒的预算。
          */
-        fun finishShower(context: Context, snCode: String) {
+        fun finishShower(context: Context, snCode: String, target: ShowerOrderTarget? = ShowerOrderTarget.capture(snCode)) {
             if (snCode.isEmpty()) return
             val i = Intent(context, ShowerWatchService::class.java).apply {
                 action = ACTION_FINISH
                 putExtra(EXTRA_SNCODE, snCode)
+                target?.putInto(this)
             }
             launch(context, i, "finish")
         }

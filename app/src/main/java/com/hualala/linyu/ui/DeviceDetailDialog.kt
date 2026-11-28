@@ -39,7 +39,7 @@ fun DeviceDetailDialog(
     // 用户不知道的话很容易开了水然后就关不上了。
     val isBle = device.needsBluetoothControl
 
-    AlertDialog(
+    ScreenCenteredAlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {

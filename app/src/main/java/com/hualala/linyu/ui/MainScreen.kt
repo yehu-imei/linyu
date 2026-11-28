@@ -36,7 +36,6 @@ import androidx.compose.material.pullrefresh.rememberPullRefreshState
 import androidx.compose.material.ripple
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -56,6 +55,8 @@ import com.hualala.linyu.QrScanActivity
 import com.hualala.linyu.R
 import com.hualala.linyu.data.BalanceEstimator
 import com.hualala.linyu.data.HomeDeviceSection
+import com.hualala.linyu.data.InstalledPlugins
+import com.hualala.linyu.data.ShowerOrderTarget
 import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.model.NearbyDevice
 import com.hualala.linyu.ui.theme.AppColors
@@ -67,13 +68,20 @@ import com.hualala.linyu.utils.MoneyFormat
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterialApi::class)
 @Composable
-fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
+fun MainScreen(
+    phone: String,
+    viewModel: MainViewModel = viewModel(),
+    editMode: Boolean = false,
+    onEditModeChange: (Boolean) -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var visible by remember { mutableStateOf(false) }
-    var editMode by rememberSaveable { mutableStateOf(false) }
-    BackHandler(enabled = editMode && !viewModel.isShowering) { editMode = false }
+    BackHandler(enabled = editMode && !viewModel.isShowering) { onEditModeChange(false) }
     val layout = viewModel.homeDeviceLayout
+    val installedPlugins = installedPluginIds()
+    val showNearby = InstalledPlugins.NEARBY in installedPlugins
+    val allowDiscovery = showNearby || InstalledPlugins.ROOM_BINDING in installedPlugins
     // 是否已获得扫描权限。做成状态：用户授权后要立刻反映到界面上
     var hasScanPerm by remember { mutableStateOf(ScanPermission.granted(context)) }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -81,12 +89,15 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     ) { perms ->
         val ok = perms.entries.all { it.value }
         hasScanPerm = ok
-        if (ok) viewModel.startScan() else viewModel.toastMessage = ScanPermission.deniedMessage()
+        if (allowDiscovery) {
+            if (ok) viewModel.startScan() else viewModel.toastMessage = ScanPermission.deniedMessage()
+        }
     }
 
     // 扫描前才要权限：已授权直接扫，没授权才弹系统对话框。
     // 这样 Android 12+ 的用户全程只会看到「附近的设备」，不会看到定位
     fun scanWithPermission() {
+        if (!allowDiscovery) return
         if (ScanPermission.granted(context)) viewModel.startScan()
         else permissionLauncher.launch(ScanPermission.required)
     }
@@ -102,13 +113,6 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
             } else {
                 viewModel.toastMessage = "未识别到有效二维码"
             }
-        } else {
-            // 扫码页自己弹的说明（没相机权限、相机起不来）挂在 error extra 上。
-            // 以前这里只看 RESULT_OK，这些消息全被丢掉了——用户看到的就是
-            // 点了扫码、黑屏一闪、回到主页，什么提示都没有。
-            result.data?.getStringExtra(QrScanActivity.EXTRA_ERROR)
-                ?.takeIf { it.isNotEmpty() }
-                ?.let { viewModel.toastMessage = it }
         }
     }
 
@@ -127,7 +131,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
         viewModel.initManagers(context)
         // 已授权就静默开始扫描（老用户无感知）；没授权不再自动弹窗，
         // 改由界面上的「开启扫描」按钮触发，避免登录完突然被要定位权限
-        if (ScanPermission.granted(context)) viewModel.startScan()
+        if (allowDiscovery && ScanPermission.granted(context)) viewModel.startScan()
         visible = true
     }
 
@@ -168,7 +172,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     val displayBalance = remember(
         viewModel.balanceBills, viewModel.billsLoaded, viewModel.campusBalance,
         viewModel.walletBalance,
-        PrefsHelper.manualBalance, PrefsHelper.manualBalanceTime
+        viewModel.manualBalanceRevision
     ) {
         // 真实余额（一卡通或钱包）不用等账单，是现成的数字；
         // 只有要走估算时才必须等账单到位，否则减数为 0 会先亮一个错数字。
@@ -180,7 +184,8 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
         Scaffold(
             // 背景应用到「主页」时透明，让最底层的背景图透出来
-            containerColor = if (BackgroundState.config(BackgroundManager.SCOPE_HOME).enabled) Color.Transparent else AppColors.Background
+            containerColor = if (InstalledPlugins.BACKGROUND in installedPlugins &&
+                BackgroundState.config(BackgroundManager.SCOPE_HOME).enabled) Color.Transparent else AppColors.Background
         ) { padding ->
             if (viewModel.isShowering) {
                 ShowerScreen(
@@ -204,16 +209,14 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                         item { Spacer(Modifier.height(8.dp)) }
 
                         item {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Column {
-                                    Text("淋浴", fontSize = 30.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-                                    Text("Hualala", color = AppColors.TextSecondary, fontSize = 14.sp)
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.fillMaxWidth()) {
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Text("淋浴", modifier = Modifier.weight(1f).reportToastPageTitleCenter(),
+                                        fontSize = 30.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Box(Modifier.size(40.dp).clip(CircleShape).background(AppColors.Card),
                                         contentAlignment = Alignment.Center) {
-                                        EditModeButton(editMode, onClick = { editMode = !editMode },
+                                        EditModeButton(editMode, onClick = { onEditModeChange(!editMode) },
                                             modifier = Modifier.size(40.dp))
                                     }
                                     Spacer(Modifier.width(8.dp))
@@ -237,6 +240,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                                         }
                                     }
                                 }
+                                Text("Hualala", color = AppColors.TextSecondary, fontSize = 14.sp)
                             }
                         }
 
@@ -251,12 +255,13 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                             }
                         }
 
-                        val sections = layout.orderedSections
+                        val savedSections = layout.orderedSections
+                        val sections = if (showNearby) savedSections else savedSections - HomeDeviceSection.NEARBY
                         sections.forEachIndexed { index, section ->
                             val sectionVisible = layout.isVisible(section)
                             if (!editMode && !sectionVisible) return@forEachIndexed
                             if (!editMode && section == HomeDeviceSection.LAST_USED &&
-                                (viewModel.activeOrders.isNotEmpty() || viewModel.lastDeviceMac.isBlank())
+                                (viewModel.activeOrders.isNotEmpty() || !viewModel.hasEligibleLastDevice)
                             ) return@forEachIndexed
 
                             item("home-section:${section.name}") {
@@ -266,7 +271,13 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                                     visible = sectionVisible,
                                     canMoveUp = index > 0,
                                     canMoveDown = index < sections.lastIndex,
-                                    onMove = { viewModel.moveHomeSection(section, it) },
+                                    onMove = { direction ->
+                                        val target = sections.getOrNull(index + direction)
+                                        if (target != null) {
+                                            val steps = kotlin.math.abs(savedSections.indexOf(target) - savedSections.indexOf(section))
+                                            repeat(steps) { viewModel.moveHomeSection(section, direction) }
+                                        }
+                                    },
                                     onToggle = { viewModel.toggleHomeSection(section) }
                                 ) {
                                     if (section == HomeDeviceSection.NEARBY) {
@@ -311,9 +322,14 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     if (viewModel.showDeviceDetail) {
         viewModel.selectedDevice?.let { device ->
             val favorite = viewModel.favoriteFor(device)
-            DeviceDetailDialog(device, viewModel.isDeviceActive(device.snCode), viewModel.isOwner,
+            val active = viewModel.isDeviceActive(device.snCode)
+            val restoreTarget = if (active) ShowerOrderTarget.capture(device.snCode) else null
+            DeviceDetailDialog(device, active, viewModel.isOwner,
                 onDismiss = { viewModel.showDeviceDetail = false },
-                onConfirm = { viewModel.startShower(phone) },
+                onConfirm = {
+                    if (active) viewModel.restoreShowerScreen(phone, restoreTarget)
+                    else viewModel.startShower(phone)
+                },
                 isFavorite = favorite != null,
                 onFavorite = {
                     if (favorite != null) viewModel.removeFavorite(favorite.key)
@@ -342,7 +358,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
         // 叠在一条新错误上
         var confirming by remember(err) { mutableStateOf(false) }
 
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = { viewModel.clearShowerError() },
             title = {
                 Text(
@@ -414,7 +430,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
 
     // 开始使用中的加载提示（开阀确认需要几秒）
     if (viewModel.isStartingShower) {
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = {},
             title = { Text("正在开启热水器...", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()) },
@@ -442,7 +458,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
     // （`smallTypeId` 两校的 4G 表也都是 1；`isBle` 压根不返回），
     // 参考项目也没做这个判断。只有站在设备旁的人才知道答案。
     viewModel.bleRetryDevice?.let { dev ->
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = { viewModel.dismissBleRetry() },
             title = {
                 Text(
@@ -473,7 +489,7 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
 
     // 自动关停确认弹窗
     if (viewModel.showAutoCloseDialog) {
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = {},
             title = {
                 Text("⚠️ 热水器已自动关闭", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center,
@@ -486,7 +502,9 @@ fun MainScreen(phone: String, viewModel: MainViewModel = viewModel()) {
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("🚿 ", fontSize = 16.sp)
-                        Text(viewModel.autoCloseDeviceName, fontWeight = FontWeight.Medium, color = AppColors.TextPrimary)
+                        Text(viewModel.autoCloseDeviceName, modifier = Modifier.weight(1f, fill = false),
+                            fontWeight = FontWeight.Medium, color = AppColors.TextPrimary,
+                            maxLines = 1, softWrap = false, overflow = TextOverflow.StartEllipsis)
                     }
                     Spacer(Modifier.height(6.dp))
                     val sec = viewModel.autoCloseElapsed
@@ -560,11 +578,8 @@ private fun ActiveOrderCard(order: com.hualala.linyu.model.ActiveOrder, viewMode
                     Text("点击恢复订单", color = AppColors.TextSecondary, fontSize = 12.sp)
                 }
             }
-            Button(onClick = {
-                viewModel.lastDeviceSnCode = order.snCode
-                viewModel.lastDeviceMac = order.deviceMac
-                viewModel.startLastDevice(phone)
-            }, shape = RoundedCornerShape(16.dp),
+            val restoreTarget = ShowerOrderTarget.capture(order)
+            Button(onClick = { viewModel.restoreShowerScreen(phone, restoreTarget) }, shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.Accent)) { Text("恢复") }
         }
     }
@@ -672,7 +687,7 @@ private fun LazyListScope.nearbyDeviceItems(
 
 @Composable
 private fun LastUsedDeviceCard(viewModel: MainViewModel, phone: String, editing: Boolean, visible: Boolean) {
-    if (viewModel.lastDeviceMac.isBlank()) {
+    if (!viewModel.hasEligibleLastDevice) {
         Text("暂无使用记录", color = AppColors.TextSecondary, fontSize = 13.sp)
         return
     }

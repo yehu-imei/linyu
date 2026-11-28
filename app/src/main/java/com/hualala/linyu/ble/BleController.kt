@@ -115,7 +115,6 @@ class BleController(private val context: Context) {
     /** 累积收到的字节，按 `0x0A` 切帧——一帧可能分多次通知到达 */
     private val rxBuf = java.io.ByteArrayOutputStream()
 
-    private var connectSignal: CompletableDeferred<Boolean>? = null
     private var notifySignal: CompletableDeferred<Boolean>? = null
     private var writeSignal: CompletableDeferred<Boolean>? = null
 

@@ -1,5 +1,6 @@
 package com.hualala.linyu.ui
 
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -7,12 +8,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.hualala.linyu.data.AuthRepository
 import com.hualala.linyu.model.LoginData
+import com.hualala.linyu.utils.AppLogger
+import com.hualala.linyu.utils.PrefsHelper
+import com.hualala.linyu.utils.UserFeedback
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LoginViewModel : ViewModel() {
     var phone by mutableStateOf("")
+        private set
     var password by mutableStateOf("")
     var smsCode by mutableStateOf("")
     /**
@@ -22,17 +29,65 @@ class LoginViewModel : ViewModel() {
      * 要求用户早就设过密码——对第一次用的人来说是死路。所以默认给验证码。
      */
     var isSmsMode by mutableStateOf(true)
+    var rememberPassword by mutableStateOf(false)
+        private set
+    private var savedCredential: PrefsHelper.SavedPasswordLogin? = null
+    private var loadedCredential = false
 
     var isLoading by mutableStateOf(false)
     var isSendingCode by mutableStateOf(false)
+        private set
     var countdown by mutableStateOf(0)
+        private set
     var loginResult by mutableStateOf<Result<LoginData>?>(null)
     var errorMessage by mutableStateOf<String?>(null)
-    var smsSent by mutableStateOf(false)
     val canEditFields: Boolean get() = !isLoading && loginResult?.isSuccess != true
 
-    /** 独立的倒计时协程，和发送请求解耦，所以能点击即开始 */
+    private val smsRequests = LoginSmsRequests()
+    private var smsFormRevision = 0L
     private var countdownJob: Job? = null
+
+    fun restorePasswordLogin() {
+        if (loadedCredential) return
+        loadedCredential = true
+        val saved = PrefsHelper.loadSavedPasswordLogin() ?: return
+        savedCredential = saved
+        if (phone.isNotEmpty() || password.isNotEmpty()) return
+        phone = saved.phone
+        password = saved.password
+        isSmsMode = false
+        rememberPassword = true
+    }
+
+    fun updatePhone(value: String) {
+        if (!canEditFields || phone == value) return
+        val previousPhone = phone
+        phone = value
+        smsCode = ""
+        errorMessage = null
+        smsFormRevision++
+        refreshSmsCountdown()
+        val savedForPhone = savedCredential?.takeIf { it.phone == value }
+        if (!isSmsMode) {
+            if (savedForPhone != null) password = savedForPhone.password
+            else if (previousPhone.length == 11) password = ""
+        }
+        if (savedCredential?.phone == previousPhone || savedForPhone != null) {
+            rememberPassword = savedForPhone != null
+        }
+    }
+
+    fun setRememberedPasswordEnabled(enabled: Boolean) {
+        if (!canEditFields) return
+        if (!enabled && savedCredential?.phone == phone) {
+            if (!PrefsHelper.clearSavedPasswordLogin(phone)) {
+                errorMessage = "无法清除本机密码，请重试"
+                return
+            }
+            savedCredential = null
+        }
+        rememberPassword = enabled
+    }
 
     fun login() {
         if (!canEditFields) return
@@ -48,10 +103,26 @@ class LoginViewModel : ViewModel() {
     }
 
     private fun passwordLogin() {
+        val submittedPhone = phone
+        val submittedPassword = password
+        val shouldRemember = rememberPassword
         viewModelScope.launch {
             isLoading = true; errorMessage = null
             try {
-                val result = AuthRepository.login(phone, password)
+                val result = AuthRepository.login(submittedPhone, submittedPassword)
+                if (result.isSuccess) {
+                    if (shouldRemember) {
+                        val saved = withContext(Dispatchers.IO) {
+                            PrefsHelper.savePasswordLogin(submittedPhone, submittedPassword)
+                        }
+                        if (!saved) {
+                            AppLogger.w("无法在本机保存密码")
+                            forgetOtherAccount(submittedPhone)
+                        }
+                    } else {
+                        forgetOtherAccount(submittedPhone)
+                    }
+                }
                 loginResult = result
                 if (result.isFailure) {
                     val msg = result.exceptionOrNull()?.message ?: "登录失败"
@@ -73,10 +144,12 @@ class LoginViewModel : ViewModel() {
     }
 
     private fun smsLogin() {
+        val submittedPhone = phone
         viewModelScope.launch {
             isLoading = true; errorMessage = null
             try {
-                val result = AuthRepository.smsLogin(phone, smsCode)
+                val result = AuthRepository.smsLogin(submittedPhone, smsCode)
+                if (result.isSuccess) forgetOtherAccount(submittedPhone)
                 loginResult = result
                 if (result.isFailure) {
                     errorMessage = result.exceptionOrNull()?.message ?: "登录失败"
@@ -88,56 +161,65 @@ class LoginViewModel : ViewModel() {
         }
     }
 
+    private suspend fun forgetOtherAccount(submittedPhone: String) {
+        val saved = savedCredential ?: return
+        if (saved.phone != submittedPhone) {
+            withContext(Dispatchers.IO) { PrefsHelper.clearSavedPasswordLogin(saved.phone) }
+        }
+    }
+
     fun sendSmsCode() {
-        if (phone.isBlank() || isSendingCode || countdown > 0) return
+        if (!canEditFields || !isSmsMode || phone.isBlank()) return
         if (phone.length != 11) { errorMessage = "请输入 11 位手机号"; return }
 
-        // 倒计时**先跑起来**，不等网络往返。
-        // 发送请求本身要几百毫秒到一两秒，等它回来再置 60 的话，
-        // 按钮会先僵在「发送」上不动，看起来像点了没反应。
-        // 三条失败路径（手机号不合法、网络异常、服务端拒绝）都会撤销倒计时，不会把用户困在 60 秒里。
-        startCountdown()
+        val request = smsRequests.begin(phone, smsFormRevision, SystemClock.elapsedRealtime()) ?: return
+        errorMessage = null
+        refreshSmsCountdown()
 
         viewModelScope.launch {
-            isSendingCode = true; errorMessage = null
-            val result = AuthRepository.sendSmsCode(phone)
-            if (result.isSuccess) {
-                smsSent = true
-            } else {
-                errorMessage = result.exceptionOrNull()?.message ?: "验证码发送失败"
-                // 没发出去就把倒计时收回，否则要干等 60 秒才能重试
-                cancelCountdown()
+            val result = AuthRepository.sendSmsCode(request.phone)
+            if (!smsRequests.complete(request, result.isSuccess)) return@launch
+            if (result.isFailure && request.matches(phone, smsFormRevision) && isSmsMode && canEditFields) {
+                errorMessage = UserFeedback.smsSendMessage(result.exceptionOrNull()?.message)
             }
-            isSendingCode = false
+            if (request.phone == phone) refreshSmsCountdown()
         }
     }
 
-    private fun startCountdown() {
-        countdownJob?.cancel()
-        countdown = 60
-        countdownJob = viewModelScope.launch {
-            while (countdown > 0) { delay(1000); countdown-- }
+    private fun refreshSmsCountdown() {
+        fun update() {
+            val status = if (isSmsMode) smsRequests.status(phone, SystemClock.elapsedRealtime())
+                else LoginSmsRequests.Status()
+            isSendingCode = status.pending
+            countdown = status.secondsLeft
         }
-    }
-
-    private fun cancelCountdown() {
-        countdownJob?.cancel(); countdownJob = null; countdown = 0
-    }
-
-    override fun onCleared() {
         countdownJob?.cancel()
-        super.onCleared()
+        update()
+        countdownJob = if (countdown > 0) viewModelScope.launch {
+            while (countdown > 0) { delay(1_000); update() }
+        } else null
     }
 
     fun switchMode() {
         if (!canEditFields) return
         isSmsMode = !isSmsMode
         errorMessage = null
-        password = ""
+        smsFormRevision++
+        refreshSmsCountdown()
+        password = if (isSmsMode) "" else savedCredential?.takeIf { it.phone == phone }?.password.orEmpty()
         smsCode = ""
     }
     fun resetResult() {
+        smsRequests.reset()
+        smsFormRevision++
         password = LoginSecretPolicy.clearPassword(password)
+        smsCode = ""
+        phone = ""
+        isSmsMode = true
+        rememberPassword = false
+        savedCredential = null
+        loadedCredential = false
         loginResult = null
+        refreshSmsCountdown()
     }
 }

@@ -88,10 +88,11 @@ object BalanceEstimator {
     }
 
     /** App 内用：直接吃接口返回的账单。有真实余额就直接返回它 */
-    fun estimate(bills: List<BillItem>): Double = estimateFromEntries(billEntries(bills))
+    fun estimate(bills: List<BillItem>): Double? = realBalance() ?: estimateManually(bills)
 
     /** 账单页的一卡通视图在两种真实余额都不可用时可以显示手动估算值。 */
-    fun estimateManually(bills: List<BillItem>): Double = estimateManualFromEntries(billEntries(bills))
+    fun estimateManually(bills: List<BillItem>): Double? =
+        PrefsHelper.manualBalance()?.estimate(billEntries(bills))
 
     private fun billEntries(bills: List<BillItem>): List<Pair<Long, Double>> =
         bills.map {
@@ -108,26 +109,14 @@ object BalanceEstimator {
      *
      * 真实余额在 [estimate] 里就返回了，走到这儿说明拿不到，才做本地推算。
      */
-    fun estimateFromEntries(entries: List<Pair<Long, Double>>): Double {
-        realBalance()?.let { return it }
-        return estimateManualFromEntries(entries)
-    }
-
-    private fun estimateManualFromEntries(entries: List<Pair<Long, Double>>): Double {
-        val initial = PrefsHelper.manualBalance
-        if (initial.isEmpty()) return 0.0
-        val since = PrefsHelper.manualBalanceTime
-        val spent = entries.filter { it.first > since }.sumOf { it.second }
-        return (initial.toDoubleOrNull() ?: 0.0) - spent
-    }
+    fun estimateFromEntries(entries: List<Pair<Long, Double>>): Double? =
+        realBalance() ?: PrefsHelper.manualBalance()?.estimate(entries)
 
     /**
      * 还没填过初始余额、也拿不到真实余额时，界面上用「—」而不是显示 0，
      * 免得被当成「余额为 0」。
      */
-    fun format(balance: Double): String =
-        if (!hasRealBalance() && PrefsHelper.manualBalance.isEmpty()) "¥ —"
-        else "¥ ${formatMoney(balance)}"
+    fun format(balance: Double?): String = balance?.let { "¥ ${formatMoney(it)}" } ?: "¥ —"
 
     /**
      * 余额数字：默认保留 3 位小数；**末位为 0 时收敛为 2 位**。

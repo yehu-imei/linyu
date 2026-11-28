@@ -6,12 +6,14 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.hualala.linyu.MainActivity
 import com.hualala.linyu.R
+import com.hualala.linyu.data.ShowerOrderTarget
 import com.hualala.linyu.utils.MoneyFormat
 
 /**
@@ -55,33 +57,28 @@ object Notifier {
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_IN_USE,
-                "用水状态",
+                "使用状态",
                 // LOW：不出声、不震动、不在锁屏弹，只在通知栏静静挂着
                 NotificationManager.IMPORTANCE_LOW
-            ).apply { description = "用水期间显示已用时间" }
+            ).apply { description = "使用期间显示设备、用时和结束入口" }
         )
-        // 「用水状态通知」关掉时用这条：IMPORTANCE_MIN 会让它折叠到通知栏最底部，
-        // 不占状态栏图标、不打扰。
-        //
-        // ⚠️ 这里**不能直接不发通知**。Android 强制要求前台服务必须挂一条通知，
-        // 没有它就起不来——而前台服务正是「App 被划掉也能自动关停」的唯一保障。
-        // 所以关掉开关的语义是「把它收起来」，不是「关掉后台监控」。
+        // 关闭常规用水通知后，用这一条维持 Android 前台监控服务。
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_IN_USE_QUIET,
-                "用水状态（静默）",
+                "后台提示",
                 NotificationManager.IMPORTANCE_MIN
-            ).apply { description = "关闭「用水状态通知」后，状态会折叠到这里" }
+            ).apply { description = "后台用水监控所需的低优先级提示" }
         )
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_EVENTS,
                 "用水提醒",
                 NotificationManager.IMPORTANCE_DEFAULT
-            ).apply { description = "开始、结束等提醒" }
+            ).apply { description = "用水结束和结算提醒" }
         )
 
-        // ── 重要提醒：会**弹横幅**（heads-up）的那一类 ──
+        // ── 横幅提醒与同类的普通重要提醒 ──
         //
         // ⚠️ 横幅要 IMPORTANCE_HIGH。DEFAULT 只是响一声、不会从屏幕顶上弹出来——
         // 之前三条渠道最高才 DEFAULT，所以全 App 一个横幅都没有。
@@ -92,16 +89,16 @@ object Notifier {
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ALERT,
-                "重要提醒",
+                "横幅提醒",
                 NotificationManager.IMPORTANCE_HIGH
-            ).apply { description = "开阀失败、设备被占用、超时自动关停，会从屏幕顶部弹出横幅" }
+            ).apply { description = "开关水失败、设备占用和自动关停，默认以横幅显示" }
         )
         nm.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ALERT_QUIET,
-                "重要提醒（不弹横幅）",
+                "重要提醒",
                 NotificationManager.IMPORTANCE_DEFAULT
-            ).apply { description = "关闭「横幅提醒」后，这些通知只响一声，不再弹横幅" }
+            ).apply { description = "开关水失败、设备占用和自动关停的普通提醒，默认无横幅" }
         )
     }
 
@@ -124,24 +121,20 @@ object Notifier {
     /**
      * 用水期间常驻的状态条。重复调用即更新同一条。
      *
-     * **即使 [PrefsHelper.notifyInUse] 关着也照样发**，只是换到静默渠道——
-     * 前台服务没有通知就起不来，而它是自动关停的唯一保障。见渠道创建的注释。
+     * 关闭提醒时改用低优先级的后台提示，供前台服务继续监控。
      */
     fun showInUse(
         context: Context,
         snCode: String,
         deviceName: String,
-        startedAtMs: Long
+        startedAtMs: Long,
+        capturedTarget: ShowerOrderTarget? = null
     ): android.app.Notification {
-        ensureChannels(context)
-
-        // 关掉时（总开关，或单独关掉「用水状态通知」）不发内容，
-        // 只给一条满足 startForeground 要求的最小通知；服务拿到后会立刻摘掉，
-        // 用户其实看不到（见 ShowerWatchService.attachForeground）
         if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyInUse) return minimal(context)
 
-        val channel = if (PrefsHelper.notifyInUse) CHANNEL_IN_USE else CHANNEL_IN_USE_QUIET
-        val n = NotificationCompat.Builder(context, channel)
+        ensureChannels(context)
+        val target = capturedTarget ?: ShowerOrderTarget.capture(snCode)
+        val builder = NotificationCompat.Builder(context, CHANNEL_IN_USE)
             .setSmallIcon(R.drawable.ic_notify_shower)
             .setContentTitle("正在使用 · ${shortName(deviceName)}")
             // Chronometer 由系统自己走秒，不需要我们每秒刷新通知
@@ -152,9 +145,9 @@ object Notifier {
             .setOnlyAlertOnce(true)                  // 更新时不重复提醒
             .setPriority(NotificationCompat.PRIORITY_LOW)
             // 点它就是想回使用页看当前状态，不是回首页
-            .setContentIntent(openApp(context, tab = 0, showShower = true))
-            .addAction(stopAction(context, snCode))
-            .build()
+            .setContentIntent(openApp(context, tab = 0, target = target))
+        if (target != null) builder.addAction(stopAction(context, target))
+        val n = builder.build()
 
         notify(context, ID_IN_USE, n)
         return n
@@ -186,6 +179,7 @@ object Notifier {
      * 结算完再换成带金额的结束通知。
      */
     fun showStopping(context: Context, deviceName: String): android.app.Notification {
+        if (!PrefsHelper.notifyEnabled || !PrefsHelper.notifyInUse) return minimal(context)
         ensureChannels(context)
         val n = NotificationCompat.Builder(context, CHANNEL_IN_USE)
             .setSmallIcon(R.drawable.ic_notify_shower)
@@ -274,6 +268,8 @@ object Notifier {
      */
     fun showSettling(context: Context, id: Int, title: String, elapsedSec: Int) {
         if (!PrefsHelper.notifyEnabled) return
+        if (id == ID_AUTO_CLOSED && !PrefsHelper.notifyAutoClose) return
+        if (id == ID_FINISHED && !PrefsHelper.notifyFinished) return
         postEvent(context, id, alert = false, title = title,
             body = "用时 ${formatDuration(elapsedSec)} · 结算中…")
     }
@@ -370,13 +366,15 @@ object Notifier {
         return if (s.length <= maxLen) s else "…" + s.takeLast(maxLen - 1)
     }
 
-    /** 总开关关掉时用的占位通知，只为了满足 startForeground，随即会被摘掉 */
-    private fun minimal(context: Context): android.app.Notification =
-        NotificationCompat.Builder(context, CHANNEL_IN_USE_QUIET)
+    /** 关闭常规提醒时用于维持前台服务的通知。 */
+    internal fun minimal(context: Context): android.app.Notification {
+        ensureChannels(context)
+        return NotificationCompat.Builder(context, CHANNEL_IN_USE_QUIET)
             .setSmallIcon(R.drawable.ic_notify_shower)
             .setContentTitle("淋浴")
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
+    }
 
     /** 时长文案：1小时02分 / 12分34秒 / 45秒 */
     fun formatDuration(sec: Int): String {
@@ -398,29 +396,38 @@ object Notifier {
      *        点「正在使用」那条通知的人就是想看当前这单用水的状态，
      *        把他扔到首页还得自己再找一次。
      */
-    private fun openApp(context: Context, tab: Int, showShower: Boolean = false): PendingIntent {
+    private fun openApp(context: Context, tab: Int, target: ShowerOrderTarget? = null): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra(MainActivity.EXTRA_TAB, tab)
-            if (showShower) putExtra(MainActivity.EXTRA_SHOW_SHOWER, true)
+            if (target != null) {
+                // Extras alone do not distinguish PendingIntents. Each order owns its action.
+                data = Uri.Builder().scheme("linyu").authority("restore")
+                    .appendPath(target.owner).appendPath(target.snCode).appendPath(target.orderNo)
+                    .appendPath(target.startedAtMs.toString()).build()
+                putExtra(MainActivity.EXTRA_SHOW_SHOWER, true)
+                target.putInto(this)
+            }
         }
-        // requestCode 要把 showShower 也带上：两个 PendingIntent 只有 extra 不同的话，
-        // FLAG_UPDATE_CURRENT 会让后建的覆盖先建的，结果点哪个都进同一个页面
         return PendingIntent.getActivity(
-            context, (if (showShower) 7600 else 7000) + tab, intent,
+            context, (if (target != null) 7600 else 7000) + tab, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
     /** 「结束使用」按钮：把动作回传给正在跑的 ShowerWatchService */
-    private fun stopAction(context: Context, snCode: String): NotificationCompat.Action {
+    private fun stopAction(context: Context, target: ShowerOrderTarget): NotificationCompat.Action {
         val intent = Intent(context, com.hualala.linyu.service.ShowerWatchService::class.java).apply {
             action = ACTION_STOP_SHOWER
-            putExtra(com.hualala.linyu.service.ShowerWatchService.EXTRA_SNCODE, snCode)
+            putExtra(com.hualala.linyu.service.ShowerWatchService.EXTRA_SNCODE, target.snCode)
+            target.putInto(this)
+            data = Uri.Builder().scheme("linyu").authority("stop")
+                .appendPath(target.owner).appendPath(target.snCode).appendPath(target.orderNo)
+                .appendPath(target.startedAtMs.toString()).build()
         }
         val pi = PendingIntent.getService(
             // ⚠️ 用按 snCode 稳定分配的 id，不能是 hashCode()——碰撞会停错设备（见 PrefsHelper）
-            context, PrefsHelper.notifyRequestCode(snCode), intent,
+            context, PrefsHelper.notifyRequestCode(target.snCode), intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Action.Builder(

@@ -3,6 +3,10 @@ package com.hualala.linyu.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -14,6 +18,7 @@ import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,8 +31,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalAutofillManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.contentType
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -35,11 +45,13 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.hualala.linyu.R
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
     viewModel: LoginViewModel = viewModel(),
@@ -49,6 +61,7 @@ fun LoginScreen(
     val scale by animateFloatAsState(if (animated) 1f else 0.8f, tween(400))
 
     val autofillManager = LocalAutofillManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(viewModel.loginResult) {
         val result = viewModel.loginResult ?: return@LaunchedEffect
@@ -63,11 +76,21 @@ fun LoginScreen(
         }
     }
 
-    LaunchedEffect(Unit) { animated = true }
+    LaunchedEffect(viewModel) {
+        viewModel.restorePasswordLogin()
+        animated = true
+    }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .pointerInput(keyboardController) {
+                awaitEachGesture {
+                    // 保持输入焦点，让系统收起键盘时无需同时切换输入连接。
+                    awaitFirstDown()
+                    if (waitForUpOrCancellation() != null) keyboardController?.hide()
+                }
+            }
             .background(
                 brush = Brush.verticalGradient(
                     colors = listOf(
@@ -133,12 +156,19 @@ fun LoginScreen(
 
                     // 密码/验证码切换
                     Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalArrangement = Arrangement.Center) {
-                        TextButton(
-                            enabled = viewModel.canEditFields,
-                            onClick = {
-                                autofillManager?.cancel()
-                                viewModel.switchMode()
-                            }
+                        Box(
+                            modifier = Modifier.heightIn(min = 48.dp)
+                                .clickable(
+                                    interactionSource = null,
+                                    indication = null,
+                                    enabled = viewModel.canEditFields,
+                                    role = Role.Button
+                                ) {
+                                    autofillManager?.cancel()
+                                    viewModel.switchMode()
+                                }
+                                .padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center
                         ) {
                             Text(if (viewModel.isSmsMode) "密码登录" else "验证码登录",
                                 color = Color(0xFF1A73E8), fontSize = 13.sp)
@@ -150,28 +180,28 @@ fun LoginScreen(
                     Text(
                         if (viewModel.isSmsMode) "未注册的手机号将自动创建账号"
                         else "未设置密码？请使用手机号验证码登录",
-                        fontSize = 12.sp, color = Color.Gray,
+                        fontSize = 12.sp, color = Color.Gray, minLines = 2,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier.padding(bottom = 12.dp)
                     )
 
-                    OutlinedTextField(
+                    StableOutlinedTextField(
                         value = viewModel.phone,
-                        onValueChange = { if (viewModel.canEditFields) viewModel.phone = it },
+                        onValueChange = viewModel::updatePhone,
                         label = { Text("手机号") },
                         leadingIcon = { Icon(Icons.Default.Phone, null, tint = Color(0xFF1A73E8)) },
                         trailingIcon = {
                             if (viewModel.phone.isNotEmpty()) {
                                 TextButton(
                                     enabled = viewModel.canEditFields,
-                                    onClick = { viewModel.phone = "" }
+                                    onClick = { viewModel.updatePhone("") }
                                 ) { Text("✕", color = Color.Gray) }
                             }
                         },
                         modifier = Modifier.fillMaxWidth().semantics {
                             contentType = if (viewModel.isSmsMode) ContentType.PhoneNumber else ContentType.Username
                         },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         shape = RoundedCornerShape(14.dp),
                         colors = loginFieldColors()
                     )
@@ -179,25 +209,24 @@ fun LoginScreen(
 
                     if (viewModel.isSmsMode) {
                         // 验证码输入
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(
+                        VerificationCodeRow(spacing = 12.dp, field = { fieldModifier ->
+                            StableOutlinedTextField(
                                 value = viewModel.smsCode,
                                 onValueChange = { viewModel.smsCode = it },
                                 label = { Text("验证码") },
-                                modifier = Modifier.weight(1f).semantics { contentType = ContentType.SmsOtpCode },
-                                singleLine = true,
+                                modifier = fieldModifier.semantics { contentType = ContentType.SmsOtpCode },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = loginFieldColors()
                             )
-                            Spacer(Modifier.width(12.dp))
+                        }, send = { buttonModifier ->
                             // 固定宽度：文案在「发送」↔「60s」之间变化时按钮宽度不变，
                             // 否则会把左边 weight(1f) 的输入框挤窄/挤宽，看着像抖了一下
                             Button(
                                 onClick = { viewModel.sendSmsCode() },
-                                enabled = !viewModel.isSendingCode && viewModel.countdown == 0,
+                                enabled = viewModel.canEditFields && !viewModel.isSendingCode && viewModel.countdown == 0,
                                 shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.width(84.dp),
+                                modifier = buttonModifier.width(84.dp),
                                 contentPadding = PaddingValues(horizontal = 4.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = Color(0xFF1A73E8),
@@ -205,11 +234,13 @@ fun LoginScreen(
                                 )
                             ) {
                                 Text(if (viewModel.countdown > 0) "${viewModel.countdown}s" else "发送",
+                                    modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                                     fontSize = 13.sp, color = Color.White, maxLines = 1)
                             }
-                        }
+                        })
+                        Spacer(Modifier.height(60.dp))
                     } else {
-                        OutlinedTextField(
+                        StableOutlinedTextField(
                             value = viewModel.password,
                             onValueChange = { if (viewModel.canEditFields) viewModel.password = it },
                             label = { Text("密码") },
@@ -223,12 +254,35 @@ fun LoginScreen(
                                 }
                             },
                             modifier = Modifier.fillMaxWidth().semantics { contentType = ContentType.Password },
-                            singleLine = true,
                             visualTransformation = PasswordVisualTransformation(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                             shape = RoundedCornerShape(14.dp),
                             colors = loginFieldColors()
                         )
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 12.dp).heightIn(min = 48.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val label = "记住密码"
+                            Text(label, modifier = Modifier.clearAndSetSemantics {},
+                                color = Color(0xFF1A1A1A), fontSize = 13.sp)
+                            CompositionLocalProvider(LocalRippleConfiguration provides null) {
+                                Switch(
+                                    checked = viewModel.rememberPassword,
+                                    onCheckedChange = viewModel::setRememberedPasswordEnabled,
+                                    modifier = Modifier.semantics { contentDescription = label },
+                                    enabled = viewModel.canEditFields,
+                                    colors = SwitchDefaults.colors(
+                                        checkedTrackColor = Color(0xFF1A73E8),
+                                        checkedThumbColor = Color.White,
+                                        uncheckedTrackColor = Color(0xFFF0F3F7),
+                                        uncheckedThumbColor = Color(0xFF767D89),
+                                        uncheckedBorderColor = Color(0xFFB2BAC5)
+                                    )
+                                )
+                            }
+                        }
                     }
                     Spacer(Modifier.height(24.dp))
 
@@ -264,6 +318,23 @@ fun LoginScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun VerificationCodeRow(
+    spacing: Dp,
+    field: @Composable (Modifier) -> Unit,
+    send: @Composable (Modifier) -> Unit
+) {
+    val labelInset = outlinedLabelInset()
+    val outlineHeight = outlinedBodyHeight()
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(spacing)
+    ) {
+        field(Modifier.weight(1f))
+        send(Modifier.padding(top = labelInset).height(outlineHeight))
     }
 }
 

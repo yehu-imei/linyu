@@ -1,6 +1,9 @@
 package com.hualala.linyu.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -26,13 +29,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.hualala.linyu.R
+import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.api.ProjectAuthContext
 import com.hualala.linyu.data.BalanceEstimator
 import com.hualala.linyu.model.BillDTO
 import com.hualala.linyu.model.BillItem
@@ -40,6 +49,7 @@ import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.ui.theme.AppColors
 import com.hualala.linyu.utils.MoneyFormat
 import com.hualala.linyu.utils.PrefsHelper
+import com.hualala.linyu.data.InstalledPlugins
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterialApi::class)
@@ -60,12 +70,14 @@ fun WalletScreen(viewModel: MainViewModel) {
     // 进页面和下拉刷新时都拉一次未支付列表——残留账单是服务端状态，只有它说了算
     LaunchedEffect(Unit) { viewModel.loadUnpaidBills() }
     var showEditDialog by remember { mutableStateOf(false) }
+    var editAccount by remember { mutableStateOf<ProjectAuthContext?>(null) }
     var editValue by remember { mutableStateOf("") }
     var showWalletBalance by rememberSaveable { mutableStateOf(false) }
 
     // 消费趋势开关：进页面时读一次。设置页改完切回来，本页会被重建（AnimatedContent），
     // remember 重新初始化，读到最新值——和通知开关（NotifyCard）同一套模型。
     var trendEnabled by remember { mutableStateOf(PrefsHelper.trendEnabled) }
+    val trendInstalled = InstalledPlugins.CONSUMPTION_TREND in installedPluginIds()
 
     var pullRefreshing by remember { mutableStateOf(false) }
     val pullState = rememberPullRefreshState(
@@ -83,10 +95,9 @@ fun WalletScreen(viewModel: MainViewModel) {
     val balanceTitle = if (showWalletBalance) "趣智校园余额" else "一卡通余额"
     val selectedBalance = if (showWalletBalance) viewModel.walletBalance else viewModel.campusBalance
     val canEstimate = !showWalletBalance && viewModel.campusBalance == null && viewModel.walletBalance == null
-    val manualBalance = PrefsHelper.manualBalance
     val estimate = remember(canEstimate, viewModel.balanceBills, viewModel.billsLoaded,
-        manualBalance, PrefsHelper.manualBalanceTime) {
-        if (canEstimate && viewModel.billsLoaded && manualBalance.isNotBlank()) {
+        viewModel.manualBalanceRevision) {
+        if (canEstimate && viewModel.billsLoaded) {
             BalanceEstimator.estimateManually(viewModel.balanceBills)
         } else null
     }
@@ -102,6 +113,7 @@ fun WalletScreen(viewModel: MainViewModel) {
         ) {
             Row(
                 modifier = Modifier
+                    .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
@@ -113,7 +125,8 @@ fun WalletScreen(viewModel: MainViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(balanceTitle, fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                Text(balanceTitle, modifier = Modifier.reportToastPageTitleCenter(), fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
                 Icon(painterResource(R.drawable.ic_swap_balance), contentDescription = null,
                     tint = AppColors.TextSecondary, modifier = Modifier.size(18.dp))
             }
@@ -123,15 +136,18 @@ fun WalletScreen(viewModel: MainViewModel) {
                 colors = CardDefaults.cardColors(containerColor = AppColors.Card),
                 border = BorderStroke(0.8.dp, AppColors.Border), elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)) {
                 Column(Modifier.padding(24.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("账户余额 (元)", color = AppColors.TextSecondary, fontSize = 14.sp)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("账户余额 (元)", modifier = Modifier.weight(1f), color = AppColors.TextSecondary,
+                            fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         // 拿到真实余额后「手动填写」就藏起来：估算值会被真实值覆盖，
                         // 摆在那儿只会让人以为填了能改数字。
                         //
                         // ⚠️ 用 Text + clickable 而不是 TextButton：TextButton 自带
                         // 48dp 最小高度，会把这一行顶高、下面的余额数字跟着往下掉。
-                        if (canEstimate) {
+                        if (showWalletBalance) {
+                            AlipayRechargeButton(viewModel)
+                        } else if (canEstimate) {
                             Text(
                                 "手动填写", color = AppColors.Accent, fontSize = 13.sp,
                                 modifier = Modifier
@@ -141,7 +157,8 @@ fun WalletScreen(viewModel: MainViewModel) {
                                         // 预扣过几次之后再进来，填上次的旧数字会让人以为没生效，
                                         // 而且从这个数字改起本来也更顺手。
                                         editValue = displayBalance?.let { BalanceEstimator.formatMoney(it) }
-                                            ?: PrefsHelper.manualBalance.ifEmpty { "0" }
+                                            ?: PrefsHelper.manualBalance()?.amount.orEmpty().ifEmpty { "0" }
+                                        editAccount = NetworkModule.session()
                                         showEditDialog = true
                                     }
                                     .padding(horizontal = 6.dp, vertical = 4.dp)
@@ -167,7 +184,7 @@ fun WalletScreen(viewModel: MainViewModel) {
 
             Spacer(Modifier.height(24.dp))
 
-            if (trendEnabled) {
+            if (trendInstalled && trendEnabled) {
                 SpendingTrendCard(
                     bills = viewModel.billHistory,
                     loading = viewModel.isLoadingBills && viewModel.billHistory.isEmpty()
@@ -252,10 +269,10 @@ fun WalletScreen(viewModel: MainViewModel) {
             },
             confirmButton = {
                 Button(onClick = {
-                    PrefsHelper.manualBalance = editValue
-                    PrefsHelper.manualBalanceTime = System.currentTimeMillis()
+                    val saved = editAccount?.let { viewModel.saveManualBalance(it, editValue) } == true
+                    if (!saved) viewModel.toastMessage = "无法保存余额，请重新打开后重试"
                     showEditDialog = false
-                }) { Text("保存") }
+                }, enabled = editValue.isBlank() || editValue.toDoubleOrNull()?.isFinite() == true) { Text("保存") }
             },
             dismissButton = {
                 TextButton(onClick = { showEditDialog = false }) { Text("取消") }
@@ -289,7 +306,7 @@ fun WalletScreen(viewModel: MainViewModel) {
     // 账单详情弹窗
     if (detailBill != null) {
         val dto = detailBill!!
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = { detailBill = null },
             title = { Text("账单详情", fontWeight = FontWeight.Bold) },
             text = {
@@ -305,6 +322,43 @@ fun WalletScreen(viewModel: MainViewModel) {
             },
             confirmButton = { Button(onClick = { detailBill = null }) { Text("确定") } }
         )
+    }
+}
+
+// 只保留小程序 ID 和充值页路由。分享链接可能携带分享者的会话信息。
+private const val QZXY_ALIPAY_RECHARGE =
+    "alipays://platformapi/startapp?appId=2018090661238647&page=pages%2Frecharge%2Frecharge"
+
+@Composable
+private fun AlipayRechargeButton(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    var refreshOnReturn by rememberSaveable { mutableStateOf(false) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        if (refreshOnReturn) {
+            refreshOnReturn = false
+            viewModel.refreshWallet()
+            viewModel.loadCampusBalance()
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(AppColors.Accent.copy(alpha = 0.10f))
+            .clickable(role = Role.Button) {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(QZXY_ALIPAY_RECHARGE))
+                    .setPackage("com.eg.android.AlipayGphone")
+                val opened = runCatching { context.startActivity(intent) }.isSuccess
+                if (opened) refreshOnReturn = true
+                else viewModel.toastMessage = "无法打开小程序，请在支付宝搜索「趣智校园」"
+            }
+            .padding(start = 8.dp, end = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("支付宝充值", color = AppColors.Accent, fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold, maxLines = 1, softWrap = false)
+        Icon(painterResource(R.drawable.ic_widget_chevron), null, Modifier.size(14.dp), tint = AppColors.Accent)
     }
 }
 

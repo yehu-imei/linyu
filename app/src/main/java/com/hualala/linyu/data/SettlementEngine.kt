@@ -9,7 +9,9 @@ import com.hualala.linyu.api.closeOrderSafe
 import com.hualala.linyu.api.consumeOrderResultRaw
 import com.hualala.linyu.api.downRateResultSafe
 import com.hualala.linyu.api.downRateSafe
-import com.hualala.linyu.api.getBillListSafe
+import com.hualala.linyu.api.getProjectBillListSafe
+import com.hualala.linyu.api.ProjectAuthContext
+import com.hualala.linyu.api.ProjectAuthException
 import com.hualala.linyu.api.getDeviceInfoSafe
 import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.model.ActiveOrder
@@ -50,6 +52,13 @@ private sealed interface MoneyProbe {
 }
 
 object SettlementEngine {
+    private suspend fun loadSettlementBills(month: String, session: ProjectAuthContext, source: ProjectAuthContext): List<BillItem> {
+        val response = NetworkModule.apiService.getProjectBillListSafe(month, session, source)
+        ProjectAuthRepository.requireCurrent(session)
+        val bills = response.data?.takeIf { response.success } ?: throw ProjectAuthException("账单查询失败")
+        return if (source.projectId == session.projectId) bills else BillHistoryCache.fromProject(bills, source)
+    }
+
     /** 默认账单不能拿来结算外项目订单；外项目仅按其账户拉取相关月份复核。 */
     suspend fun reconcilePending(pending: List<PendingSettlement>, defaultBills: List<BillItem>): SettlementReconciliation {
         val session = NetworkModule.session()
@@ -69,10 +78,7 @@ object SettlementEngine {
                     }.distinct()
                     months.flatMap { month ->
                         val key = "${context.projectId}:${context.accountId}:$month"
-                        billCache[key] ?: NetworkModule.apiService.getBillListSafe(month, auth = context.fields()).let {
-                            if (!it.success || it.data == null) throw com.hualala.linyu.api.ProjectAuthException("账单查询失败")
-                            it.data.also { bills -> billCache[key] = bills }
-                        }
+                        billCache[key] ?: loadSettlementBills(month, session, context).also { billCache[key] = it }
                     }
                 }
                 ProjectAuthRepository.requireCurrent(session)
@@ -345,9 +351,9 @@ object SettlementEngine {
         startTimeMs: Long,
         snCode: String,
         deviceName: String,
-        context: com.hualala.linyu.api.ProjectAuthContext
+        context: ProjectAuthContext
     ): SettlementBillProbe {
-        val month = java.time.YearMonth.now().toString()
+        val session = NetworkModule.session()
 
         // ⚠️ 兜底时间窗必须**往前放宽**，不能拿 `>= startTimeMs` 卡。
         //
@@ -359,32 +365,29 @@ object SettlementEngine {
         // 通知永远显示「无消费」。
         val windowStart = if (startTimeMs > 0) startTimeMs - SETTLE_WINDOW_SLACK_MS else 0L
         val windowEnd = System.currentTimeMillis()
+        val months = listOf(windowEnd, windowStart).filter { it > 0 }.map {
+            java.time.YearMonth.from(java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault())).toString()
+        }.distinct()
 
         var probe = SettlementBillProbe()
 
         for (attempt in 0 until BILL_LIST_ROUNDS) {
             try {
-                val resp = NetworkModule.apiService.getBillListSafe(month = month, auth = context.fields())
-                ProjectAuthRepository.requireCurrent(context)
-                val bills = resp.data?.takeIf { resp.success }
-                if (bills == null) {
-                    probe = probe.afterLookup(succeeded = false)
-                } else {
-                    val matched = matchSettlementBill(bills, orderNo, deviceName, windowStart, windowEnd)
-                    probe = probe.afterLookup(succeeded = true, matched = matched)
-                    if (matched != null) {
-                        val dto = matched.consumeBillDTO
-                        val amount = probe.amount
-                        if (amount != null) {
-                            PrefsHelper.recordConsume(snCode, amount)
-                            AppLogger.i(
-                                "结算命中（账单列表，第 ${attempt + 1} 轮）：orderNo=${dto.orderNo} " +
-                                    "orderId=${dto.orderId} 金额=$amount 账单时间=${dto.consumeDate}"
-                            )
-                            return probe
-                        }
-                        AppLogger.i("结算：已匹配到账单但金额还是 ${dto.consumeMoney}（可能是占位值）")
+                val bills = months.flatMap { month -> loadSettlementBills(month, session, context) }
+                val matched = matchSettlementBill(bills, orderNo, deviceName, windowStart, windowEnd)
+                probe = probe.afterLookup(succeeded = true, matched = matched)
+                if (matched != null) {
+                    val dto = matched.consumeBillDTO
+                    val amount = probe.amount
+                    if (amount != null) {
+                        PrefsHelper.recordConsume(snCode, amount)
+                        AppLogger.i(
+                            "结算命中（账单列表，第 ${attempt + 1} 轮）：orderNo=${dto.orderNo} " +
+                                "orderId=${dto.orderId} 金额=$amount 账单时间=${dto.consumeDate}"
+                        )
+                        return probe
                     }
+                    AppLogger.i("结算：已匹配到账单但金额还是 ${dto.consumeMoney}（可能是占位值）")
                 }
             } catch (e: CancellationException) {
                 throw e

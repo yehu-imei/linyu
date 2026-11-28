@@ -31,6 +31,7 @@ import com.hualala.linyu.ui.theme.LocalThemeMode
 import com.hualala.linyu.ui.theme.ThemeMode
 import com.hualala.linyu.utils.BackgroundManager
 import com.hualala.linyu.utils.BackgroundState
+import com.hualala.linyu.data.InstalledPlugins
 import com.hualala.linyu.utils.PrefsHelper
 
 @Composable
@@ -46,7 +47,9 @@ fun ShowerScreen(
     onStopClick: () -> Unit,
     onMinimizeClick: () -> Unit = {}
 ) {
-    val keepScreenOn = PrefsHelper.keepScreenOnDuringUse
+    val installedPlugins = installedPluginIds()
+    val keepScreenOnInstalled = InstalledPlugins.KEEP_SCREEN_ON in installedPlugins
+    val keepScreenOn = keepScreenOnInstalled && PrefsHelper.keepScreenOnDuringUse
     KeepScreenOnDuringUse(isUsing && keepScreenOn)
     BackHandler(onBack = onMinimizeClick)
     val minutes = elapsedSec / 60
@@ -56,7 +59,8 @@ fun ShowerScreen(
     val isDark = themeMode == ThemeMode.DARK
 
     // 使用页是否套用了自定义背景
-    val customBg = BackgroundState.config(BackgroundManager.SCOPE_SHOWER).enabled
+    val customBg = InstalledPlugins.BACKGROUND in installedPlugins &&
+        BackgroundState.config(BackgroundManager.SCOPE_SHOWER).enabled
 
     // 背景应用到「使用页」时不再画自身渐变，让底层背景图透出来
     val bgModifier = if (customBg) Modifier
@@ -104,7 +108,7 @@ fun ShowerScreen(
                     Text("💧 已预扣 ¥$remaining", fontSize = 18.sp,
                         fontWeight = FontWeight.Bold, color = AppColors.Accent)
                     Spacer(Modifier.height(4.dp))
-                    Text("计费以热水器显示为准", fontSize = 12.sp, color = AppColors.TextSecondary)
+                    Text("费用以实际结算为准", fontSize = 12.sp, color = AppColors.TextSecondary)
                 }
             }
 
@@ -129,9 +133,11 @@ fun ShowerScreen(
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
-            Text(if (keepScreenOn) "屏幕常亮：开" else "屏幕常亮：关",
-                fontSize = 12.sp, color = AppColors.TextSecondary)
+            if (keepScreenOnInstalled) {
+                Spacer(Modifier.height(8.dp))
+                Text(if (keepScreenOn) "屏幕常亮：开" else "屏幕常亮：关",
+                    fontSize = 12.sp, color = AppColors.TextSecondary)
+            }
 
             // 自动关停倒计时
             if (autoDisConSec > 0) {
@@ -188,7 +194,7 @@ fun ShowerScreen(
 
             Spacer(Modifier.height(16.dp))
 
-            Text("费率: 0.041元/升 · 设备: ${location.takeLast(6)}",
+            Text("设备: ${location.takeLast(6)}",
                 fontSize = 11.sp, color = AppColors.TextSecondary, textAlign = TextAlign.Center)
         }
 

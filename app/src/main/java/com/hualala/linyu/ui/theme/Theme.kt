@@ -7,6 +7,8 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
+import com.hualala.linyu.data.InstalledPlugins
+import com.hualala.linyu.ui.installedPluginIds
 import com.hualala.linyu.utils.BackgroundManager
 import com.hualala.linyu.utils.BackgroundState
 
@@ -86,7 +88,11 @@ fun LinYuThemeSpecific(mode: ThemeMode, content: @Composable () -> Unit) {
     val dark = (mode == ThemeMode.DARK)
     val base = if (dark) DarkColors else LightColors
     // 自定义背景提取的主题色：只覆盖「强调色」，不参与 Light / Dark 的判定与切换
-    val bgTheme = BackgroundState.config(BackgroundManager.SCOPE_HOME).themeColor
+    val bgTheme = if (InstalledPlugins.BACKGROUND in installedPluginIds()) {
+        BackgroundState.config(BackgroundManager.SCOPE_HOME).themeColor
+    } else {
+        null
+    }
     val set = if (bgTheme != null) base.copy(Accent = Color(bgTheme)) else base
     val scheme = if (dark) darkColorScheme(
         primary = set.Accent, background = set.Background, surface = set.SolidSurface,

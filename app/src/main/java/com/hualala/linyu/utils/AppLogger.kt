@@ -2,6 +2,7 @@ package com.hualala.linyu.utils
 
 import android.content.Context
 import android.util.Log
+import com.hualala.linyu.data.InstalledPlugins
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -48,6 +49,7 @@ object AppLogger {
     }
 
     private fun write(level: String, msg: String) {
+        if (!InstalledPlugins.canRecordRuntimeLogs()) return
         val line = "${LocalDateTime.now().format(timeFmt)} [$level] ${mask(msg)}"
         synchronized(memoryLogs) {
             memoryLogs.addLast(line)

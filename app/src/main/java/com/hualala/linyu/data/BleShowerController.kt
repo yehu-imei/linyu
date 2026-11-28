@@ -4,6 +4,7 @@ import com.hualala.linyu.api.NetworkModule
 import com.hualala.linyu.api.bluetoothFailOrderSafe
 import com.hualala.linyu.api.bluetoothRateOrderSafe
 import com.hualala.linyu.api.bluetoothUploadDataSafe
+import com.hualala.linyu.api.queryUsingSafe
 import com.hualala.linyu.ble.BleConnectResult
 import com.hualala.linyu.ble.BleController
 import com.hualala.linyu.ble.BleFrame
@@ -12,7 +13,10 @@ import com.hualala.linyu.model.DeviceInfo
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.KlcxkjCrypto
 import com.hualala.linyu.utils.KlcxkjSigner
+import com.hualala.linyu.utils.PrefsHelper
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * 蓝牙水表的**开阀 / 结算编排**。
@@ -143,13 +147,16 @@ object BleShowerController {
         ble: BleController,
         device: DeviceInfo,
         loginCode: String,
-        telephone: String
+        telephone: String,
+        restoreTarget: ShowerOrderTarget? = null,
+        canStartNewOrder: () -> Boolean = { true }
     ): OpenOutcome {
         // 签名已改为纯 Kotlin 实现（算法见 KlcxkjSigner），不再依赖 native 库，
         // 所以这里没有「加密库不可用」这条分支了。
         if (loginCode.isEmpty() || telephone.isEmpty()) {
             return OpenOutcome.Failed("登录信息不完整，请重新登录")
         }
+        val login = NetworkModule.session()
         val context = try { ProjectAuthRepository.forDevice(device.snCode, device) }
         catch (e: kotlinx.coroutines.CancellationException) { throw e }
         catch (e: Exception) { return OpenOutcome.Failed(e.message ?: "设备账户不可用") }
@@ -200,10 +207,60 @@ object BleShowerController {
 
         try {
             // ② 查询设备状态——protocolType 和 randomNumber 都必须用设备给的
-            var st = ble.query()
+            val st = ble.query()
                 ?: return OpenOutcome.Failed("设备无响应，请靠近后重试")
             AppLogger.i("蓝牙状态：protocol=${st.protocolType} random=${st.randomNumber} state=${st.state}")
 
+            ProjectAuthRepository.requireCurrent(login)
+            suspend fun queryCurrentOrder(): com.hualala.linyu.model.BaseResponse<com.hualala.linyu.model.OrderStatus>? {
+                val response = try {
+                    NetworkModule.apiService.queryUsingSafe(snCode = device.snCode, auth = context.fields())
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) { null }
+                ProjectAuthRepository.requireCurrent(login)
+                return response
+            }
+
+            if (restoreTarget != null) {
+                val original = restoreTarget.currentOrder()
+                    ?.takeIf { it.snCode == device.snCode && it.orderNo.isNotBlank() }
+                    ?: return OpenOutcome.Failed("原订单无法确认，请核对设备")
+                if (st.state == 0 || st.state == STATE_PENDING_SETTLE || st.state == STATE_PENDING_SETTLE_ALT) {
+                    return OpenOutcome.Failed("原订单已结束")
+                }
+                if (st.state != 1 || queryCurrentOrder()?.ownedOrderNo(device.snCode) != original.orderNo ||
+                    restoreTarget.currentOrder() == null) {
+                    return OpenOutcome.Failed("原订单无法确认，请在官方 App 核对")
+                }
+                return OpenOutcome.Resumed(Session(
+                    device.snCode, connectAddress, st.protocolType, st.randomNumber, "", original.orderNo,
+                    context.projectId, context.accountId, login.owner
+                ))
+            }
+
+            val pending = PrefsHelper.pendingBleOpen(login.owner, device.snCode)
+            if (pending != null) {
+                if (!pending.matchesDevice(login.owner, context, device.snCode, connectAddress)) {
+                    return OpenOutcome.Unconfirmed("上次开启的设备信息已变化，请核对设备")
+                }
+                if (st.state == 0) {
+                    PrefsHelper.clearPendingBleOpen(pending)
+                    return OpenOutcome.Failed("设备当前空闲，请重新开启")
+                }
+                if (st.state == 1 && pending.session.orderNo.isNotBlank()) {
+                    val order = queryCurrentOrder()
+                    if (order != null && pending.identifiesRunningOrder(st.state, order)) {
+                        ShowerController.ensureActiveOrder(device.snCode, pending.session.orderNo, device,
+                            newOrderStartedAtMs = pending.startedAt)
+                        PrefsHelper.clearPendingBleOpen(pending)
+                        return OpenOutcome.Resumed(pending.session.copy(
+                            protocolType = st.protocolType, randomNumber = st.randomNumber
+                        ))
+                    }
+                }
+                return OpenOutcome.Unconfirmed("上次开启结果仍未确认，请检查设备或在官方 App 核对")
+            }
             // state != 0 说明设备不是空闲
             if (st.state != 0) {
                 // state=3/6：设备**已关阀但有遗留未结算记录**（上一笔结算失败留下的）。
@@ -243,6 +300,7 @@ object BleShowerController {
             }
 
             // ③ 向服务端要费率包
+            if (!canStartNewOrder()) return OpenOutcome.Failed("设备选择已变化，请刷新后重试")
             val signature = BleSignBuilder.signRateOrder(
                 loginCode = loginCode,
                 telephone = telephone,
@@ -279,7 +337,6 @@ object BleShowerController {
             }
 
             // ④ 写入费率包——这一步真正开阀
-            val written = ble.writeRate(downBytes)
             val session = Session(
                 snCode = device.snCode,
                 mac = connectAddress,
@@ -291,8 +348,16 @@ object BleShowerController {
                 orderNo = resp.data.orderNo.orEmpty().ifEmpty { resp.data.liquidOrderNo.orEmpty() },
                 projectId = context.projectId,
                 accountId = context.accountId,
-                authOwner = NetworkModule.session().owner
+                authOwner = login.owner
             )
+            val pendingWrite = PendingBleOpen(session, System.currentTimeMillis())
+            ProjectAuthRepository.requireCurrent(login)
+            if (!withContext(Dispatchers.IO) { PrefsHelper.savePendingBleOpen(pendingWrite) }) {
+                return OpenOutcome.Failed("无法保存订单状态，请重试")
+            }
+            ProjectAuthRepository.requireCurrent(login)
+            val written = ble.writeRate(downBytes)
+            ProjectAuthRepository.requireCurrent(login)
 
             return if (written) {
                 AppLogger.i("蓝牙开阀成功 orderNo=${session.orderNo}")
@@ -300,7 +365,9 @@ object BleShowerController {
                 // ShowerWatchService，服务要读活跃订单构建「使用中」通知。
                 // 蓝牙路径以前漏了这一步（4G 路径在 openValve 里有），
                 // 服务拿到空列表直接 `first()` 崩溃，进程死掉、连接丢失、阀关不了。
-                ShowerController.ensureActiveOrder(device.snCode, session.orderNo, device)
+                ShowerController.ensureActiveOrder(device.snCode, session.orderNo, device,
+                    newOrderStartedAtMs = pendingWrite.startedAt)
+                PrefsHelper.clearPendingBleOpen(pendingWrite)
                 OpenOutcome.Opened(session)
             } else {
                 // 命令发出去了但设备没回确认——**不能当失败**，费率包可能已经写进去了

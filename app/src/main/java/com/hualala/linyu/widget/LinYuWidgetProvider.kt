@@ -1,5 +1,7 @@
 package com.hualala.linyu.widget
 
+import com.hualala.linyu.data.InstalledPlugins
+
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProvider
 import android.content.BroadcastReceiver
@@ -9,11 +11,10 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import com.hualala.linyu.api.NetworkModule
-import com.hualala.linyu.data.CloseOutcome
 import com.hualala.linyu.data.OpenOutcome
 import com.hualala.linyu.data.PickResult
 import com.hualala.linyu.data.ShowerController
-import com.hualala.linyu.model.DeviceInfo
+import com.hualala.linyu.data.ShowerOrderTarget
 import com.hualala.linyu.service.ShowerWatchService
 import com.hualala.linyu.service.WidgetBleService
 import com.hualala.linyu.utils.AppLogger
@@ -103,17 +104,38 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         }
 
         val pickMac = intent.getStringExtra(EXTRA_PICK_MAC) ?: ""
+        val pickOwner = intent.getStringExtra(EXTRA_PICK_OWNER) ?: ""
+        val startTarget = if (action == ACTION_START || action == ACTION_REFRESH) {
+            WidgetStartTarget.fromIntent(intent)
+        } else null
+        val stopTarget = if (action == ACTION_STOP) ShowerOrderTarget.fromIntent(intent) else null
 
         // goAsync：告诉系统"这个广播还没处理完，别回收进程"，最多约 10 秒
         val pending = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            var busyStarted = false
             try {
-                handleAction(context, id, action, pickMac)
+                WidgetBridge.ensureInit(context)
+                val canHandle = when (action) {
+                    ACTION_START -> startTarget?.canStart() == true && WidgetBridge.recoveryFor(startTarget) == null
+                    ACTION_REFRESH -> startTarget?.canStart() == true && WidgetBridge.recoveryFor(startTarget) != null
+                    ACTION_STOP -> stopTarget?.currentOrder() != null
+                    ACTION_PICK_DEVICE -> InstalledPlugins.isInstalled(InstalledPlugins.NEARBY) &&
+                        pickOwner.isNotBlank() && pickOwner == NetworkModule.session().owner
+                    else -> true
+                }
+                if (!canHandle) {
+                    // 旧按钮只刷新当前组件，避免干扰另一条正在处理的操作。
+                    WidgetBridge.renderId(context, id)
+                    return@launch
+                }
+                busyStarted = true
+                handleAction(context, id, action, pickMac, pickOwner, startTarget, stopTarget)
             } catch (e: Exception) {
                 // 小组件里没有地方弹错误，只能落日志；界面靠重新渲染回落到真实状态
                 AppLogger.e("Widget action failed: $action", e)
             } finally {
-                finishAction(context, pending)
+                if (busyStarted) finishAction(context, pending) else pending.finish()
             }
         }
     }
@@ -155,10 +177,11 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         context: Context,
         appWidgetId: Int,
         action: String,
-        pickMac: String = ""
+        pickMac: String,
+        pickOwner: String,
+        startTarget: WidgetStartTarget?,
+        stopTarget: ShowerOrderTarget?
     ) {
-        WidgetBridge.ensureInit(context)
-
         // 「选用」只换设备、不开阀，所以放在下面的 snCode 校验之前——
         // 这个动作本来就是要把「还没有设备」变成「有设备」
         if (action == ACTION_PICK_DEVICE) {
@@ -170,8 +193,9 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
 
             // 新设备没查出来就保持原样，只报个错，别把用户原来那台也弄丢。
             // 失败原因分开报：设备不存在和网络不通，用户能做的事完全不一样
-            when (val result = ShowerController.pickDevice(pickMac)) {
+            when (val result = ShowerController.pickDevice(pickMac, pickOwner)) {
                 PickResult.Ok -> AppLogger.i("Widget 选用设备成功 ($pickMac)")
+                PickResult.StaleSelection -> AppLogger.i("小组件选用已取消：账户或设备筛选已变化")
                 PickResult.DeviceNotFound -> {
                     AppLogger.w("Widget 选用失败：服务端没有这台设备 ($pickMac)")
                     WidgetBridge.markNotice(WidgetRenderer.DisabledReason.DEVICE_NOT_FOUND)
@@ -196,30 +220,14 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         // 「正在开启…/正在关闭…」，只重绘被点的那个会让另一个看起来没反应
         WidgetBridge.renderAll(context)
 
-        val snCode = PrefsHelper.lastDeviceSnCode
-        if (snCode.isNullOrEmpty() || !PrefsHelper.isLoggedIn) {
-            WidgetBridge.clearBusy()
-            return
-        }
-
-        // ⚠️ 寝室闸门。`readState()` 里也有一道，但那一处只管**显示**——
-        // 开阀真正走的是这里，而这里读的是 Prefs 里的 lastDeviceSnCode，不经过渲染。
-        // 少了这道判断，就会出现「桌面显示『请先选择设备』，点下去却把别寝室的阀开了」：
-        // 用户看不到自己在开哪台，钱却已经花了。
-        //
-        // ⚠️ **只拦开阀**。停止和刷新必须放行——正在用水时卡片可能显示的是别的状态，
-        // 但水还在流，用户得有办法关掉它。把停止也拦住等于让人关不了水。
-        if (action == ACTION_START &&
-            !DeviceInfo.inSameRoom(PrefsHelper.boundRoom, ShowerController.roomFilterName())
-        ) {
-            AppLogger.w("Widget 开阀被寝室筛选拦下：${PrefsHelper.lastDeviceName}")
-            WidgetBridge.clearBusy()
-            WidgetBridge.renderAll(context)
-            return
-        }
-
         when (action) {
             ACTION_START -> {
+            val target = startTarget ?: return
+            val snCode = target.snCode
+            val session = NetworkModule.session()
+            val mac = PrefsHelper.lastDeviceMac
+            val name = PrefsHelper.lastDeviceName.ifEmpty { "热水器" }
+            if (target.owner != session.owner || !target.canStart() || WidgetBridge.recoveryFor(target) != null) return
             // 蓝牙表：RemoteViews 自己开不了 BLE，转交 WidgetBleService
             // （它走的是与 App 内完全相同的 BleShowerController 流程）
             if (PrefsHelper.isBleDevice(snCode)) {
@@ -234,7 +242,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                 //
                 // 上面通用分支已经 markBusy(STARTING) + renderAll 过了，这里不必重复画。
                 WidgetBridge.markDelegated()
-                WidgetBleService.open(context, snCode, PrefsHelper.lastDeviceMac)
+                WidgetBleService.open(context, target, mac)
                 return
             }
             // ⚠️ `openValve` 的**第一步**就是网络请求（`queryUsing`），而它自己没有
@@ -245,20 +253,26 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
             // 用户完全不知道刚才那一下为什么没反应，多半会以为小组件坏了。
             //
             // 所以在这里接住，转成和「开阀失败」同一套反馈：卡片提示 + 横幅通知。
+            val attemptedAt = System.currentTimeMillis()
             val outcome = try {
-                ShowerController.openValve(snCode)
+                ShowerController.openValve(
+                    snCode, expectedOwner = target.owner,
+                    canStartNewOrder = { target.canStart() && WidgetBridge.recoveryFor(target) == null }
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (NetworkModule.session().loginCode != session.loginCode) return
                 AppLogger.w("Widget 开阀网络异常 ($snCode)：${e.message}")
                 WidgetBridge.markNotice(WidgetRenderer.DisabledReason.NETWORK)
                 Notifier.showOpenFailed(
                     context,
-                    PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
+                    name,
                     "网络异常，请检查网络后重试"
                 )
                 return
             }
+            if (NetworkModule.session().loginCode != session.loginCode) return
             when (outcome) {
                 // Opened / Resumed：状态已落盘，重新渲染就会变成「使用中」
                 is OpenOutcome.Opened, is OpenOutcome.Resumed -> {
@@ -275,7 +289,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                     Notifier.showInUse(
                         context,
                         snCode,
-                        PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
+                        name,
                         PrefsHelper.getStartedAt(snCode)
                     )
                     // 交给前台服务持续盯着：超时自动关停、被外部关闭，都要能立刻发现
@@ -301,7 +315,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                     WidgetBridge.markNotice(WidgetRenderer.DisabledReason.IN_USE_BY_OTHERS)
                     Notifier.showOccupied(
                         context,
-                        PrefsHelper.lastDeviceName.ifEmpty { "该设备" },
+                        name,
                         alert = !alreadyOccupied
                     )
                 }
@@ -322,14 +336,14 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                     WidgetBridge.markNotice(WidgetRenderer.DisabledReason.FAILED)
                     Notifier.showOpenFailed(
                         context,
-                        PrefsHelper.lastDeviceName.ifEmpty { "热水器" },
+                        name,
                         outcome.message
                     )
                 }
-                // 预算耗尽：不谎报成功也不谎报失败，改成"点击刷新"由用户手动对齐
+                // 预算或轮询次数耗尽：显示「点击刷新」由用户手动核对。
                 OpenOutcome.Unknown -> {
-                    AppLogger.w("Widget 开阀结果未知（预算耗尽）")
-                    WidgetBridge.markUnknown()
+                    AppLogger.w("Widget 开阀结果未知（查询未确认）")
+                    WidgetBridge.markUnknown(target, attemptedAt)
                 }
             }
             }
@@ -342,6 +356,8 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
              * 服务没有这个时限，所以整条停止流程（关阀 → 结算 → 通知）都搬过去了。
              */
             ACTION_STOP -> {
+                val target = stopTarget?.takeIf { it.currentOrder() != null } ?: return
+                val snCode = target.snCode
                 AppLogger.i("Widget 请求停止 $snCode")
                 // 告诉广播收尾：别清「正在关闭…」。关阀要 5 秒，
                 // 广播是立刻返回的，清了 busy 卡片会先弹回「使用中」再变空闲，
@@ -349,24 +365,35 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
                 WidgetBridge.markDelegated()
                 if (PrefsHelper.isBleDevice(snCode)) {
                     // 蓝牙表：走 BLE 关阀 + 结算（用持久化会话，不依赖 App 进程）
-                    WidgetBleService.close(context, snCode)
+                    WidgetBleService.close(context, target)
                 } else {
-                    ShowerWatchService.finishShower(context, snCode)
+                    ShowerWatchService.finishShower(context, snCode, target)
                 }
             }
 
             // 「状态未知」状态下用户点按钮：按一次服务端真实状态，把本地对齐
             ACTION_REFRESH -> {
-                val running = ShowerController.reconcile(snCode)
-                AppLogger.i("Widget 手动刷新：服务端状态 running=$running")
-                WidgetBridge.clearUnknown()
+                val target = startTarget ?: return
+                val recovery = WidgetBridge.recoveryFor(target) ?: return
+                when (val result = ShowerController.reconcile(target.snCode, target.owner, recovery.attemptedAt) {
+                    target.matchesSelection() && WidgetBridge.recoveryFor(target) === recovery
+                }) {
+                    is com.hualala.linyu.data.WidgetReconcileResult.Running -> {
+                        WidgetBridge.clearRecovery(recovery)
+                        ShowerWatchService.refreshNotification(context, result.target)
+                    }
+                    com.hualala.linyu.data.WidgetReconcileResult.Resolved -> WidgetBridge.clearRecovery(recovery)
+                    com.hualala.linyu.data.WidgetReconcileResult.Unknown,
+                    com.hualala.linyu.data.WidgetReconcileResult.Stale -> Unit
+                }
             }
         }
     }
 
     /** 渲染单个 widget（不含"进行中"覆盖） */
     private fun render(context: Context, id: Int): android.widget.RemoteViews {
-        val disabled = WidgetBridge.busyReason()
+        val state = WidgetRenderer.readState()
+        val disabled = WidgetBridge.busyReason(state)
         return WidgetRenderer.build(context, size, WidgetRenderer.readState(), id, disabled)
     }
 
@@ -379,6 +406,7 @@ open class LinYuWidgetProvider : AppWidgetProvider() {
         const val ACTION_PICK_DEVICE = "com.hualala.linyu.widget.ACTION_PICK_DEVICE"
         const val EXTRA_TAB = "tab"
         const val EXTRA_PICK_MAC = "pickMac"
+        const val EXTRA_PICK_OWNER = "pickOwner"
 
         /** 「选用」失败这类提示在桌面上停留多久 */
         private const val NOTICE_DURATION_MS = 3_000L
@@ -411,13 +439,14 @@ object LinYuWidget {
     /** App 内状态变化时调用，把桌面上的小组件全部刷新一遍 */
     fun refreshAll(context: Context) {
         WidgetBridge.ensureInit(context)
-        // App 刚把状态对齐过，桌面上残留的"状态未知"不再成立。
-        // 注意小组件自己操作完走的 [WidgetBridge.renderAll] 不带这一步——
-        // 那时其他 widget 的"状态未知"仍然成立，不该被顺手清掉。
-        WidgetBridge.clearAllUnknown()
         WidgetBridge.forEachWidget(context) { id, size ->
             WidgetBridge.render(context, id, size)
         }
+    }
+
+    internal fun refreshDeviceFilter(context: Context) {
+        WidgetBridge.ensureInit(context)
+        WidgetBridge.renderAll(context)
     }
 }
 
@@ -445,14 +474,13 @@ internal object WidgetBridge {
     // 一次操作本来就只可能有一个，按 id 分会造成"只有被点的那个显示正在关闭，
     // 另一个要等结束才同步"——用户明确反馈过这个问题
     private var busy: WidgetRenderer.DisabledReason? = null
-    private var unknown = false
+    private val recoveries = mutableMapOf<WidgetStartTarget, WidgetOpenRecovery>()
 
     /** 需要短暂停留在桌面上的提示（「选用」失败、开阀失败），由 [takeNotice] 取走 */
     private var notice: WidgetRenderer.DisabledReason? = null
 
     fun markBusy(reason: WidgetRenderer.DisabledReason) {
         notice = null            // 新操作开始，上一次留下的提示作废
-        unknown = false
         busy = reason
     }
 
@@ -463,7 +491,6 @@ internal object WidgetBridge {
      * 显示时长由调用方（Provider 的 `postDelayed`）控制。
      */
     fun markNotice(reason: WidgetRenderer.DisabledReason) {
-        unknown = false
         notice = reason
         busy = reason
     }
@@ -497,13 +524,18 @@ internal object WidgetBridge {
         if (busy == reason) busy = null
     }
 
-    fun markUnknown() {
+    fun markUnknown(target: WidgetStartTarget, attemptedAt: Long) {
         busy = null
-        unknown = true
+        synchronized(recoveries) { recoveries[target] = WidgetOpenRecovery(target, attemptedAt) }
     }
 
-    fun clearUnknown() {
-        unknown = false
+    fun recoveryFor(target: WidgetStartTarget): WidgetOpenRecovery? =
+        synchronized(recoveries) { recoveries[target] }
+
+    fun clearRecovery(recovery: WidgetOpenRecovery) {
+        synchronized(recoveries) {
+            if (recoveries[recovery.target] === recovery) recoveries.remove(recovery.target)
+        }
     }
 
     fun clearBusy() {
@@ -516,13 +548,16 @@ internal object WidgetBridge {
         // 状态是全局的，单个 widget 被删不影响它
     }
 
-    /** App 侧刚对过账，桌面上残留的"状态未知"已经不准了，清掉 */
-    fun clearAllUnknown() {
-        unknown = false
+    fun busyReason(state: WidgetState): WidgetRenderer.DisabledReason? {
+        if (state is WidgetState.Running) {
+            state.target?.let { target ->
+                recoveryFor(WidgetStartTarget(target.snCode, target.owner))?.let(::clearRecovery)
+            }
+        }
+        return busy ?: if (state is WidgetState.Idle && recoveryFor(state.target) != null) {
+            WidgetRenderer.DisabledReason.UNKNOWN
+        } else null
     }
-
-    fun busyReason(): WidgetRenderer.DisabledReason? =
-        busy ?: if (unknown) WidgetRenderer.DisabledReason.UNKNOWN else null
 
     /** 遍历桌面上所有「淋浴」小组件 */
     fun forEachWidget(context: Context, block: (id: Int, size: WidgetSize) -> Unit) {
@@ -539,8 +574,9 @@ internal object WidgetBridge {
     }
 
     fun render(context: Context, id: Int, size: WidgetSize) {
+        val state = WidgetRenderer.readState()
         val views = WidgetRenderer.build(
-            context, size, WidgetRenderer.readState(), id, busyReason(),
+            context, size, state, id, busyReason(state),
             tab = PrefsHelper.widgetTab(id)
         )
         AppWidgetManager.getInstance(context).updateAppWidget(id, views)

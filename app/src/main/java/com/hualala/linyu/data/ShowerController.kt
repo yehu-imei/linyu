@@ -1,6 +1,7 @@
 package com.hualala.linyu.data
 
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.api.ProjectAuthContext
 import com.hualala.linyu.api.closeOrderResultSafe
 import com.hualala.linyu.api.closeOrderSafe
 import com.hualala.linyu.api.consumeOrderResultRaw
@@ -67,6 +68,13 @@ sealed interface OpenOutcome {
     }
 }
 
+internal sealed interface WidgetReconcileResult {
+    data class Running(val target: ShowerOrderTarget) : WidgetReconcileResult
+    data object Resolved : WidgetReconcileResult
+    data object Unknown : WidgetReconcileResult
+    data object Stale : WidgetReconcileResult
+}
+
 /**
  * 「选用设备」的结果。
  *
@@ -76,6 +84,7 @@ sealed interface OpenOutcome {
  */
 sealed interface PickResult {
     data object Ok : PickResult
+    data object StaleSelection : PickResult
 
     /** 服务端明确回答"没有这台设备" */
     data object DeviceNotFound : PickResult
@@ -89,7 +98,8 @@ sealed interface CloseOutcome {
     data class Closed(
         /** 关阀前的开阀时间戳，供调用方做账单过滤（Controller 已经把它清掉了，所以要带出来） */
         val startTimeMs: Long,
-        override val kickHint: String? = null
+        override val kickHint: String? = null,
+        val replacingOrderOwner: Boolean? = null
     ) : CloseOutcome
 
     data class Failed(
@@ -196,9 +206,16 @@ object ShowerController {
     suspend fun openValve(
         snCode: String,
         device: DeviceInfo? = null,
-        budgetMs: Long = 6_000L
+        budgetMs: Long = 6_000L,
+        restoreTarget: ShowerOrderTarget? = null,
+        expectedOwner: String? = null,
+        canStartNewOrder: () -> Boolean = { true }
     ): OpenOutcome {
         require(snCode.isNotBlank()) { "snCode 不能为空" }
+        val session = NetworkModule.session()
+        if (expectedOwner != null && session.owner != expectedOwner) {
+            return OpenOutcome.Failed("账户已变化，请刷新设备")
+        }
 
         // ⚠️ 只能靠手机蓝牙直连的水表（`smallTypeId == 1`），云端下发必然回 306。
         //
@@ -213,25 +230,38 @@ object ShowerController {
             return OpenOutcome.Failed(UNSUPPORTED_DEVICE_MESSAGE)
         }
 
+        val restoreOrder = if (restoreTarget == null) null else {
+            restoreTarget.currentOrder()?.takeIf { it.snCode == snCode }
+                ?: return OpenOutcome.Failed("原订单已结束")
+        }
         val auth = try { ProjectAuthRepository.forDevice(snCode, device).fields() }
         catch (e: CancellationException) { throw e }
         catch (e: com.hualala.linyu.api.ProjectAuthException) { return OpenOutcome.Failed(e.message ?: "设备账户不可用") }
+        ProjectAuthRepository.requireCurrent(session)
         val deadline = System.currentTimeMillis() + budgetMs
 
         // 1. 设备上已经有订单 → 直接恢复，不再发 downRate
         val existing = NetworkModule.apiService.queryUsingSafe(
             snCode = snCode, auth = auth
         )
-        if (existing.deviceInUse == true) {
-            val orderNo = existing.ownedOrderNo(snCode)
-                ?: return OpenOutcome.InUseByOthers("设备占用中")
-            ensureActiveOrder(snCode, orderNo, device)
-            rememberDevice(device)
-            return OpenOutcome.Resumed(orderNo)
+        ProjectAuthRepository.requireCurrent(session)
+        when (val step = existing.cloudOpenStep(snCode, restoreOrder?.orderNo)) {
+            is CloudOpenStep.Resume -> {
+                if (restoreTarget != null && restoreTarget.currentOrder() == null) {
+                    return OpenOutcome.Failed("原订单已变化，请刷新设备")
+                }
+                ensureActiveOrder(snCode, step.orderNo, device)
+                rememberDevice(device)
+                return OpenOutcome.Resumed(step.orderNo)
+            }
+            CloudOpenStep.Occupied -> return OpenOutcome.InUseByOthers("设备占用中")
+            CloudOpenStep.InvalidRestore -> return OpenOutcome.Failed("原订单已结束或已变化")
+            CloudOpenStep.FailedStatus -> return OpenOutcome.Failed(existing.displayMessage ?: "设备状态查询失败，请重试", existing.errorCode)
+            CloudOpenStep.RequestNew -> Unit
         }
-        if (!existing.success) return OpenOutcome.Failed(existing.displayMessage ?: "设备状态查询失败，请重试", existing.errorCode)
 
         // 2. 下发开阀指令
+        if (!canStartNewOrder()) return OpenOutcome.Failed("设备选择已变化，请刷新后重试")
         val resp = NetworkModule.apiService.downRateSafe(
             snCode = snCode, auth = auth
         )
@@ -267,6 +297,7 @@ object ShowerController {
                 val r = NetworkModule.apiService.downRateResultSafe(
                     snCode = snCode, auth = auth
                 )
+                ProjectAuthRepository.requireCurrent(session)
                 val d = r.data
                 if (r.success && (d?.state == 0 || d?.result == 0 || d?.orderNo != null)) {
                     opened = true
@@ -275,17 +306,18 @@ object ShowerController {
                     if (autoTime != null && autoTime > 0) autoDiscon = autoTime
                     break
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (_: Exception) {
                 // 单次轮询失败不算失败，继续下一轮
             }
         }
-        if (!opened) return OpenOutcome.Failed("开启结果未确认，请检查是否出水，勿重复开启")
+        // 已受理开阀，轮询始终未确认结果。
+        if (!opened) return OpenOutcome.Unknown
+        ProjectAuthRepository.requireCurrent(session)
 
         // 4. 落盘：开阀时间戳 / 活跃订单 / 自动关停倒计时 / 上次使用设备
-        if (PrefsHelper.getStartedAt(snCode) <= 0L) {
-            PrefsHelper.setStartedAt(snCode, System.currentTimeMillis())
-        }
-        ensureActiveOrder(snCode, confirmedOrderNo, device)
+        ensureActiveOrder(snCode, confirmedOrderNo, device, newOrderStartedAtMs = System.currentTimeMillis())
         rememberDevice(device)
         if (autoDiscon > 0 && PrefsHelper.getAutoDisconRemain(snCode) <= 0) {
             PrefsHelper.setAutoDisconRemain(snCode, autoDiscon)
@@ -296,13 +328,13 @@ object ShowerController {
     /**
      * 关阀。只有确认订单已停止才清状态；受理请求不等于设备已经停止。
      */
-    suspend fun closeValve(snCode: String, orderNo: String): CloseOutcome {
+    suspend fun closeValve(snCode: String, orderNo: String, target: ShowerOrderTarget? = ShowerOrderTarget.capture(snCode)): CloseOutcome {
         if (snCode.isBlank()) return CloseOutcome.Failed("设备信息不完整", null)
         synchronized(closingDevices) {
             closingDevices[snCode] = (closingDevices[snCode] ?: 0) + 1
         }
         return try {
-            closeValveOnce(snCode, orderNo)
+            closeValveOnce(snCode, orderNo, target)
         } finally {
             synchronized(closingDevices) {
                 val remaining = closingDevices.getValue(snCode) - 1
@@ -312,24 +344,32 @@ object ShowerController {
         }
     }
 
-    private suspend fun closeValveOnce(snCode: String, orderNo: String): CloseOutcome {
+    private suspend fun closeValveOnce(snCode: String, orderNo: String, target: ShowerOrderTarget?): CloseOutcome {
+        val original = target?.currentOrder()
+        if (target != null && (target.snCode != snCode || original == null ||
+                (orderNo.isNotBlank() && original.orderNo.isNotBlank() && orderNo != original.orderNo))) {
+            return CloseOutcome.Failed("原订单已变化，请刷新设备", null)
+        }
+        val session = NetworkModule.session()
         val auth = try { ProjectAuthRepository.forDevice(snCode).fields() }
         catch (e: CancellationException) { throw e }
         catch (e: Exception) { return CloseOutcome.Failed(e.message ?: "设备账户不可用", null) }
 
         // 关阀前先保留开阀时间，停机确认后会清零。
         val startTime = PrefsHelper.getStartedAt(snCode)
-        var orderNoResolved = orderNo
-        if (orderNoResolved.isBlank()) {
-            val p = NetworkModule.apiService.queryUsingSafe(
-                snCode = snCode, auth = auth
-            )
-            if (p.deviceInUse == false) {
-                clearDeviceState(snCode)
-                return CloseOutcome.Closed(startTime)
-            }
-            orderNoResolved = p.ownedOrderNo(snCode)
-                ?: return CloseOutcome.Unconfirmed(startTime, "当前订单未确认，请稍后重试")
+        val initial = orderPresence(snCode, original?.orderNo.orEmpty().ifBlank { orderNo }, auth)
+        ProjectAuthRepository.requireCurrent(session)
+        if (initial is OrderPresence.Ended) {
+            clearClosedTarget(snCode, target)
+            return CloseOutcome.Closed(startTime, replacingOrderOwner = initial.replacingOrderOwner)
+        }
+        val orderNoResolved = (initial as? OrderPresence.Original)?.orderNo
+            ?: return CloseOutcome.Unconfirmed(startTime, "当前订单未确认，请稍后重试")
+
+        ProjectAuthRepository.requireCurrent(session)
+        val current = target?.currentOrder()
+        if (target != null && (current == null || (current.orderNo.isNotBlank() && current.orderNo != orderNoResolved))) {
+            return CloseOutcome.Failed("原订单已变化，请刷新设备", null)
         }
 
         // 1. 下发关阀指令
@@ -344,17 +384,13 @@ object ShowerController {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // 请求本身失败了，再问一次服务端到底还开着没有
-            val running = orderRunning(snCode, auth)
-            if (running == false) {
-                clearDeviceState(snCode)
-                return CloseOutcome.Closed(startTime, null)
+            // 请求结果未知，仅复核原订单状态。
+            val status = orderPresence(snCode, orderNoResolved, auth)
+            ProjectAuthRepository.requireCurrent(session)
+            if (status is OrderPresence.Ended) {
+                clearClosedTarget(snCode, target)
+                return CloseOutcome.Closed(startTime, replacingOrderOwner = status.replacingOrderOwner)
             }
-            if (running == true) {
-                // 服务端说还开着 → 确实没关成
-                return CloseOutcome.Unconfirmed(startTime, "关闭结果未确认，设备可能仍在出水", null)
-            }
-            // 查不到（多半也是断网）→ 一样没有证据
             return CloseOutcome.Unconfirmed(startTime, "关闭结果未确认，设备可能仍在出水", null)
         }
 
@@ -362,52 +398,83 @@ object ShowerController {
             return CloseOutcome.Failed(close.displayMessage ?: "关闭失败，请重试", close.displayMessage)
         }
 
-        // 2. 请求受理或返回“已在关闭中”后，等待状态同步，确认空闲才清理订单。
+        // 2. 复核原订单，不必等待后来使用设备的其他订单也结束。
         val kickHint = close.displayMessage.takeUnless { close.success }
-        if (!CloudCloseConfirmation.confirm { orderRunning(snCode, auth) }) {
+        var ended: OrderPresence.Ended? = null
+        if (!CloudCloseConfirmation.confirm {
+                when (val status = orderPresence(snCode, orderNoResolved, auth)) {
+                    is OrderPresence.Ended -> { ended = status; false }
+                    is OrderPresence.Original -> true
+                    OrderPresence.Unknown -> null
+                }
+            }) {
             AppLogger.w("关阀状态复核超时或耗尽次数：$snCode")
             return CloseOutcome.Unconfirmed(startTime, "关闭结果未确认，设备可能仍在出水", kickHint)
         }
 
-        clearDeviceState(snCode)
-        return CloseOutcome.Closed(startTime, kickHint)
+        ProjectAuthRepository.requireCurrent(session)
+        clearClosedTarget(snCode, target)
+        return CloseOutcome.Closed(startTime, kickHint, ended?.replacingOrderOwner)
     }
 
-    /**
-     * 以服务端为准，把本地状态对齐一次。
-     *
-     * 用在「开阀结果未知」之后：小组件预算耗尽时不知道到底开没开，
-     * 与其猜，不如按一次服务端真实状态。
-     * @return 对齐后是否处于使用中
-     */
-    suspend fun reconcile(snCode: String): Boolean {
-        if (snCode.isBlank()) return false
-        val response = try {
-            NetworkModule.apiService.queryUsingSafe(
-                snCode = snCode, auth = ProjectAuthRepository.forDevice(snCode).fields()
-            )
+    internal suspend fun orderPresence(snCode: String, orderNo: String, auth: Map<String, String>? = null): OrderPresence = try {
+        val response = NetworkModule.apiService.queryUsingSafe(
+            snCode = snCode, auth = auth ?: ProjectAuthRepository.forDevice(snCode).fields()
+        )
+        response.orderPresence(snCode, orderNo)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        OrderPresence.Unknown
+    }
+
+    /** 核对一次未确认的云端开阀。只提交发起时的账户和设备仍匹配的结果。 */
+    internal suspend fun reconcile(
+        snCode: String,
+        owner: String,
+        attemptedAt: Long,
+        stillSelected: () -> Boolean
+    ): WidgetReconcileResult {
+        val session = NetworkModule.session()
+        fun isCurrent(): Boolean =
+            NetworkModule.session() == session && PrefsHelper.loginCode == session.loginCode && stillSelected()
+
+        if (snCode.isBlank() || owner != session.owner || !isCurrent() || isRunning(snCode)) {
+            return WidgetReconcileResult.Stale
+        }
+        val context: ProjectAuthContext
+        val presence = try {
+            context = ProjectAuthRepository.forDevice(snCode)
+            if (!isCurrent()) return WidgetReconcileResult.Stale
+            NetworkModule.apiService.queryUsingSafe(snCode = snCode, auth = context.fields())
+                .orderPresence(snCode, "")
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            return isRunning(snCode)
+            return WidgetReconcileResult.Unknown
         }
-        val orderNo = response.ownedOrderNo(snCode)
-        return if (orderNo != null) {
-            if (PrefsHelper.getStartedAt(snCode) <= 0L) {
-                PrefsHelper.setStartedAt(snCode, System.currentTimeMillis())
+        if (!isCurrent()) return WidgetReconcileResult.Stale
+        if (presence == OrderPresence.Unknown) return WidgetReconcileResult.Unknown
+
+        var result: WidgetReconcileResult = WidgetReconcileResult.Stale
+        ActiveOrderRepository.update { orders ->
+            // 并发开阀或恢复已经确认的订单由原入口负责，迟到的刷新不可覆盖或清除。
+            if (!isCurrent() || orders.any { it.snCode == snCode }) return@update
+            if (presence is OrderPresence.Original) {
+                PrefsHelper.setStartedAt(snCode, attemptedAt)
+                PrefsHelper.clearAutoDiscon(snCode)
+                orders.add(newActiveOrder(snCode, presence.orderNo, null, context, session.owner))
+                if (PrefsHelper.occupiedSnCode == snCode) PrefsHelper.clearOccupied()
+                result = WidgetReconcileResult.Running(
+                    ShowerOrderTarget(snCode, presence.orderNo, attemptedAt, session.owner)
+                )
+            } else if (presence is OrderPresence.Ended) {
+                if (presence.replacingOrderOwner == false) PrefsHelper.occupiedSnCode = snCode
+                else if (PrefsHelper.occupiedSnCode == snCode) PrefsHelper.clearOccupied()
+                result = WidgetReconcileResult.Resolved
             }
-            ensureActiveOrder(snCode, orderNo, null)
-            if (PrefsHelper.occupiedSnCode == snCode) PrefsHelper.clearOccupied()
-            true
-        } else if (response.deviceInUse == false) {
-            clearDeviceState(snCode)
-            if (PrefsHelper.occupiedSnCode == snCode) PrefsHelper.clearOccupied()
-            false
-        } else {
-            val alreadyRunning = isRunning(snCode)
-            if (!alreadyRunning && response.deviceInUse == true) PrefsHelper.occupiedSnCode = snCode
-            alreadyRunning
         }
+        return result
     }
 
     /**
@@ -425,22 +492,33 @@ object ShowerController {
     }
 
     /** 把监控清理与手动关阀的开始串行化，避免抢先按自动关停结算。 */
-    internal fun markFinishedFromWatch(snCode: String): Boolean = synchronized(closingDevices) {
-        if (snCode in closingDevices || !isRunning(snCode)) return@synchronized false
-        markFinished(snCode)
-        true
+    internal fun markFinishedFromWatch(target: ShowerOrderTarget): Boolean = synchronized(closingDevices) {
+        if (target.snCode in closingDevices) return@synchronized false
+        clearClosedTarget(target.snCode, target)
     }
 
-    /** 服务端是否报告该设备有进行中的订单 */
-    private suspend fun hasActiveOrder(snCode: String): Boolean =
-        orderRunning(snCode) == true
+    internal fun clearClosedTarget(snCode: String, target: ShowerOrderTarget?): Boolean {
+        if (target == null) {
+            clearDeviceState(snCode)
+            return true
+        }
+        var removed = false
+        ActiveOrderRepository.update { orders ->
+            val i = orders.indexOfFirst { it.snCode == snCode }
+            if (i >= 0 && target.matches(orders[i], PrefsHelper.getStartedAt(snCode), NetworkModule.session().owner)) {
+                orders.removeAt(i)
+                PrefsHelper.setStartedAt(snCode, 0L)
+                PrefsHelper.clearAutoDiscon(snCode)
+                removed = true
+            }
+        }
+        return removed
+    }
 
     /**
      * 服务端上这台设备还有没有订单。**三态**：true 有 / false 明确没有 / null 请求失败、不确定。
      *
-     * ⚠️ 三态不能省。上面那个 [hasActiveOrder] 以前是 `catch { false }`——
-     * 网络一抖，「查不到」就被当成了「没有订单」。判断"设备关没关"的时候
-     * 用这种二值版本，等于把"不知道"当成"关好了"，正是要避免的那类谎报。
+     * 网络失败时保留未知结果，只有服务端明确报告结束才按已关闭处理。
      *
      * 判据和 [com.hualala.linyu.service.ShowerWatchService] 里的同名逻辑保持一致：
      * `errorCode == 307` 也算有订单（服务端在"已在关闭中"这类场景会这么回）。
@@ -465,11 +543,22 @@ object ShowerController {
      *
      * @return 是否成功解析到设备
      */
-    suspend fun pickDevice(mac: String): PickResult {
+    suspend fun pickDevice(mac: String, expectedOwner: String): PickResult {
         if (mac.isBlank()) return PickResult.DeviceNotFound
+        val session = NetworkModule.session()
+        if (expectedOwner.isBlank() || expectedOwner != session.owner ||
+            !PrefsHelper.isLoggedIn || session.loginCode != PrefsHelper.loginCode
+        ) {
+            return PickResult.StaleSelection
+        }
         return try {
             val resp = DeviceInfoCache.load(mac)
+            if (PrefsHelper.loginCode != session.loginCode) return PickResult.StaleSelection
             if (resp.success && resp.data != null) {
+                // 桌面按钮显示后，绑定可能已经变化。落盘前用当前规则复核服务端设备名。
+                if (!RoomBindingPlugin.allows(resp.data.deviceName.orEmpty())) {
+                    return PickResult.StaleSelection
+                }
                 rememberDevice(resp.data)
                 PickResult.Ok
             } else {
@@ -513,7 +602,8 @@ object ShowerController {
      *
      * @return orderNo；实在拿不到返回空串（调用方仍需能处理这种情况）
      */
-    suspend fun resolveOrderNo(snCode: String): String {
+    suspend fun resolveOrderNo(snCode: String, target: ShowerOrderTarget? = null): String {
+        if (target != null && target.currentOrder() == null) return ""
         val cached = activeOrderFor(snCode)?.orderNo.orEmpty()
         if (cached.isNotEmpty()) return cached
         val fresh = queryOrderNo(snCode)
@@ -521,7 +611,10 @@ object ShowerController {
             // 回填进 Prefs：别的路径（小组件、通知栏按钮）随后读到的就是真的了
             ActiveOrderRepository.update { list ->
                 val i = list.indexOfFirst { it.snCode == snCode }
-                if (i >= 0) list[i] = list[i].copy(orderNo = fresh)
+                if (i >= 0 && list[i].orderNo.isBlank() &&
+                    (target == null || target.matches(list[i], PrefsHelper.getStartedAt(snCode), NetworkModule.session().owner))) {
+                    list[i] = list[i].copy(orderNo = fresh)
+                }
             }
             AppLogger.i("orderNo 本地缺失，已从服务端回填：$fresh")
         }
@@ -541,12 +634,12 @@ object ShowerController {
      * 4G 表路径在 [openValve] 里落盘；蓝牙表路径在 `BleShowerController.openValve`
      * 成功后调用这里，两条路径都得保证「先落盘、再启服务」。
      */
-    fun ensureActiveOrder(snCode: String, orderNo: String, device: DeviceInfo?) {
+    fun ensureActiveOrder(snCode: String, orderNo: String, device: DeviceInfo?, newOrderStartedAtMs: Long? = null) {
         val context = ProjectAuthRepository.knownContext(snCode)
         // 原子地「有则不动、无则加入」——并发时不会重复也不会互相覆盖
         ActiveOrderRepository.update { list ->
             val existing = list.indexOfFirst { it.snCode == snCode }
-            if (existing >= 0) {
+            if (existing >= 0 && newOrderStartedAtMs == null) {
                 val old = list[existing]
                 list[existing] = old.copy(orderNo = orderNo.ifEmpty { old.orderNo },
                     projectId = context?.projectId ?: old.projectId,
@@ -554,23 +647,32 @@ object ShowerController {
                     authOwner = context?.let { NetworkModule.session().owner } ?: old.authOwner)
                 return@update
             }
-            list.add(
-                ActiveOrder(
-                    snCode = snCode,
-                    orderNo = orderNo,
-                    deviceName = device?.displayName ?: PrefsHelper.lastDeviceName,
-                    deviceMac = device?.macAddress ?: PrefsHelper.lastDeviceMac,
-                    deviceEmoji = device?.typeEmoji ?: PrefsHelper.lastDeviceEmoji,
-                    // 小组件调用时 device 为 null，回落到上次记下的金额，
-                    // 否则卡片上的「预扣」会一直是 ¥0.00
-                    preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble(),
-                    projectId = context?.projectId,
-                    accountId = context?.accountId,
-                    authOwner = context?.let { NetworkModule.session().owner }
-                )
-            )
+            if (newOrderStartedAtMs != null) {
+                if (existing >= 0) list.removeAt(existing)
+                PrefsHelper.setStartedAt(snCode, newOrderStartedAtMs)
+                PrefsHelper.clearAutoDiscon(snCode)
+            }
+            list.add(newActiveOrder(snCode, orderNo, device, context, context?.let { NetworkModule.session().owner }))
         }
     }
+
+    private fun newActiveOrder(
+        snCode: String,
+        orderNo: String,
+        device: DeviceInfo?,
+        context: ProjectAuthContext?,
+        owner: String?
+    ) = ActiveOrder(
+        snCode = snCode,
+        orderNo = orderNo,
+        deviceName = device?.displayName ?: PrefsHelper.lastDeviceName,
+        deviceMac = device?.macAddress ?: PrefsHelper.lastDeviceMac,
+        deviceEmoji = device?.typeEmoji ?: PrefsHelper.lastDeviceEmoji,
+        preDeduct = device?.withholdMoney ?: PrefsHelper.lastDeviceWithholdMoney.toDouble(),
+        projectId = context?.projectId,
+        accountId = context?.accountId,
+        authOwner = owner
+    )
 
     /**
      * 关阀**没成功**时，把刚才清掉的本地状态**放回去**。

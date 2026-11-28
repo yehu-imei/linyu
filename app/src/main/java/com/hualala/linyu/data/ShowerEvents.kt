@@ -30,7 +30,9 @@ object ShowerEvents {
          */
         val money: Double?,
         /** 设备自己超时关的（而不是被外部关闭） */
-        val autoClosed: Boolean
+        val autoClosed: Boolean,
+        val target: ShowerOrderTarget? = null,
+        val replacingOrderOwner: Boolean? = null
     )
 
     private val _finished = MutableSharedFlow<Finished>(extraBufferCapacity = 8)
@@ -64,10 +66,10 @@ object ShowerEvents {
      * orderNo 为空会报「订单号不能为空」）。服务没有这条连接，只能发事件让
      * App（若进程还活着）走 `stopBleShower`。
      */
-    private val _stopBleRequest = MutableSharedFlow<String>(extraBufferCapacity = 4)
-    val stopBleRequest: SharedFlow<String> = _stopBleRequest
+    private val _stopBleRequest = MutableSharedFlow<ShowerOrderTarget>(extraBufferCapacity = 4)
+    val stopBleRequest: SharedFlow<ShowerOrderTarget> = _stopBleRequest
 
-    fun notifyStopBleRequest(snCode: String) {
-        _stopBleRequest.tryEmit(snCode)
+    fun notifyStopBleRequest(snCode: String, target: ShowerOrderTarget? = ShowerOrderTarget.capture(snCode)) {
+        if (target?.snCode == snCode && target.currentOrder() != null) _stopBleRequest.tryEmit(target)
     }
 }

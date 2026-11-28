@@ -3,7 +3,6 @@ package com.hualala.linyu.ui
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
@@ -42,7 +41,7 @@ fun DeductConfirmDialog(
 ) {
     val known = amount != null
 
-    AlertDialog(
+    ScreenCenteredAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("确认扣款", fontWeight = FontWeight.Bold) },
         text = {

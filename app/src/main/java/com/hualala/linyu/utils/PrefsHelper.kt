@@ -6,13 +6,20 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.api.ProjectAuthContext
+import com.hualala.linyu.data.ManualBalance
 import com.hualala.linyu.data.PendingSettlement
+import com.hualala.linyu.data.PendingBleOpen
 import com.hualala.linyu.data.BillHistoryCache
 import com.hualala.linyu.data.ConsumptionCachePolicy
+import com.hualala.linyu.data.RoomBindingPlugin
+import com.hualala.linyu.data.PluginRepository
 import com.hualala.linyu.data.UseCodeQuota
 import com.hualala.linyu.data.shouldPreserveForRecovery
 import com.hualala.linyu.model.ActiveOrder
 import com.hualala.linyu.model.BillItem
+import org.json.JSONObject
 
 object PrefsHelper {
     /** 加密存储的文件名 */
@@ -38,8 +45,10 @@ object PrefsHelper {
      * 把它原样抄进新的明文文件只会让这个状态延长。宁可让用户重登一次。
      */
     private const val FILE_PLAIN = "linyu_prefs_plain"
+    private const val SAVED_PASSWORD_LOGIN = "savedPasswordLogin"
 
-    private lateinit var prefs: SharedPreferences
+    @Volatile private lateinit var prefs: SharedPreferences
+    @Volatile private var encryptedPrefs: SharedPreferences? = null
 
     /** 本次运行是否退到了明文存储。给「我的 → 关于」之类的诊断位置留的观察口 */
     @Volatile var usingPlaintextFallback: Boolean = false
@@ -50,7 +59,10 @@ object PrefsHelper {
     /** 是否已经 init 过。小组件可能在没有 Activity 的新进程里被唤起，需要一个幂等的判断 */
     val isInitialized: Boolean get() = ::prefs.isInitialized
 
+    internal val storageIdentity: Any? get() = if (isInitialized) prefs else null
+
     fun init(context: Context) {
+        PluginRepository.initialize(context)
         val encrypted = try {
             val masterKey = MasterKey.Builder(context)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -69,6 +81,7 @@ object PrefsHelper {
             null
         }
 
+        encryptedPrefs = encrypted
         if (encrypted != null) {
             prefs = encrypted
             usingPlaintextFallback = false
@@ -78,9 +91,45 @@ object PrefsHelper {
             // 日志脱敏只认手机号之类，这里只写一句「发生了降级」，不带任何凭证
             AppLogger.w("加密存储初始化失败，本次运行使用明文存储（$FILE_PLAIN）")
         }
+        RoomBindingPlugin.migrateLegacyBinding()
     }
 
     // ── Auth ──
+    internal class SavedPasswordLogin(val phone: String, val password: String)
+
+    internal fun loadSavedPasswordLogin(): SavedPasswordLogin? {
+        val secure = encryptedPrefs ?: return null
+        return try { readSavedPasswordLogin(secure) } catch (_: Exception) { null }
+    }
+
+    internal fun savePasswordLogin(phone: String, password: String): Boolean {
+        val secure = encryptedPrefs ?: return false
+        if (phone.length != 11 || password.isEmpty()) return false
+        return try {
+            val entry = JSONObject().put("phone", phone).put("password", password)
+            secure.edit().putString(SAVED_PASSWORD_LOGIN, entry.toString()).commit()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    internal fun clearSavedPasswordLogin(phone: String): Boolean {
+        val secure = encryptedPrefs ?: return false
+        return try {
+            if (readSavedPasswordLogin(secure)?.phone != phone) true
+            else secure.edit().remove(SAVED_PASSWORD_LOGIN).commit()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun readSavedPasswordLogin(secure: SharedPreferences): SavedPasswordLogin? {
+        val entry = JSONObject(secure.getString(SAVED_PASSWORD_LOGIN, null) ?: return null)
+        val phone = entry.getString("phone")
+        val password = entry.getString("password")
+        return if (phone.length == 11 && password.isNotEmpty()) SavedPasswordLogin(phone, password) else null
+    }
+
     var loginCode: String get() = prefs.getString("loginCode", "") ?: ""; set(v) = prefs.edit().putString("loginCode", v).apply()
     var userId: String get() = prefs.getString("userId", "") ?: ""; set(v) = prefs.edit().putString("userId", v).apply()
     var accountId: String get() = prefs.getString("accountId", "") ?: ""; set(v) = prefs.edit().putString("accountId", v).apply()
@@ -143,8 +192,6 @@ object PrefsHelper {
     fun clear(preserveActiveRecovery: Boolean = false) {
         com.hualala.linyu.api.NetworkModule.updateAuth("", "", "", "", "")
         com.hualala.linyu.data.ProjectAuthRepository.clear()
-        // 保留余额和填写时间
-        val bal = manualBalance; val btime = manualBalanceTime
         try {
             // 注意：EncryptedSharedPreferences 的 edit().clear() 有已知崩溃 bug
             // （内部遍历解密所有 key，遇无法解密的 key 抛 SecurityException）。
@@ -162,6 +209,7 @@ object PrefsHelper {
                 // 学号和余额是账号数据，换账号必须清掉，否则会显示上一任的
                 .remove("userStudentId").remove("campusBalance").remove("campusBalanceTime")
                 .remove("walletBalance")
+                .remove("manualBalance").remove("manualBalanceTime")
             prefs.all.keys
                 .filter {
                     it.startsWith("consume_") ||
@@ -174,7 +222,6 @@ object PrefsHelper {
         } catch (_: Exception) {
             // 兜底：即使加密存储清理异常也不崩溃，登录态由内存态管理
         }
-        manualBalance = bal; manualBalanceTime = btime
     }
 
     // ── Last device ──
@@ -201,7 +248,33 @@ object PrefsHelper {
     var lastDeviceEmoji: String get() = prefs.getString("lastDeviceEmoji", "🚿") ?: "🚿"; set(v) = prefs.edit().putString("lastDeviceEmoji", v).apply()
 
     // ── 绑定的寝室（设备筛选关键词） ──
-    var boundRoom: String get() = prefs.getString("boundRoom", "") ?: ""; set(v) = prefs.edit().putString("boundRoom", v).apply()
+    internal var boundRoom: String
+        get() = prefs.getString("boundRoom", "") ?: ""
+        set(v) = prefs.edit().putString("boundRoom", v).apply()
+
+    internal val roomBindingManifest: String?
+        get() = prefs.getString("roomBindingManifest", null)
+
+    internal var installedPluginOrder: String
+        get() = prefs.getString("installedPluginOrder", "").orEmpty()
+        set(value) = prefs.edit().putString("installedPluginOrder", value).apply()
+
+    // An absent preference uses the bundled version. An empty value remembers deletion.
+    internal fun featurePluginManifest(id: String): String? = prefs.getString("featurePlugin.$id", null)
+
+    internal fun setFeaturePluginManifest(id: String, manifest: String) {
+        prefs.edit().putString("featurePlugin.$id", manifest).apply()
+    }
+
+    internal fun updateRoomBindingManifest(manifest: String?) {
+        val editor = prefs.edit()
+        if (manifest == null) {
+            editor.remove("roomBindingManifest").remove("boundRoom")
+        } else {
+            editor.putString("roomBindingManifest", manifest)
+        }
+        editor.apply()
+    }
 
     // ── 已确认需要蓝牙开阀的设备 ──
     //
@@ -262,6 +335,24 @@ object PrefsHelper {
     var userSettingsCardOrder: String get() = prefs.getString("userSettingsCardOrder", "") ?: ""; set(v) = prefs.edit().putString("userSettingsCardOrder", v).apply()
     var userSettingsHiddenCards: String get() = prefs.getString("userSettingsHiddenCards", "") ?: ""; set(v) = prefs.edit().putString("userSettingsHiddenCards", v).apply()
 
+    val userFeatureCardOrder: String? get() = prefs.getString("userFeatureCardOrder", null)
+
+    fun saveUserCardLayout(
+        profileOrder: String,
+        settingsOrder: String,
+        featureOrder: String,
+        profileHidden: String,
+        settingsHidden: String
+    ) {
+        prefs.edit()
+            .putString("userProfileCardOrder", profileOrder)
+            .putString("userSettingsCardOrder", settingsOrder)
+            .putString("userFeatureCardOrder", featureOrder)
+            .putString("userProfileHiddenCards", profileHidden)
+            .putString("userSettingsHiddenCards", settingsHidden)
+            .apply()
+    }
+
     internal fun homeDeviceLayoutJson(owner: String): String =
         prefs.getString("homeDeviceLayout_$owner", "").orEmpty()
 
@@ -276,6 +367,17 @@ object PrefsHelper {
     fun bgPutFloat(scope: String, name: String, v: Float) = prefs.edit().putFloat("bg_${scope}_$name", v).apply()
     fun bgGetInt(scope: String, name: String, def: Int) = prefs.getInt("bg_${scope}_$name", def)
     fun bgPutInt(scope: String, name: String, v: Int) = prefs.edit().putInt("bg_${scope}_$name", v).apply()
+
+    internal fun clearBackgroundOptions() {
+        prefs.edit().apply {
+            remove("backgroundScope")
+            for (scope in listOf(BackgroundManager.SCOPE_HOME, BackgroundManager.SCOPE_SHOWER)) {
+                for (name in listOf("enabled", "opacity", "blur", "brightness", "themeColor")) {
+                    remove("bg_${scope}_$name")
+                }
+            }
+        }.apply()
+    }
 
     // ── Active orders list ──
     //
@@ -316,6 +418,25 @@ object PrefsHelper {
      */
     var bleSessionJson: String get() = prefs.getString("bleSessionJson", "") ?: ""
         set(v) = prefs.edit().putString("bleSessionJson", v).apply()
+
+    private fun pendingBleOpenKey(owner: String, sn: String) = "pendingBleOpen_${owner}_$sn"
+
+    @Synchronized internal fun pendingBleOpen(owner: String, sn: String): PendingBleOpen? =
+        prefs.getString(pendingBleOpenKey(owner, sn), null)?.let {
+            gson.fromJson(it, PendingBleOpen::class.java)
+        }
+
+    @Synchronized internal fun savePendingBleOpen(item: PendingBleOpen): Boolean {
+        val owner = item.session.authOwner ?: return false
+        return prefs.edit().putString(pendingBleOpenKey(owner, item.session.snCode), gson.toJson(item)).commit()
+    }
+
+    @Synchronized internal fun clearPendingBleOpen(item: PendingBleOpen) {
+        val owner = item.session.authOwner ?: return
+        if (pendingBleOpen(owner, item.session.snCode) == item) {
+            prefs.edit().remove(pendingBleOpenKey(owner, item.session.snCode)).apply()
+        }
+    }
 
     /**
      * 通知里「结束使用」按钮的 `PendingIntent` requestCode（按 snCode **稳定分配**）。
@@ -418,8 +539,17 @@ object PrefsHelper {
     var notifyAlert: Boolean get() = prefs.getBoolean("notifyAlert", true)
         set(v) = prefs.edit().putBoolean("notifyAlert", v).apply()
 
-    /** 仅在使用页前台显示期间保持屏幕常亮，默认开启。 */
-    var keepScreenOnDuringUse: Boolean get() = prefs.getBoolean("keepScreenOnDuringUse", true)
+    internal val hasLegacyNotificationRestrictions: Boolean
+        get() = !notifyInUse || !notifyFinished || !notifyAutoClose || !notifyAlert
+
+    /** Only after the user chooses to restore app-level options. System channels stay untouched. */
+    internal fun restoreLegacyNotificationOptions() {
+        prefs.edit().remove("notifyInUse").remove("notifyFinished")
+            .remove("notifyAutoClose").remove("notifyAlert").apply()
+    }
+
+    /** 仅在使用页前台显示期间保持屏幕常亮，默认关闭。 */
+    var keepScreenOnDuringUse: Boolean get() = prefs.getBoolean("keepScreenOnDuringUse", false)
         set(v) = prefs.edit().putBoolean("keepScreenOnDuringUse", v).apply()
 
     /**
@@ -507,8 +637,22 @@ object PrefsHelper {
         prefs.edit().remove("occupiedSnCode").remove("occupiedAtMs").apply()
     }
 
-    var manualBalance: String get() = prefs.getString("manualBalance", "") ?: ""; set(v) = prefs.edit().putString("manualBalance", v).apply()
-    var manualBalanceTime: Long get() = prefs.getLong("manualBalanceTime", 0L); set(v) = prefs.edit().putLong("manualBalanceTime", v).apply()
+    internal fun manualBalance(): ManualBalance? {
+        val account = NetworkModule.session()
+        if (account.loginCode.isBlank()) return null
+        val key = ManualBalance.key(account.owner) ?: return null
+        return prefs.getString(key, null)?.let(ManualBalance::decode)
+    }
+
+    internal fun saveManualBalance(account: ProjectAuthContext, value: String): Boolean {
+        if (account.loginCode.isBlank() || NetworkModule.session() != account) return false
+        val key = ManualBalance.key(account.owner) ?: return false
+        val record = if (value.isBlank()) null else ManualBalance.create(value, System.currentTimeMillis()) ?: return false
+        val editor = prefs.edit().remove("manualBalance").remove("manualBalanceTime")
+        if (record == null) editor.remove(key) else editor.putString(key, record.encode())
+        editor.apply()
+        return true
+    }
 
     /**
      * 上次使用设备的预扣金额。

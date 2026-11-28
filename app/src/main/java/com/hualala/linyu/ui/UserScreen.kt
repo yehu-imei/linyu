@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
@@ -29,9 +30,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,9 +55,11 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hualala.linyu.BuildConfig
@@ -66,7 +71,9 @@ import com.hualala.linyu.api.GithubAsset
 import com.hualala.linyu.api.GithubRelease
 import com.hualala.linyu.api.GithubRepoInfo
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.api.ProjectAuthContext
 import com.hualala.linyu.data.AuthRepository
+import com.hualala.linyu.data.InstalledPlugins
 import com.hualala.linyu.data.UserReleaseNote
 import com.hualala.linyu.data.UserReleaseNotesRepository
 import com.hualala.linyu.api.forgetPasswordSafe
@@ -83,8 +90,11 @@ import com.hualala.linyu.utils.ApkDownloadState
 import com.hualala.linyu.utils.ApkInstallResult
 import com.hualala.linyu.utils.ApkUpdater
 import com.hualala.linyu.utils.PrefsHelper
+import com.hualala.linyu.utils.UserFeedback
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /** 「我的」页面中可编辑的卡片类型（声明顺序即默认顺序） */
@@ -97,27 +107,15 @@ enum class UserCardType(val title: String) {
     BOUND_ROOM("绑定寝室"),
     UPDATE("软件更新"),
     ABOUT("关于项目"),
-    LOG("运行日志")
-}
-
-private fun <T> moveItem(list: List<T>, from: Int, to: Int): List<T> {
-    if (from == to || from !in list.indices || to !in list.indices) return list
-    val mutable = list.toMutableList()
-    val item = mutable.removeAt(from)
-    mutable.add(to, item)
-    return mutable
+    LOG("运行日志"),
+    KEEP_SCREEN_ON("屏幕常亮"),
+    FEATURE_MANAGEMENT("开关管理"),
+    /** 插件管理入口。以前是固定渲染的，不参与排序/隐藏；现在和其他卡片一样可编辑。 */
+    PLUGIN_MANAGEMENT("插件管理")
 }
 
 private fun loadHiddenCards(value: String): Set<String> =
     value.split(',').map(String::trim).filter(String::isNotEmpty).toSet()
-
-private fun saveCardOrder(order: List<UserCardType>, save: (String) -> Unit) {
-    save(order.joinToString(",") { it.name })
-}
-
-private fun saveHiddenCards(hidden: Set<String>, save: (String) -> Unit) {
-    save(hidden.joinToString(","))
-}
 
 /**
  * 「我的」页面的进程级缓存。
@@ -139,7 +137,10 @@ fun UserScreen(
     phone: String,
     onLogout: () -> Unit,
     viewModel: MainViewModel? = null,
-    onSettingsVisibilityChanged: (Boolean) -> Unit = {}
+    onSettingsVisibilityChanged: (Boolean) -> Unit = {},
+    editMode: Boolean,
+    onEditModeChange: (Boolean) -> Unit,
+    onOpenPluginMarket: () -> Unit
 ) {
     LaunchedEffect(Unit) {
         viewModel?.loadUseCode()
@@ -150,25 +151,26 @@ fun UserScreen(
         viewModel?.loadCampusBalance()
     }
     val useCode = viewModel?.useCodeData
+    val installedPlugins = installedPluginIds()
 
-    var showSettings by remember { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     var showBackgroundScreen by remember { mutableStateOf(false) }
     var showLogViewer by remember { mutableStateOf(false) }
-    var editMode by remember { mutableStateOf(false) }
     val migrateLegacyLayout = remember {
         PrefsHelper.userProfileCardOrder.isBlank() &&
             PrefsHelper.userSettingsCardOrder.isBlank() &&
             PrefsHelper.userCardOrder.isNotBlank()
     }
-    val restoredPages = remember {
-        UserCardLayoutPolicy.restorePages(
-            PrefsHelper.userProfileCardOrder,
-            PrefsHelper.userSettingsCardOrder,
-            PrefsHelper.userCardOrder
+    var pages by remember {
+        mutableStateOf(
+            UserCardLayoutPolicy.restorePages(
+                PrefsHelper.userProfileCardOrder,
+                PrefsHelper.userSettingsCardOrder,
+                PrefsHelper.userCardOrder,
+                PrefsHelper.userFeatureCardOrder
+            )
         )
     }
-    var profileCardOrder by remember { mutableStateOf(restoredPages.profile) }
-    var settingsCardOrder by remember { mutableStateOf(restoredPages.settings) }
     val legacyHiddenCards = remember { loadHiddenCards(PrefsHelper.userHiddenCards) }
     var profileHiddenCards by remember {
         mutableStateOf(
@@ -185,15 +187,19 @@ fun UserScreen(
     val iconMode = themeReveal.pendingMode ?: themeMode
     var themeButtonBounds by remember { mutableStateOf(Rect.Zero) }
 
-    LaunchedEffect(showSettings) { onSettingsVisibilityChanged(showSettings) }
-    LaunchedEffect(migrateLegacyLayout) {
-        if (migrateLegacyLayout) {
-            saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
-            saveCardOrder(settingsCardOrder) { PrefsHelper.userSettingsCardOrder = it }
-            saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
-            saveHiddenCards(settingsHiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
-        }
+    fun saveLayout(updated: UserCardLayoutPolicy.CardPages = pages) {
+        pages = updated
+        PrefsHelper.saveUserCardLayout(
+            updated.profile.joinToString(",") { it.name },
+            updated.settings.joinToString(",") { it.name },
+            updated.features.joinToString(",") { it.name },
+            profileHiddenCards.joinToString(","),
+            settingsHiddenCards.joinToString(",")
+        )
     }
+
+    LaunchedEffect(showSettings) { onSettingsVisibilityChanged(showSettings) }
+    LaunchedEffect(migrateLegacyLayout) { if (migrateLegacyLayout) saveLayout() }
     DisposableEffect(Unit) { onDispose { onSettingsVisibilityChanged(false) } }
 
     if (showSettings) {
@@ -201,34 +207,33 @@ fun UserScreen(
             phone = phone,
             useCode = useCode,
             viewModel = viewModel,
-            cardOrder = settingsCardOrder,
+            editMode = editMode,
+            onEditModeChange = onEditModeChange,
+            installedPlugins = installedPlugins,
+            cardOrder = pages.settings,
+            featureOrder = pages.features,
             hiddenCards = settingsHiddenCards,
-            onCardOrderChange = {
-                settingsCardOrder = it
-                saveCardOrder(it) { saved -> PrefsHelper.userSettingsCardOrder = saved }
-            },
+            onCardOrderChange = { saveLayout(pages.copy(settings = it)) },
+            onFeatureOrderChange = { saveLayout(pages.copy(features = it)) },
             onHiddenCardsChange = {
                 settingsHiddenCards = it
-                saveHiddenCards(it) { saved -> PrefsHelper.userSettingsHiddenCards = saved }
+                saveLayout()
             },
             onMoveToProfile = { type ->
-                val pages = UserCardLayoutPolicy.moveToProfile(type, profileCardOrder, settingsCardOrder)
-                profileCardOrder = pages.profile
-                settingsCardOrder = pages.settings
                 profileHiddenCards = profileHiddenCards - type.name
                 settingsHiddenCards = settingsHiddenCards - type.name
-                saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
-                saveCardOrder(settingsCardOrder) { PrefsHelper.userSettingsCardOrder = it }
-                saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
-                saveHiddenCards(settingsHiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
+                saveLayout(UserCardLayoutPolicy.moveToProfile(type, pages))
             },
+            onMoveIntoFeatures = { saveLayout(UserCardLayoutPolicy.moveToFeatures(it, pages)) },
+            onMoveOutOfFeatures = { saveLayout(UserCardLayoutPolicy.moveToSettings(it, pages)) },
+            onOpenPluginMarket = onOpenPluginMarket,
             onShowBackground = { showBackgroundScreen = true },
             onShowLog = { showLogViewer = true },
             onBack = { showSettings = false },
             onLogout = onLogout
         )
-        if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
-        if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
+        if (showLogViewer && InstalledPlugins.RUNTIME_LOG in installedPlugins) LogViewerDialog(onDismiss = { showLogViewer = false })
+        if (showBackgroundScreen && InstalledPlugins.BACKGROUND in installedPlugins) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
         return
     }
 
@@ -238,9 +243,10 @@ fun UserScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("我的账号", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+            Text("我的账号", modifier = Modifier.reportToastPageTitleCenter(), fontSize = 22.sp,
+                fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                EditModeButton(editMode, onClick = { editMode = !editMode })
+                EditModeButton(editMode, onClick = { onEditModeChange(!editMode) })
                 Box(
                     modifier = Modifier
                         .size(48.dp)
@@ -265,52 +271,35 @@ fun UserScreen(
             PlaintextStorageWarning()
             Spacer(Modifier.height(16.dp))
         }
-        val visibleCards = if (editMode) profileCardOrder else profileCardOrder.filter { it.name !in profileHiddenCards }
-        visibleCards.forEachIndexed { index, type ->
-            EditableCardSlot(
-                editMode = editMode,
-                title = type.title,
-                isHidden = type.name in profileHiddenCards,
-                canMoveUp = index > 0,
-                canMoveDown = index < visibleCards.lastIndex,
-                onMoveUp = {
-                    profileCardOrder = moveItem(profileCardOrder, index, index - 1)
-                    saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
-                },
-                onMoveDown = {
-                    profileCardOrder = moveItem(profileCardOrder, index, index + 1)
-                    saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
-                },
-                onToggleHide = {
-                    profileHiddenCards = if (type.name in profileHiddenCards) {
-                        profileHiddenCards - type.name
-                    } else {
-                        profileHiddenCards + type.name
-                    }
-                    saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
-                },
-                moveToOtherPageIcon = Icons.AutoMirrored.Filled.ArrowForward,
-                moveToOtherPageDescription = "移到设置页面",
-                onMoveToOtherPage = {
-                    val pages = UserCardLayoutPolicy.moveToSettings(type, profileCardOrder, settingsCardOrder)
-                    profileCardOrder = pages.profile
-                    settingsCardOrder = pages.settings
-                    profileHiddenCards = profileHiddenCards - type.name
-                    settingsHiddenCards = settingsHiddenCards - type.name
-                    saveCardOrder(profileCardOrder) { PrefsHelper.userProfileCardOrder = it }
-                    saveCardOrder(settingsCardOrder) { PrefsHelper.userSettingsCardOrder = it }
-                    saveHiddenCards(profileHiddenCards) { PrefsHelper.userProfileHiddenCards = it }
-                    saveHiddenCards(settingsHiddenCards) { PrefsHelper.userSettingsHiddenCards = it }
-                }
-            ) {
+        EditableUserCardList(
+            editMode = editMode,
+            installedPlugins = installedPlugins,
+            order = pages.profile,
+            hiddenCards = profileHiddenCards,
+            onOrderChange = { saveLayout(pages.copy(profile = it)) },
+            onHiddenCardsChange = {
+                profileHiddenCards = it
+                saveLayout()
+            },
+            moveIcon = Icons.AutoMirrored.Filled.ArrowForward,
+            moveDescription = "移到设置页面",
+            onMove = { type ->
+                profileHiddenCards = profileHiddenCards - type.name
+                settingsHiddenCards = settingsHiddenCards - type.name
+                saveLayout(UserCardLayoutPolicy.moveToSettings(type, pages))
+            }
+        ) { type ->
+            // 插件管理被移到「我的」页时也要能渲染（否则会变成一张空白卡）
+            if (type == UserCardType.PLUGIN_MANAGEMENT) {
+                PluginManagementEntry(onOpenPluginMarket)
+            } else {
                 UserCardContent(type, phone, useCode, viewModel, { showBackgroundScreen = true }, { showLogViewer = true })
             }
-            Spacer(Modifier.height(16.dp))
         }
         Spacer(Modifier.height(100.dp)) // 底部留出悬浮导航栏空间
     }
-    if (showLogViewer) LogViewerDialog(onDismiss = { showLogViewer = false })
-    if (showBackgroundScreen) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
+    if (showLogViewer && InstalledPlugins.RUNTIME_LOG in installedPlugins) LogViewerDialog(onDismiss = { showLogViewer = false })
+    if (showBackgroundScreen && InstalledPlugins.BACKGROUND in installedPlugins) CustomBackgroundScreen(onDismiss = { showBackgroundScreen = false })
 }
 
 /**
@@ -367,61 +356,101 @@ private fun SettingsScreen(
     phone: String,
     useCode: UseCodeData?,
     viewModel: MainViewModel?,
+    editMode: Boolean,
+    onEditModeChange: (Boolean) -> Unit,
+    installedPlugins: Set<String>,
     cardOrder: List<UserCardType>,
+    featureOrder: List<UserCardType>,
     hiddenCards: Set<String>,
     onCardOrderChange: (List<UserCardType>) -> Unit,
+    onFeatureOrderChange: (List<UserCardType>) -> Unit,
     onHiddenCardsChange: (Set<String>) -> Unit,
     onMoveToProfile: (UserCardType) -> Unit,
+    onMoveIntoFeatures: (UserCardType) -> Unit,
+    onMoveOutOfFeatures: (UserCardType) -> Unit,
+    onOpenPluginMarket: () -> Unit,
     onShowBackground: () -> Unit,
     onShowLog: () -> Unit,
     onBack: () -> Unit,
     onLogout: () -> Unit
 ) {
-    var editMode by remember { mutableStateOf(false) }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回我的页面", tint = AppColors.TextPrimary)
-            }
-            Text("设置", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
-            Spacer(Modifier.weight(1f))
-            EditModeButton(editMode, onClick = { editMode = !editMode })
+        SettingsPageHeader("设置", onBack, "返回我的页面") {
+            EditModeButton(editMode, onClick = { onEditModeChange(!editMode) })
         }
         Spacer(Modifier.height(16.dp))
-        val visibleCards = if (editMode) cardOrder else cardOrder.filter { it.name !in hiddenCards }
-        if (UserCardType.NOTIFY !in visibleCards) {
-            KeepScreenOnCard()
-            Spacer(Modifier.height(16.dp))
-        }
-        visibleCards.forEachIndexed { index, type ->
-            EditableCardSlot(
-                editMode = editMode,
-                title = type.title,
-                isHidden = type.name in hiddenCards,
-                canMoveUp = index > 0,
-                canMoveDown = index < visibleCards.lastIndex,
-                onMoveUp = {
-                    onCardOrderChange(moveItem(cardOrder, index, index - 1))
-                },
-                onMoveDown = {
-                    onCardOrderChange(moveItem(cardOrder, index, index + 1))
-                },
-                onToggleHide = {
-                    onHiddenCardsChange(
-                        if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
-                    )
-                },
-                moveToOtherPageIcon = Icons.AutoMirrored.Filled.ArrowBack,
-                moveToOtherPageDescription = "移到我的页面",
-                onMoveToOtherPage = { onMoveToProfile(type) }
-            ) {
+        // 插件管理现在是一张普通卡片（可排序/隐藏/跨页），不再固定插在开关管理后面
+        EditableUserCardList(
+            editMode = editMode,
+            installedPlugins = installedPlugins,
+            order = cardOrder,
+            hiddenCards = hiddenCards,
+            onOrderChange = onCardOrderChange,
+            onHiddenCardsChange = onHiddenCardsChange,
+            moveIcon = Icons.AutoMirrored.Filled.ArrowBack,
+            moveDescription = "移到我的页面",
+            onMove = onMoveToProfile,
+            onMoveIntoFeatures = onMoveIntoFeatures
+        ) { type ->
+            if (type == UserCardType.PLUGIN_MANAGEMENT) {
+                PluginManagementEntry(onOpenPluginMarket)
+            } else if (type == UserCardType.FEATURE_MANAGEMENT) {
+                BaseCard {
+                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                        var expanded by rememberSaveable { mutableStateOf(true) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(
+                                    enabled = !editMode,
+                                    interactionSource = null,
+                                    indication = null,
+                                    role = Role.Button
+                                ) { expanded = !expanded }
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                type.title, modifier = Modifier.weight(1f),
+                                fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+                                color = AppColors.TextPrimary
+                            )
+                            if (!editMode) {
+                                Icon(
+                                    if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                    contentDescription = if (expanded) "折叠开关管理" else "展开开关管理",
+                                    tint = AppColors.TextSecondary
+                                )
+                            }
+                        }
+                        if (expanded || editMode) {
+                            Spacer(Modifier.height(8.dp))
+                            if (featureOrder.none { it.isAvailable(installedPlugins) && it.name !in hiddenCards } && !editMode) {
+                                Text(
+                                    "暂无显示的功能", modifier = Modifier.padding(8.dp),
+                                    color = AppColors.TextSecondary, fontSize = 13.sp
+                                )
+                            }
+                            EditableUserCardList(
+                                editMode = editMode,
+                                installedPlugins = installedPlugins,
+                                order = featureOrder,
+                                hiddenCards = hiddenCards,
+                                onOrderChange = onFeatureOrderChange,
+                                onHiddenCardsChange = onHiddenCardsChange,
+                                moveIcon = Icons.AutoMirrored.Filled.ArrowForward,
+                                moveDescription = "移出开关管理",
+                                onMove = onMoveOutOfFeatures,
+                                spacing = 8.dp
+                            ) { feature ->
+                                UserCardContent(feature, phone, useCode, viewModel, onShowBackground, onShowLog)
+                            }
+                        }
+                    }
+                }
+            } else {
                 UserCardContent(type, phone, useCode, viewModel, onShowBackground, onShowLog)
-            }
-            Spacer(Modifier.height(16.dp))
-            if (type == UserCardType.NOTIFY) {
-                KeepScreenOnCard()
-                Spacer(Modifier.height(16.dp))
             }
         }
         OutlinedButton(onClick = onLogout, modifier = Modifier.fillMaxWidth(),
@@ -433,6 +462,40 @@ private fun SettingsScreen(
         Text("Hualala v${BuildConfig.VERSION_NAME} · 哗啦啦啦啦让我去淋浴~",
             color = AppColors.TextSecondary, fontSize = 12.sp)
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+internal fun SettingsPageHeader(
+    title: String,
+    onBack: () -> Unit,
+    backLabel: String = "返回",
+    backIcon: ImageVector = Icons.AutoMirrored.Filled.ArrowBack,
+    actions: @Composable RowScope.() -> Unit
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onBack) {
+            Icon(backIcon, backLabel, tint = AppColors.TextPrimary)
+        }
+        Text(title, Modifier.weight(1f).reportToastPageTitleCenter(), fontSize = 22.sp, fontWeight = FontWeight.Bold,
+            color = AppColors.TextPrimary)
+        actions()
+    }
+}
+
+@Composable
+private fun PluginManagementEntry(onOpen: () -> Unit) {
+    BaseCard(Modifier.clickable(role = Role.Button, onClick = onOpen)) {
+        Row(
+            Modifier.fillMaxWidth().padding(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "插件管理", modifier = Modifier.weight(1f), fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold, color = AppColors.TextPrimary
+            )
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = AppColors.Accent)
+        }
     }
 }
 
@@ -451,10 +514,13 @@ private fun UserCardContent(
         UserCardType.BOUND_ROOM -> BoundRoomCard(viewModel)
         UserCardType.NOTIFY -> NotifyCard()
         UserCardType.TREND -> TrendToggleCard()
+        UserCardType.KEEP_SCREEN_ON -> KeepScreenOnCard()
         UserCardType.BACKGROUND -> BackgroundCard(onShowBackground)
         UserCardType.LOG -> LogCard(onShowLog)
         UserCardType.ABOUT -> AboutCard()
         UserCardType.UPDATE -> UpdateCard()
+        UserCardType.FEATURE_MANAGEMENT -> Unit
+        UserCardType.PLUGIN_MANAGEMENT -> Unit
     }
 }
 
@@ -471,6 +537,69 @@ internal fun BaseCard(modifier: Modifier = Modifier, content: @Composable Column
     )
 }
 
+private fun UserCardType.isAvailable(installedPlugins: Set<String>): Boolean {
+    val plugin = when (this) {
+        UserCardType.BOUND_ROOM -> InstalledPlugins.ROOM_BINDING
+        UserCardType.TREND -> InstalledPlugins.CONSUMPTION_TREND
+        UserCardType.KEEP_SCREEN_ON -> InstalledPlugins.KEEP_SCREEN_ON
+        UserCardType.BACKGROUND -> InstalledPlugins.BACKGROUND
+        UserCardType.LOG -> InstalledPlugins.RUNTIME_LOG
+        else -> return true
+    }
+    return plugin in installedPlugins
+}
+
+@Composable
+private fun EditableUserCardList(
+    editMode: Boolean,
+    installedPlugins: Set<String>,
+    order: List<UserCardType>,
+    hiddenCards: Set<String>,
+    onOrderChange: (List<UserCardType>) -> Unit,
+    onHiddenCardsChange: (Set<String>) -> Unit,
+    moveIcon: ImageVector,
+    moveDescription: String,
+    onMove: (UserCardType) -> Unit,
+    onMoveIntoFeatures: ((UserCardType) -> Unit)? = null,
+    spacing: Dp = 16.dp,
+    afterItem: @Composable (UserCardType) -> Unit = {},
+    content: @Composable (UserCardType) -> Unit
+) {
+    val visibleCards = order.filter {
+        it.isAvailable(installedPlugins) && (editMode || it.name !in hiddenCards)
+    }
+    visibleCards.forEachIndexed { index, type ->
+        key(type) {
+            val above = visibleCards.getOrNull(index - 1)
+            val below = visibleCards.getOrNull(index + 1)
+            EditableCardSlot(
+                editMode = editMode,
+                title = type.title,
+                isHidden = type.name in hiddenCards,
+                canMoveUp = above != null,
+                canMoveDown = below != null,
+                onMoveUp = { above?.let { onOrderChange(UserCardLayoutPolicy.swapCards(order, type, it)) } },
+                onMoveDown = { below?.let { onOrderChange(UserCardLayoutPolicy.swapCards(order, type, it)) } },
+                onToggleHide = {
+                    onHiddenCardsChange(
+                        if (type.name in hiddenCards) hiddenCards - type.name else hiddenCards + type.name
+                    )
+                },
+                moveToOtherPageIcon = moveIcon,
+                moveToOtherPageDescription = moveDescription,
+                onMoveToOtherPage = if (type == UserCardType.FEATURE_MANAGEMENT) null else ({ onMove(type) }),
+                onMoveIntoFeatures = onMoveIntoFeatures
+                    ?.takeIf { type in UserCardLayoutPolicy.featureDefaults }
+                    ?.let { move -> { move(type) } }
+            ) {
+                content(type)
+            }
+            Spacer(Modifier.height(spacing))
+            afterItem(type)
+        }
+    }
+}
+
 /** 编辑模式下在卡片上方显示的操作条；非编辑模式直接渲染卡片 */
 @Composable
 private fun EditableCardSlot(
@@ -484,7 +613,8 @@ private fun EditableCardSlot(
     onToggleHide: () -> Unit,
     moveToOtherPageIcon: ImageVector,
     moveToOtherPageDescription: String,
-    onMoveToOtherPage: () -> Unit,
+    onMoveToOtherPage: (() -> Unit)?,
+    onMoveIntoFeatures: (() -> Unit)?,
     content: @Composable () -> Unit
 ) {
     Column {
@@ -499,8 +629,15 @@ private fun EditableCardSlot(
                     color = if (isHidden) AppColors.TextSecondary.copy(alpha = 0.6f) else AppColors.TextSecondary,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onMoveToOtherPage, modifier = Modifier.size(34.dp)) {
-                    Icon(moveToOtherPageIcon, moveToOtherPageDescription, tint = AppColors.Accent)
+                if (onMoveIntoFeatures != null) {
+                    IconButton(onClick = onMoveIntoFeatures, modifier = Modifier.size(34.dp)) {
+                        Icon(Icons.Default.Add, "移入开关管理", tint = AppColors.Accent)
+                    }
+                }
+                if (onMoveToOtherPage != null) {
+                    IconButton(onClick = onMoveToOtherPage, modifier = Modifier.size(34.dp)) {
+                        Icon(moveToOtherPageIcon, moveToOtherPageDescription, tint = AppColors.Accent)
+                    }
                 }
                 IconButton(onClick = onMoveUp, enabled = canMoveUp, modifier = Modifier.size(34.dp)) {
                     Icon(Icons.Default.KeyboardArrowUp, "上移",
@@ -693,7 +830,7 @@ private fun BoundRoomCard(viewModel: MainViewModel?) {
                 DeviceInfo.roomKey(d.deviceInfo?.deviceName ?: d.name)?.takeIf { seen.add(it) }
             } ?: emptyList()
         }
-        AlertDialog(
+        ScreenCenteredAlertDialog(
             onDismissRequest = { showRoomPicker = false },
             title = { Text("选择设备位置", fontWeight = FontWeight.Bold) },
             text = {
@@ -864,8 +1001,21 @@ private fun UpdateCard() {
                 Spacer(Modifier.height(14.dp))
                 HorizontalDivider(color = AppColors.Border)
                 Spacer(Modifier.height(10.dp))
-                Text("更新日志", fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
-                    color = AppColors.TextPrimary)
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("更新日志", Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = AppColors.TextPrimary)
+                    if (releaseNotes.size > RECENT_RELEASE_COUNT) {
+                        Text(
+                            if (showAllReleases) "收起" else "展开全部",
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                                .clickable(interactionSource = null, indication = null, role = Role.Button) {
+                                    showAllReleases = !showAllReleases
+                                }
+                                .padding(start = 12.dp, top = 6.dp, bottom = 6.dp),
+                            color = AppColors.Accent, fontSize = 12.sp
+                        )
+                    }
+                }
                 Spacer(Modifier.height(2.dp))
                 // 默认只列最近几个版本。全部铺开会把卡片拉得很长，
                 // 「检查更新」按钮被顶到屏幕外，想更新的人还得先划过一堆旧日志。
@@ -877,17 +1027,6 @@ private fun UpdateCard() {
                         expanded = expandedTag == r.version,
                         onToggle = { expandedTag = if (expandedTag == r.version) null else r.version }
                     )
-                }
-                if (releaseNotes.size > RECENT_RELEASE_COUNT) {
-                    TextButton(
-                        onClick = { showAllReleases = !showAllReleases },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            if (showAllReleases) "收起" else "展开全部",
-                            color = AppColors.Accent, fontSize = 12.sp
-                        )
-                    }
                 }
             }
 
@@ -1247,22 +1386,37 @@ private fun InfoRow(label: String, value: String) {
 /** 信息行的最小高度。让「值 + 修改」那行和纯文字行一样高 */
 private val InfoRowMinHeight = 26.dp
 
+private fun accountDialogSessionError(account: ProjectAuthContext, viewModel: MainViewModel?): String? = when {
+    viewModel?.kickedOut == true || !PrefsHelper.isLoggedIn -> "请重新登录"
+    NetworkModule.session() != account -> "登录状态已变化，请重新打开"
+    else -> null
+}
+
 /**
  * 更换手机号。
  *
- * ⚠️ 验证码是发到**当前绑定**的手机号，不是新号——服务端要确认是本人操作。
- * 所以这个流程要求用户手上能拿到旧号。
+ * 验证码发到新手机号。账号认证仍使用当前绑定的手机号。
  */
 @Composable
 private fun ChangePhoneDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val account = remember { NetworkModule.session() }
     var newPhone by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
+    var issuedPhone by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf(0) }
+    var countdownPhone by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    val currentPhone = PrefsHelper.telephone
+    val currentPhone = account.telephone
+
+    LaunchedEffect(countdownPhone) {
+        if (countdownPhone != null) {
+            while (countdown > 0) { delay(1000); countdown-- }
+            countdownPhone = null
+        }
+    }
 
     AlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
@@ -1277,46 +1431,72 @@ private fun ChangePhoneDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) 
                     color = AppColors.TextSecondary, fontSize = 12.sp
                 )
                 Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = newPhone, onValueChange = { newPhone = it.trim() },
-                    label = { Text("新手机号") }, singleLine = true,
+                StableOutlinedTextField(
+                    value = newPhone,
+                    onValueChange = {
+                        val updated = it.trim()
+                        if (updated != newPhone) {
+                            newPhone = updated
+                            code = ""
+                            issuedPhone = null
+                            error = null
+                        }
+                    },
+                    label = { Text("新手机号") }, enabled = !submitting,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
+                VerificationCodeRow(spacing = 10.dp, field = { fieldModifier ->
+                    StableOutlinedTextField(
                         value = code, onValueChange = { code = it.trim() },
-                        label = { Text("验证码") }, singleLine = true,
+                        label = { Text("验证码") }, enabled = !submitting,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = fieldModifier
                     )
-                    Spacer(Modifier.width(10.dp))
+                }, send = { buttonModifier ->
                     Button(
                         onClick = {
+                            val sessionError = accountDialogSessionError(account, viewModel)
+                            if (sessionError != null) {
+                                error = sessionError
+                                return@Button
+                            }
+                            val destination = newPhone
                             sending = true; error = null
+                            code = ""
+                            issuedPhone = null
                             scope.launch {
-                                val r = AuthRepository.sendSmsCode(newPhone, typeId = 5)
-                                if (r.isSuccess) {
-                                    countdown = 60
-                                    while (countdown > 0) { delay(1000); countdown-- }
-                                } else {
-                                    error = r.exceptionOrNull()?.message ?: "验证码发送失败"
+                                try {
+                                    val result = AuthRepository.sendSmsCode(destination, typeId = 5)
+                                    ensureActive()
+                                    val updatedSessionError = accountDialogSessionError(account, viewModel)
+                                    if (updatedSessionError != null) {
+                                        error = updatedSessionError
+                                    } else if (result.isSuccess) {
+                                        countdown = 60
+                                        countdownPhone = destination
+                                        if (destination == newPhone) issuedPhone = destination
+                                    } else if (destination == newPhone) {
+                                        error = UserFeedback.smsSendMessage(result.exceptionOrNull()?.message)
+                                    }
+                                } finally {
+                                    sending = false
                                 }
-                                sending = false
                             }
                         },
-                        enabled = !sending && countdown == 0 && newPhone.length == 11,
+                        enabled = !submitting && !sending && countdown == 0 && newPhone.length == 11,
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.width(86.dp),
+                        modifier = buttonModifier.width(86.dp),
                         contentPadding = PaddingValues(horizontal = 4.dp)
                     ) {
                         Text(if (countdown > 0) "${countdown}s" else "发送",
+                            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                             fontSize = 13.sp, maxLines = 1)
                     }
-                }
+                })
                 error?.let {
                     Spacer(Modifier.height(10.dp))
                     Text(com.hualala.linyu.utils.UserFeedback.message(it), color = AppColors.Danger, fontSize = 12.sp)
@@ -1326,31 +1506,47 @@ private fun ChangePhoneDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) 
         confirmButton = {
             TextButton(
                 onClick = {
+                    val sessionError = accountDialogSessionError(account, viewModel)
+                    if (sessionError != null) {
+                        error = sessionError
+                        return@TextButton
+                    }
+                    val destination = newPhone
+                    val verificationCode = code
                     submitting = true; error = null
                     scope.launch {
                         try {
                             val r = NetworkModule.apiService.updatePhoneSafe(
-                                newPhone, code, NetworkModule.authFields()
+                                destination, verificationCode, account.fields()
                             )
-                            if (r.success) {
+                            val updatedSessionError = accountDialogSessionError(account, viewModel)
+                            if (updatedSessionError != null) {
+                                error = updatedSessionError
+                            } else if (r.success) {
+                                PrefsHelper.clearSavedPasswordLogin(currentPhone)
                                 // 认证参数里的 telephone 也得跟着换，否则后续请求还在用旧号
-                                PrefsHelper.telephone = newPhone
+                                PrefsHelper.telephone = destination
                                 NetworkModule.restoreFromPrefs()
                                 // 界面读的是 ViewModel 的 phone，不写它就还显示旧号，
                                 // 得等下次重新登录才更新
-                                viewModel?.phone = newPhone
+                                viewModel?.phone = destination
                                 viewModel?.toastMessage = "手机号已更换"
                                 onDismiss()
                             } else {
                                 error = r.displayMessage ?: "更换失败"
                             }
-                        } catch (_: Exception) {
-                            error = "网络连接失败，请检查网络"
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            error = accountDialogSessionError(account, viewModel)
+                                ?: UserFeedback.message(e.message, "更换手机号失败，请重试")
+                        } finally {
+                            submitting = false
                         }
-                        submitting = false
                     }
                 },
-                enabled = !submitting && newPhone.length == 11 && code.isNotEmpty()
+                enabled = !submitting && newPhone.length == 11 &&
+                    issuedPhone == newPhone && code.isNotEmpty()
             ) { Text(if (submitting) "提交中…" else "确定") }
         },
         dismissButton = {
@@ -1372,92 +1568,108 @@ private fun ChangePhoneDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) 
 @Composable
 private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
+    val account = remember { NetworkModule.session() }
+    val currentPhone = account.telephone
+    val passwordMask = remember { PasswordVisualTransformation() }
     // false = 知道当前密码，true = 走短信验证码
     var smsMode by remember { mutableStateOf(false) }
     var oldPwd by remember { mutableStateOf("") }
     var newPwd by remember { mutableStateOf("") }
     var confirmPwd by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
+    var issuedPhone by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
     var countdown by remember { mutableStateOf(0) }
     var submitting by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    // 预填当前账号绑定的手机号，但**允许改**——服务端认的是请求里的这个号，
-    // 换号之后 Prefs 万一没跟上，用户还能自己填对，不至于卡死在验证码发不出去
-    var phone by remember { mutableStateOf(PrefsHelper.telephone) }
-
-    AlertDialog(
+    PasswordChangeDialogFrame(
         onDismissRequest = { if (!submitting) onDismiss() },
         title = { Text("修改密码", fontWeight = FontWeight.Bold) },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (smsMode) {
-                    OutlinedTextField(
-                        value = phone, onValueChange = { phone = it.trim() },
-                        label = { Text("手机号") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = code, onValueChange = { code = it.trim() },
-                            label = { Text("验证码") }, singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(1f)
+                    Text("当前手机号：$currentPhone", color = AppColors.TextSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.height(12.dp))
+                }
+                // 切换时保留同一个焦点节点，手机号本身不参与焦点和键盘交互。
+                VerificationCodeRow(
+                    spacing = 10.dp,
+                    field = { fieldModifier ->
+                        StableOutlinedTextField(
+                            value = if (smsMode) code else oldPwd,
+                            onValueChange = { if (smsMode) code = it.trim() else oldPwd = it },
+                            label = { Text(if (smsMode) "验证码" else "当前密码") },
+                            enabled = !submitting,
+                            visualTransformation = if (smsMode) VisualTransformation.None else passwordMask,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = if (smsMode) KeyboardType.Number else KeyboardType.Password
+                            ),
+                            modifier = fieldModifier
                         )
-                        Spacer(Modifier.width(10.dp))
-                        Button(
-                            onClick = {
-                                sending = true; error = null
-                                scope.launch {
-                                    // typeId = 2 才是「改密码」的验证码
-                                    val r = AuthRepository.sendSmsCode(phone, typeId = 2)
-                                    if (r.isSuccess) {
-                                        countdown = 60
-                                        while (countdown > 0) { delay(1000); countdown-- }
-                                    } else {
-                                        error = r.exceptionOrNull()?.message ?: "验证码发送失败"
+                    },
+                    send = { buttonModifier ->
+                        if (smsMode) {
+                            Button(
+                                onClick = {
+                                    val sessionError = accountDialogSessionError(account, viewModel)
+                                    if (sessionError != null) {
+                                        error = sessionError
+                                        return@Button
                                     }
-                                    sending = false
-                                }
-                            },
-                            enabled = !sending && countdown == 0 && phone.length == 11,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.width(86.dp),
-                            contentPadding = PaddingValues(horizontal = 4.dp)
-                        ) {
-                            Text(if (countdown > 0) "${countdown}s" else "发送",
-                                fontSize = 13.sp, maxLines = 1)
+                                    sending = true
+                                    error = null
+                                    code = ""
+                                    issuedPhone = null
+                                    scope.launch {
+                                        try {
+                                            val result = AuthRepository.sendSmsCode(currentPhone, typeId = 2)
+                                            ensureActive()
+                                            val updatedSessionError = accountDialogSessionError(account, viewModel)
+                                            if (updatedSessionError != null) {
+                                                if (smsMode) error = updatedSessionError
+                                            } else if (result.isSuccess) {
+                                                issuedPhone = currentPhone
+                                                countdown = 60
+                                                while (countdown > 0) { delay(1000); countdown-- }
+                                            } else if (smsMode) {
+                                                error = UserFeedback.smsSendMessage(result.exceptionOrNull()?.message)
+                                            }
+                                        } finally {
+                                            sending = false
+                                        }
+                                    }
+                                },
+                                enabled = !submitting && !sending && countdown == 0 && currentPhone.length == 11,
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = buttonModifier.width(86.dp),
+                                contentPadding = PaddingValues(horizontal = 4.dp)
+                            ) {
+                                Text(
+                                    if (countdown > 0) "${countdown}s" else "发送",
+                                    modifier = Modifier.fillMaxWidth(),
+                                    textAlign = TextAlign.Center,
+                                    fontSize = 13.sp,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
-                } else {
-                    OutlinedTextField(
-                        value = oldPwd, onValueChange = { oldPwd = it },
-                        label = { Text("当前密码") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+                )
 
                 Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
+                StableOutlinedTextField(
                     value = newPwd, onValueChange = { newPwd = it },
-                    label = { Text("新密码") }, singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    label = { Text("新密码") }, enabled = !submitting,
+                    visualTransformation = passwordMask,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
+                StableOutlinedTextField(
                     value = confirmPwd, onValueChange = { confirmPwd = it },
-                    label = { Text("确认新密码") }, singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    label = { Text("确认新密码") }, enabled = !submitting,
+                    visualTransformation = passwordMask,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
@@ -1468,8 +1680,12 @@ private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Uni
                     if (smsMode) "直接修改密码" else "短信验证修改密码",
                     fontSize = 12.sp, color = AppColors.Accent,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .clickable(enabled = !submitting) {
+                        .clickable(
+                            interactionSource = null,
+                            indication = null,
+                            enabled = !submitting,
+                            role = Role.Button
+                        ) {
                             smsMode = !smsMode
                             error = null
                         }
@@ -1485,6 +1701,11 @@ private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Uni
         confirmButton = {
             TextButton(
                 onClick = {
+                    val sessionError = accountDialogSessionError(account, viewModel)
+                    if (sessionError != null) {
+                        error = sessionError
+                        return@TextButton
+                    }
                     // 只在本地校验「两次输入一致」；密码规则交给服务端，免得自己定的规则
                     // 和服务端不一致，把合法密码拦下来
                     if (newPwd != confirmPwd) { error = "两次输入的新密码不一致"; return@TextButton }
@@ -1494,29 +1715,38 @@ private fun ChangePasswordDialog(viewModel: MainViewModel?, onDismiss: () -> Uni
                             val r = if (smsMode) {
                                 NetworkModule.apiService.forgetPasswordSafe(
                                     MD5Utils.encryptPassword(newPwd), code,
-                                    NetworkModule.authFields()
+                                    account.fields()
                                 )
                             } else {
                                 NetworkModule.apiService.updatePasswordSafe(
                                     MD5Utils.encryptPassword(oldPwd),
                                     MD5Utils.encryptPassword(newPwd),
-                                    NetworkModule.authFields()
+                                    account.fields()
                                 )
                             }
-                            if (r.success) {
+                            val updatedSessionError = accountDialogSessionError(account, viewModel)
+                            if (updatedSessionError != null) {
+                                error = updatedSessionError
+                            } else if (r.success) {
+                                PrefsHelper.clearSavedPasswordLogin(currentPhone)
                                 viewModel?.toastMessage = "密码已修改"
                                 onDismiss()
                             } else {
                                 error = r.displayMessage ?: "修改失败"
                             }
-                        } catch (_: Exception) {
-                            error = "网络连接失败，请检查网络"
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            error = accountDialogSessionError(account, viewModel)
+                                ?: UserFeedback.message(e.message, "修改密码失败，请重试")
+                        } finally {
+                            submitting = false
                         }
-                        submitting = false
                     }
                 },
                 enabled = !submitting && newPwd.isNotEmpty() && confirmPwd.isNotEmpty() &&
-                    (if (smsMode) code.isNotEmpty() else oldPwd.isNotEmpty())
+                    (if (smsMode) issuedPhone == currentPhone && code.isNotEmpty()
+                    else oldPwd.isNotEmpty())
             ) { Text(if (submitting) "提交中…" else "确定") }
         },
         dismissButton = {

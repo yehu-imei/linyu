@@ -1,0 +1,84 @@
+{
+  "formatVersion": 1,
+  "plugins": [
+    {
+      "id": "nearby-devices",
+      "name": "附近设备",
+      "author": "yehu-imei",
+      "version": "1.0.0",
+      "description": "查看附近的蓝牙设备",
+      "details": "在首页和支持的桌面小组件上显示附近设备。首页会按信号强度排列，点开可以查看设备详情。删除插件会移除附近设备入口，扫码、查看常用设备和水控所需的蓝牙连接仍可使用。",
+      "formatVersion": 1,
+      "capabilities": [
+        "device.nearby"
+      ],
+      "authorGithubId": 178531070,
+      "versionEpoch": 1,
+      "path": "packages/nearby-devices-1.0.0.zip",
+      "sha256": "d8f4eab652ea4d95e1a5d15c68c4bc5111fcd5de9b4a1057a8a7b7ec4c44f919"
+    },
+    {
+      "id": "consumption-trend",
+      "name": "消费趋势",
+      "author": "XiaoLoad",
+      "version": "1.0.0",
+      "description": "在账单页查看消费走势",
+      "details": "在账单页切换近七天或本月，按日查看消费金额，支持折线图和柱形图。在开关管理里可控制是否显示趋势卡片，账单列表和原有消费记录仍可查看。",
+      "formatVersion": 1,
+      "capabilities": [
+        "bill.consumption-trend"
+      ],
+      "authorGithubId": 63766325,
+      "versionEpoch": 1,
+      "path": "packages/consumption-trend-1.0.0.zip",
+      "sha256": "9787cac7f445e9e7cd41b9f8b55ae455ebb57db9fae4fa9f29261253e7398875"
+    },
+    {
+      "id": "keep-screen-on",
+      "name": "屏幕常亮",
+      "author": "MengQingSSSS",
+      "version": "1.0.0",
+      "description": "在使用页保持屏幕亮起",
+      "details": "在开关管理中开启后，淋浴在前台显示使用页时会保持屏幕亮起，方便查看时长和结束用水。离开使用页后恢复设备原有的息屏行为。",
+      "formatVersion": 1,
+      "capabilities": [
+        "usage.keep-screen-on"
+      ],
+      "authorGithubId": 169689978,
+      "versionEpoch": 1,
+      "path": "packages/keep-screen-on-1.0.0.zip",
+      "sha256": "c9a0d1d9fe8ca016a7785a3918e46087a85443632e636256fa5b0acf8d118afc"
+    },
+    {
+      "id": "background",
+      "name": "背景装扮",
+      "author": "王鹏辉",
+      "version": "1.0.0",
+      "description": "自定义主页和使用页背景",
+      "details": "从相册选择图片，分别设置主页和使用页背景。支持调节透明度、模糊和亮度，并可从图片提取主题色。也可以在背景装扮页恢复默认。",
+      "formatVersion": 1,
+      "capabilities": [
+        "appearance.background"
+      ],
+      "versionEpoch": 1,
+      "path": "packages/background-1.0.0.zip",
+      "sha256": "85fe271090d6862ebbeacb22982f49cd9683d56d47c97e1e64b7c869e6ee6231"
+    },
+    {
+      "id": "runtime-log",
+      "name": "运行日志",
+      "author": "Cainite07",
+      "version": "1.0.0",
+      "description": "查看并导出淋浴运行日志",
+      "details": "查看应用记录的操作和错误，包括设备连接、用水和结算等过程。遇到问题时可导出日志供排查。应用会对手机号、登录凭证等敏感字段做脱敏处理。",
+      "formatVersion": 1,
+      "capabilities": [
+        "diagnostics.runtime-log"
+      ],
+      "authorGithubId": 187083445,
+      "versionEpoch": 1,
+      "path": "packages/runtime-log-1.0.0.zip",
+      "sha256": "b430c0b027b62e08706bbb57e8eaa9dcbceaf1a58987f49c6bac4aae01d1728c"
+    }
+  ]
+}

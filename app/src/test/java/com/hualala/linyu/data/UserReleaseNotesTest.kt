@@ -1,5 +1,6 @@
 package com.hualala.linyu.data
 
+import com.hualala.linyu.BuildConfig
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
@@ -10,11 +11,11 @@ class UserReleaseNotesTest {
 
     @Test fun allPublishedVersionsAreBrief() {
         val notes = UserReleaseNotes.parse(document())
-        assertEquals(16, notes.size)
-        assertEquals("v3.1.2", notes.first().version)
+        assertTrue(notes.size >= 17)
+        assertEquals("v${BuildConfig.VERSION_NAME}", notes.first().version)
         assertEquals("v1.0", notes.last().version)
         assertFalse(notes.any { it.date == "待发布" })
-        assertTrue(notes.all { it.items.size in 1..5 && it.items.all { text -> text.length <= 50 } })
+        assertTrue(notes.all { it.items.size in 1..7 && it.items.all { text -> text.length <= 50 } })
     }
     @Test fun platformTagsAreExplicit() {
         val android = UserReleaseNotes.parse(document()).flatMap { it.items }

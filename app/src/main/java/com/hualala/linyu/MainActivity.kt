@@ -21,7 +21,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
@@ -30,13 +32,17 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hualala.linyu.api.NetworkModule
+import com.hualala.linyu.data.InstalledPlugins
 import com.hualala.linyu.data.canLogoutVoluntarily
 import com.hualala.linyu.ui.AppBackgroundLayer
 import com.hualala.linyu.ui.FloatingPillNavBar
 import com.hualala.linyu.ui.LinYuToast
+import com.hualala.linyu.ui.LocalToastPageTitleCenter
 import com.hualala.linyu.ui.LoginScreen
 import com.hualala.linyu.ui.MainScreen
 import com.hualala.linyu.ui.MainViewModel
+import com.hualala.linyu.ui.PluginManagementScreen
+import com.hualala.linyu.ui.ScreenCenteredAlertDialog
 import com.hualala.linyu.ui.UserScreen
 import com.hualala.linyu.ui.WalletScreen
 import com.hualala.linyu.ui.theme.AppColors
@@ -47,10 +53,12 @@ import com.hualala.linyu.ui.theme.ThemeMode
 import com.hualala.linyu.utils.AppLogger
 import com.hualala.linyu.utils.BackgroundManager
 import com.hualala.linyu.utils.BackgroundState
+import com.hualala.linyu.utils.Notifier
 import com.hualala.linyu.utils.PrefsHelper
+import com.hualala.linyu.data.ShowerOrderTarget
 
 /** 一次「从外部跳进来」的请求：落到哪个 tab、要不要直接进使用页 */
-data class NavRequest(val tab: Int, val showShower: Boolean)
+data class NavRequest(val tab: Int, val showShower: Boolean, val showerTarget: ShowerOrderTarget? = null)
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -75,11 +83,12 @@ class MainActivity : ComponentActivity() {
 
         // 小组件可以带参数跳进来：账单卡片 → 账单页。
         // （附近设备的「选用」已经改成在桌面后台完成，不再往这里跳了）
-        navRequest.value = intent.toNavRequest()
+        if (savedInstanceState == null) navRequest.value = intent.toNavRequest()
         // 启用 edge-to-edge：让内容延伸到状态栏/导航栏下方，
         // 这样自定义背景才能铺满到状态栏（各页面用 statusBarsPadding 自保内容位置）
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
         PrefsHelper.init(this)
+        Notifier.ensureChannels(this)
         AppLogger.init(this)
         AppLogger.installCrashHandler(this)
         BackgroundState.refresh() // 恢复自定义背景配置（与深浅模式无关）
@@ -109,6 +118,10 @@ class MainActivity : ComponentActivity() {
             var showKickedDialog by remember { mutableStateOf(false) }
             var showLogoutConfirm by remember { mutableStateOf(false) }
             var userSettingsVisible by rememberSaveable { mutableStateOf(false) }
+            var editingCards by rememberSaveable { mutableStateOf(false) }
+            var showPluginMarket by rememberSaveable { mutableStateOf(false) }
+            val tabTitleCenters = remember { mutableStateMapOf<Int, Float>() }
+            val pluginTitleCenter = remember { mutableStateOf<Float?>(null) }
             val mainViewModel: MainViewModel = viewModel()
 
             // 消费跳转请求：冷启动和「App 已在跑时再点通知」走的是同一条路
@@ -116,7 +129,8 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(navRequest.value, isLoggedIn) {
                 val nav = navRequest.value ?: return@LaunchedEffect
                 if (!isLoggedIn) return@LaunchedEffect   // 还没登录，等登进来再说
-                if (nav.showShower) mainViewModel.restoreShowerScreen(mainViewModel.phone)
+                showPluginMarket = false
+                if (nav.showShower) mainViewModel.restoreShowerScreen(mainViewModel.phone, nav.showerTarget)
                 currentTab = nav.tab
                 navRequest.value = null
             }
@@ -190,7 +204,11 @@ class MainActivity : ComponentActivity() {
                             isLoggedIn = true; currentTab = 0
                         })
                     } else {
-                        Box(modifier = Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = if (showPluginMarket) {
+                                Modifier.fillMaxSize().clearAndSetSemantics {}
+                            } else Modifier.fillMaxSize()
+                        ) {
                             // 三大主页面弹性视差左右滑移（对齐 MudLife 的交互）
                             AnimatedContent(
                                 targetState = currentTab,
@@ -211,12 +229,21 @@ class MainActivity : ComponentActivity() {
                                 },
                                 label = "PageSpringTransition"
                             ) { tab ->
-                                when (tab) {
-                                    0 -> MainScreen(phone = mainViewModel.phone, viewModel = mainViewModel)
-                                    1 -> WalletScreen(viewModel = mainViewModel)
-                                    2 -> UserScreen(phone = mainViewModel.phone, viewModel = mainViewModel,
-                                        onLogout = { showLogoutConfirm = true },
-                                        onSettingsVisibilityChanged = { userSettingsVisible = it })
+                                CompositionLocalProvider(LocalToastPageTitleCenter provides { center ->
+                                    tabTitleCenters[tab] = center
+                                }) {
+                                    when (tab) {
+                                        0 -> MainScreen(
+                                            phone = mainViewModel.phone, viewModel = mainViewModel,
+                                            editMode = editingCards, onEditModeChange = { editingCards = it }
+                                        )
+                                        1 -> WalletScreen(viewModel = mainViewModel)
+                                        2 -> UserScreen(phone = mainViewModel.phone, viewModel = mainViewModel,
+                                            onLogout = { showLogoutConfirm = true },
+                                            onSettingsVisibilityChanged = { userSettingsVisible = it },
+                                            editMode = editingCards, onEditModeChange = { editingCards = it },
+                                            onOpenPluginMarket = { showPluginMarket = true })
+                                    }
                                 }
                             }
                             // 悬浮胶囊导航栏
@@ -230,14 +257,47 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    if (isLoggedIn && showPluginMarket) {
+                        val pluginRevision by InstalledPlugins.changes.collectAsState()
+                        val installedPlugins = remember(pluginRevision) { InstalledPlugins.all }
+                        // 页面留在当前窗口，保留下面设置页的滚动和编辑状态。
+                        Box(Modifier.matchParentSize().pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) awaitPointerEvent()
+                            }
+                        }) {
+                            CompositionLocalProvider(LocalToastPageTitleCenter provides { center ->
+                                pluginTitleCenter.value = center
+                            }) {
+                                PluginManagementScreen(
+                                    installed = mainViewModel.orderedPlugins(installedPlugins),
+                                    onMove = mainViewModel::moveInstalledPlugin,
+                                    onInstall = { mainViewModel.installPlugin(this@MainActivity, it) },
+                                    onUninstall = { id ->
+                                        mainViewModel.uninstallPlugin(this@MainActivity, id)
+                                    },
+                                    onMessage = { mainViewModel.toastMessage = it },
+                                    onDismiss = { showPluginMarket = false }
+                                )
+                            }
+                        }
+                    }
+
                     // Toast 和弹窗放在 Box 内部最上层
                     LinYuToast(
                         message = mainViewModel.toastMessage,
+                        titleCenterY = {
+                            when {
+                                showPluginMarket -> pluginTitleCenter.value
+                                isLoggedIn && !mainViewModel.isShowering -> tabTitleCenters[currentTab]
+                                else -> null
+                            }
+                        },
                         onDismiss = { mainViewModel.toastMessage = null }
                     )
 
                     if (showKickedDialog) {
-                        AlertDialog(
+                        ScreenCenteredAlertDialog(
                             onDismissRequest = {},
                             title = { Text("登录已失效", fontWeight = FontWeight.Bold,
                                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
@@ -253,6 +313,8 @@ class MainActivity : ComponentActivity() {
                                 Button(onClick = {
                                     showKickedDialog = false
                                     mainViewModel.logout(preserveActiveRecovery = true)
+                                    editingCards = false
+                                    showPluginMarket = false
                                     isLoggedIn = false
                                 }, modifier = Modifier.fillMaxWidth()) { Text("确定") }
                             }
@@ -261,7 +323,7 @@ class MainActivity : ComponentActivity() {
 
                     if (showLogoutConfirm) {
                         val canLogout = canLogoutVoluntarily(PrefsHelper.getActiveOrders())
-                        AlertDialog(
+                        ScreenCenteredAlertDialog(
                             onDismissRequest = { showLogoutConfirm = false },
                             title = { Text(if (canLogout) "确认退出" else "无法退出") },
                             text = { Text(if (canLogout)
@@ -271,6 +333,8 @@ class MainActivity : ComponentActivity() {
                                     showLogoutConfirm = false
                                     if (canLogout) {
                                         mainViewModel.logout()
+                                        editingCards = false
+                                        showPluginMarket = false
                                         isLoggedIn = false
                                         userSettingsVisible = false
                                     }
@@ -305,7 +369,8 @@ class MainActivity : ComponentActivity() {
         val tab = getIntExtra(EXTRA_TAB, -1)
         val showShower = getBooleanExtra(EXTRA_SHOW_SHOWER, false)
         if (tab < 0 && !showShower) return null
-        return NavRequest(tab = if (tab >= 0) tab else 0, showShower = showShower)
+        val target = if (showShower) ShowerOrderTarget.fromIntent(this) else null
+        return NavRequest(tab = if (tab >= 0) tab else 0, showShower = showShower, showerTarget = target)
     }
 
     private fun updateStatusBarColor(themeMode: ThemeMode) {

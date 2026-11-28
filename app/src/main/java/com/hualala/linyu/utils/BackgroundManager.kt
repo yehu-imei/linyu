@@ -30,6 +30,7 @@ object BackgroundManager {
     // 每套背景各自缓存
     private val cache = HashMap<String, ImageBitmap?>()
     private val cacheStamp = HashMap<String, Long>()
+    private var pluginDataVersion = 0
 
     fun imageFile(context: Context, scope: String): File =
         File(context.filesDir, "background_$scope.jpg")
@@ -37,25 +38,33 @@ object BackgroundManager {
     fun hasImage(context: Context, scope: String): Boolean = imageFile(context, scope).exists()
 
     /** 从相册 Uri 复制到私有目录（自动缩放） */
-    suspend fun saveFromUri(context: Context, uri: Uri, scope: String): Boolean =
-        withContext(Dispatchers.IO) {
+    suspend fun saveFromUri(context: Context, uri: Uri, scope: String): Boolean {
+        // 相册解码在 IO 线程上，卸载后不得把正在处理的旧图写回来。
+        val version = synchronized(this) { pluginDataVersion }
+        return withContext(Dispatchers.IO) {
             try {
                 val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
                     ?: return@withContext false
                 val bmp = decodeScaled(bytes, MAX_DIM) ?: return@withContext false
-                imageFile(context, scope).outputStream().use { out ->
-                    bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                try {
+                    synchronized(this@BackgroundManager) {
+                        if (version != pluginDataVersion) return@withContext false
+                        imageFile(context, scope).outputStream().use { out ->
+                            bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                        }.also { cache.remove(scope) }
+                    }
+                } finally {
+                    bmp.recycle()
                 }
-                bmp.recycle()
-                cache[scope] = null // 下次读取时重新解码
-                true
             } catch (e: Exception) {
                 AppLogger.e("保存自定义背景失败($scope)", e)
                 false
             }
         }
+    }
 
     /** 加载背景图（带缓存，避免每帧解码） */
+    @Synchronized
     fun loadBitmap(context: Context, scope: String): ImageBitmap? {
         val f = imageFile(context, scope)
         if (!f.exists()) {
@@ -75,10 +84,29 @@ object BackgroundManager {
         }
     }
 
-    fun clear(context: Context, scope: String) {
-        runCatching { imageFile(context, scope).delete() }
-        cache[scope] = null
-        cacheStamp[scope] = 0L
+    @Synchronized
+    fun clear(context: Context, scope: String): Boolean {
+        val removed = runCatching {
+            val image = imageFile(context, scope)
+            !image.exists() || image.delete()
+        }.getOrDefault(false)
+        if (removed) {
+            cache.remove(scope)
+            cacheStamp.remove(scope)
+        }
+        return removed
+    }
+
+    @Synchronized
+    internal fun clearPluginData(context: Context): Boolean {
+        pluginDataVersion++
+        val homeRemoved = clear(context, SCOPE_HOME)
+        val showerRemoved = clear(context, SCOPE_SHOWER)
+        if (!homeRemoved || !showerRemoved) return false
+        PrefsHelper.clearBackgroundOptions()
+        BackgroundState.refresh()
+        BackgroundState.notifyImageChanged()
+        return true
     }
 
     /**

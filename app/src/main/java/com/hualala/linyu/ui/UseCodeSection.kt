@@ -176,7 +176,7 @@ internal fun UseCodeCard(useCode: UseCodeData?, viewModel: MainViewModel?) {
         UseCodeRedeemDialog(useCode, viewModel) { showRedeem = false }
     }
     blockMessage?.let { message ->
-        AlertDialog(onDismissRequest = { blockMessage = null },
+        ScreenCenteredAlertDialog(onDismissRequest = { blockMessage = null },
             title = { Text("无法领取") }, text = { Text(message) },
             confirmButton = { TextButton(onClick = { blockMessage = null }) { Text("知道了") } })
     }
@@ -258,7 +258,7 @@ internal fun UseCodeRedeemDialog(
     // 点开领取页它就先给你生成一个候选码。
     LaunchedEffect(Unit) { if (!blocked) swap() }
 
-    AlertDialog(
+    ScreenCenteredAlertDialog(
         onDismissRequest = { if (!claiming) onDismiss() },
         title = {
             Text(
@@ -285,16 +285,16 @@ internal fun UseCodeRedeemDialog(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(Modifier.weight(1f)) {
                         Text("新使用码", color = AppColors.TextSecondary, fontSize = 12.sp)
                         Spacer(Modifier.height(2.dp))
                         val shown = candidate
                         if (shown.isNullOrEmpty()) {
                             Text(
-                                "— — — — — — — —",
+                                "––––––––",
                                 fontSize = 24.sp, fontWeight = FontWeight.Black,
                                 letterSpacing = 3.sp, color = AppColors.TextSecondary
                             )
@@ -319,14 +319,18 @@ internal fun UseCodeRedeemDialog(
                             )
                         }
                     }
-                    TextButton(onClick = swap, enabled = UseCodePolicy.canGenerate(remainTimes, swapping || claiming)) {
+                    TextButton(
+                        onClick = swap,
+                        enabled = UseCodePolicy.canGenerate(remainTimes, swapping || claiming),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
                         Icon(Icons.Default.Refresh, null, tint = AppColors.Accent,
                             modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
                         Text(
                             if (swapping) "换码中"
                             else if (candidate == null) "获取" else "换一个",
-                            fontSize = 13.sp, color = AppColors.Accent
+                            fontSize = 13.sp, color = AppColors.Accent, maxLines = 1, softWrap = false
                         )
                     }
                 }

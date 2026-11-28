@@ -34,8 +34,8 @@ android {
         applicationId = "com.hualala.linyu"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
-        versionName = "3.1.2"
+        versionCode = 21
+        versionName = "3.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -123,7 +123,10 @@ dependencies {
     implementation(libs.camera.camera2)
     implementation(libs.camera.lifecycle)
     implementation(libs.camera.view)
-    implementation(libs.mlkit.barcode)
+    // 二维码识别用 ZXing core（纯 Java）。ML Kit 的 bundled 版本会带
+    // 4.7MB 的 libbarhopper_v3.so + 0.86MB 模型，占整个 APK 的 43%，
+    // 而本项目只需要识别设备贴纸上的二维码。
+    implementation(libs.zxing.core)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

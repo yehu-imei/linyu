@@ -21,4 +21,18 @@ class UserFeedbackTest {
         assertEquals("连接超时，请重试", UserFeedback.message("请求失败：SocketTimeoutException"))
         assertEquals("网络连接失败，请检查网络", UserFeedback.message("Unable to resolve host example.invalid"))
     }
+
+    @Test fun smsSendFailuresDoNotImplyExpiredAccountSession() {
+        val fallback = "验证码发送失败，请重试"
+        for (reason in listOf("请先登录对应账号", "登录状态已失效", "账户已在别处登陆", "HTTP 401: Unauthorized", "发送失败")) {
+            assertEquals(fallback, UserFeedback.smsSendMessage(reason))
+        }
+    }
+
+    @Test fun smsSendFailuresKeepUsefulBusinessAndNetworkHints() {
+        assertEquals("验证码发送过于频繁", UserFeedback.smsSendMessage("验证码发送过于频繁"))
+        assertEquals("验证码已过期，请重新获取", UserFeedback.smsSendMessage("验证码已过期，请重新获取"))
+        assertEquals("连接超时，请重试", UserFeedback.smsSendMessage("SocketTimeoutException"))
+        assertEquals("网络连接失败，请检查网络", UserFeedback.smsSendMessage("Unable to resolve host"))
+    }
 }

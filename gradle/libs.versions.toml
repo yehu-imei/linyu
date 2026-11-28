@@ -14,7 +14,10 @@ lifecycle = "2.6.1"
 activityCompose = "1.8.2"
 securityCrypto = "1.1.0-alpha06"
 camera = "1.4.2"
-mlkitBarcode = "17.3.0"
+# 二维码识别：ZXing core（纯 Java，约 0.5MB）。
+# 换掉 ML Kit bundled 的 barcode-scanning 是为了去掉 4.7MB 的 libbarhopper_v3.so
+# 和 0.86MB 的 .tflite 模型（合计约占 APK 的 43%）。
+zxing = "3.5.3"
 
 mqtt = "1.1.1"
 
@@ -46,7 +49,7 @@ camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "
 camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camera" }
 camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camera" }
 camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camera" }
-mlkit-barcode = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkitBarcode" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

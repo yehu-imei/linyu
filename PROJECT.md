@@ -8,11 +8,11 @@
 |---|---|
 | 应用名称 | 淋浴 |
 | 包名 | `com.hualala.linyu` |
-| 当前发行 | [v3.1.2](https://github.com/yehu-imei/linyu/releases/tag/v3.1.2)，构建 20 |
+| 当前发行 | [v3.2.0](https://github.com/yehu-imei/linyu/releases/tag/v3.2.0)，构建 21 |
 | 技术栈 | Kotlin + Jetpack Compose + Material 3 |
 | 最低 Android 版本 | Android 8.0 (API 26) |
 | 目标 Android 版本 | Android 16 (API 36) |
-| APK 体积 | 约 13.4 MiB（3.1.2，含 ML Kit 条码识别 native 库） |
+| v3.1.2 发行 APK 体积 | 约 13.4 MiB，含 ML Kit。当前源码已改用 ZXing |
 | 支持的 ABI | 仅 `arm64-v8a` |
 | 后端 API | 趣智校园 `v3-api.china-qzxy.cn` |
 | 适用范围 | 使用趣智校园系统的学校（学校名称自动获取） |
@@ -25,19 +25,20 @@
 
 | 功能 | 说明 |
 |---|---|
-| 密码登录/登出 | 手机号 + 密码登录，支持系统自动填充。loginCode 加密持久化，支持挤号检测 |
-| 短信验证码登录 | v2.1.0 通用化：`secret = MD5(前3位+后4位+"klcx")` 由手机号推导，任何手机号可用 |
+| 密码登录/登出 | 手机号与密码支持系统自动填充，可在加密存储可用时记住密码。登录会话独立持久化，支持挤号检测 |
+| 短信验证码登录 | 默认登录方式。验证码发送结果只更新对应手机号的倒计时，错误提示限于发起请求时的表单 |
 | 蓝牙扫描设备 | BLE 低功耗蓝牙扫描附近设备，按信号强度显示（强/中/弱） |
 | 蓝牙水表直连 | v3.1.0：部分学校的表不联网，手机通过 BLE 直连设备开阀 / 关阀 / 结算（下发费率、采集消费、上传结算） |
-| 蓝牙水表体验 | 关阀即结清、遗留订单自动补结算、App 被杀重开能恢复用水；通知栏「结束使用」与桌面小组件都能走蓝牙关阀（App 被杀也能关） |
-| 扫码绑定设备 | 扫描设备二维码，直接弹出设备详情（无需蓝牙） |
-| 绑定寝室 | 在「选择附近」里选一间寝室（**没有手工输入**）。寝室键从设备名「掐头去尾」得到，同一间寝室的热水器和洗手台收敛成同一条。首页**和桌面小组件**三处都按它筛 |
-| 开始洗澡 | 调用 downRate API 开启设备，并轮询确认开阀成功 |
-| 停止洗澡 | 云端关水提交一次 `closeOrder`，受理后最多用 9 秒复核设备状态。确认空闲后清理订单，未确认时保留重试入口 |
+| 蓝牙水表体验 | 费率写入前保存待确认记录，恢复时核对设备与订单。关阀后重连、上传消费记录并确认设备清理，遗留订单可补结算 |
+| 扫码绑定设备 | CameraX 提供预览，ZXing 识别扫描和相册中的二维码。成功识别后打开设备详情 |
+| 绑定寝室 | 安装插件后在「选择附近」选寝室。同寝室设备按原始名称归为同一条，首页、小组件和快捷开水共用筛选规则 |
+| 开始洗澡 | 云端开启前查询设备状态，确认空闲后由主动开启入口请求下发，轮询结果后保存活跃订单 |
+| 恢复使用 | 匹配当前账户、设备和原订单后继续使用。显式恢复入口只恢复已存在的订单 |
+| 停止洗澡 | 云端关水提交一次 `closeOrder`，受理后复核原订单状态。确认结束后清理对应订单，未确认时保留重试入口 |
 | 洗澡中界面 | 全屏沉浸式界面，显示计时器、预扣金额、设备位置 |
 | 自动关停倒计时 | 解析 autoDisConTime 显示闲置自动关闭倒计时 |
 | 自动关停确认弹窗 | 设备自动关闭时弹确认框（设备名 + 时长 + 消费金额） |
-| 消费结算 | 按订单所属项目查询消费结果，`/order/consumeOrder/result/query` 的金额单位为**厘**。结果未确认时保留待对账记录 |
+| 消费结算 | 按订单所属项目查询消费结果，`/order/consumeOrder/result/query` 的金额单位为**厘**。结果未确认或暂按零消费处理时保留待对账记录 |
 | MQTT 订单事件 | 消费金额在订单结束后推送。用水期间界面显示计时与预扣金额 |
 | 使用码启动检测 | 通过物理键盘使用码启动设备后，刷新可自动发现使用中的设备 |
 | 多设备支持 | 支持同时管理多个活跃设备订单 |
@@ -46,20 +47,21 @@
 | 饮水机支持 | 识别饮水机与冷热类型，按设备所属的已关联项目处理开关水、结算和账单 |
 | 桌面小组件 | 1x1 / 2x2 / 2x4 三种尺寸，桌面直接启停热水；深色液态玻璃卡片，计时由 `Chronometer` 驱动，App 不在也能走秒 |
 | 主动挤号检测 | 25 秒心跳轮询，被挤下线能及时弹提示（跟随 Activity 生命周期，退后台自动停） |
-| 后台用水监控 | 前台服务 `ShowerWatchService`：超时自动关停与订单轮询脱离界面，退出 App、划掉最近任务都不影响 |
-| 系统通知 | 用水期间常驻状态条（带「结束用水」按钮），结束 / 超时 / 设备被占用各有一条；总开关 + 三个细分开关 |
+| 后台用水监控 | 前台服务 `ShowerWatchService` 在离开界面后继续轮询订单并处理超时关停，受系统前台服务规则约束 |
+| 系统通知 | App 内保留总开关，具体提醒由系统渠道管理。单台设备的状态通知提供「结束使用」，同时使用多台时点通知回 App 管理 |
 | 个人信息卡片 | 姓名、学号、学校自动获取（三个接口互为兜底）；「账号管理」折叠区可换手机号、改密码 |
-| 更换手机号 | 验证码发到**新**号（`typeId=5`），改完即时生效 |
-| 修改密码 | 密码方式走 `/user/password/update`；**没设过密码 / 忘了密码**可走 `/user/password/forget` 用短信验证码重置 |
+| 更换手机号 | 验证码发到新手机号（`typeId=5`），修改号码会清空已输入的验证码，提交以当前号码为准 |
+| 修改密码 | 支持现有密码与短信验证码两种方式。短信发给当前账户绑定手机号，号码在弹窗内固定显示 |
 
 ### 钱包与账单
 
 | 功能 | 说明 |
 |---|---|
 | 余额切换 | 点击账单页标题，在一卡通与趣智校园钱包之间切换。所选来源缺少余额时显示占位 |
-| 余额估算 | 两种真实余额均不可用时，可填写初始余额。按填写时间之后的默认项目消费估算，并注明「估算」 |
+| 余额估算 | 两种真实余额均不可用时，可填写初始余额。按账号保存金额和填写时间，按该时间之后的默认项目消费估算 |
+| 充值入口 | 趣智校园余额视图可打开支付宝内的趣智校园官方小程序。返回 App 后刷新余额 |
 | 请求代扣 | 残留账单（12 点后结束、余额不足导致没扣成）可在账单上手动补扣，走 `/order/thirdTrade/single/json/pay` |
-| 账单查询 | 合并近 3 个月已关联项目的消费，列表展示最近 20 条。趋势支持近 7 天和本月，刷新失败保留可用快照 |
+| 账单查询 | 合并近 3 个月已关联项目的消费，列表展示最近 20 条。消费趋势插件支持近 7 天和本月，刷新失败保留可用快照 |
 | 账单详情 | 点击账单查看设备名、设备类型、消费金额、消费时间、订单号 |
 | 下拉刷新 | 主页和钱包页面均支持下拉刷新 |
 
@@ -80,16 +82,19 @@
 | 页面切换动画 | 三大主页之间左右视差滑移 + 淡入淡出弹簧动画 |
 | 液态玻璃卡片 | 半透明底色 + 微光描边 + 零阴影 |
 | 背景装扮 | 主页 / 使用页各一套独立背景，自动提取主题色，透明度 / 模糊 / 亮度可调 |
-| 卡片自定义 | 首页的上次使用、常用设备和附近设备可排序、隐藏。「我的」与「设置」支持卡片排序、隐藏和跨页移动 |
+| 卡片自定义 | 首页的上次使用、常用设备和附近设备可排序、隐藏。「我的」与「设置」支持卡片排序、隐藏和跨页移动。隐藏卡片只调整布局 |
+| 开关管理 | 默认汇集通知、消费趋势和屏幕常亮三个开关。编辑状态可调整顺序、移出或放回开关管理 |
+| 屏幕常亮 | 默认关闭。开启后在前台使用页保持屏幕亮起，离开页面或退到后台后释放 |
+| 插件管理 | 默认随 App 安装附近设备、消费趋势、屏幕常亮、背景装扮和运行日志。绑定寝室可安装。支持插件更新、本地导入和卸载，目录与下载包经客户端校验 |
 | 应用内更新 | 读取 GitHub Release 比对版本，展示 [应用内精简日志](docs/APP_CHANGELOG.md) 并下载 APK。下载默认走 Gitee 镜像，可切回 GitHub。日志默认列最近 3 个版本 |
-| 内置运行日志 | 环形缓冲 + 文件滚动 + 敏感信息脱敏 + 崩溃捕获 + 一键导出 |
+| 运行日志 | 插件启用后记录运行日志，支持脱敏、滚动存储、崩溃捕获和导出 |
 | 扫码手电筒 | 扫码界面提供手电筒，开启后变暖黄 + 光晕 + 填充图标 |
 | 扫码相册识别 | 从相册选图识别二维码（`PickVisualMedia`，不需要存储权限） |
 | 加密存储 | 登录凭证用 EncryptedSharedPreferences 加密存储 |
 | 自动填充 | 登录输入框标注自动填充身份，手机密码管理器可保存 / 回填账号密码 |
 | 扫描权限按需申请 | 不再登录后自动弹窗；Android 12+ 用 `neverForLocation` 免掉定位权限 |
 | 学校名称自动获取 | 读 `/project/info/triple` 的 `projectName`，不用手填 |
-| 网络异常提示 | 断网时显示友好提示（自定义 Toast，带应用图标） |
+| 网络异常提示 | 用纯文字 Toast 显示简短提示 |
 | 挤号检测 | 在其他设备登录同一账号时弹出强制下线提示（25 秒心跳轮询，主动发现） |
 | 屏幕旋转 | 使用 rememberSaveable 保持登录状态和当前页面 |
 | 退出确认 | 洗澡中退出登录时弹出警告提示 |
@@ -103,7 +108,8 @@ app/src/main/
 ├── AndroidManifest.xml                    # 应用清单，权限声明
 ├── java/com/hualala/linyu/
 │   ├── MainActivity.kt                    # 主 Activity，导航、弹窗、主题管理
-│   ├── QrScanActivity.kt                  # 扫码界面（CameraX + ML Kit，支持相册选图 / 手电筒）
+│   ├── QrScanActivity.kt                  # Compose 扫码界面（CameraX、相册选图、手电筒）
+│   ├── QrDecoder.kt                       # ZXing 识别与设备码校验
 │   │
 │   ├── api/                               # 网络层
 │   │   ├── QzxyService.kt                 # Retrofit 接口定义（QzxyService，含使用码 / 一卡通 / 账号 / 代扣）
@@ -118,6 +124,12 @@ app/src/main/
 │   │   ├── BillHistoryCache.kt            # 按项目和月份缓存账单
 │   │   ├── ShowerController.kt            # 开阀 / 关阀 / 结算共享层（App 与小组件共用）
 │   │   ├── CloudCloseConfirmation.kt     # 云端关水后的状态复核
+│   │   ├── OrderUsageStatus.kt            # 设备占用与原订单状态判据
+│   │   ├── ShowerOrderTarget.kt           # 设备、当前账户与订单动作绑定
+│   │   ├── PendingBleOpen.kt              # 蓝牙费率写入前的待确认记录
+│   │   ├── ManualBalance.kt               # 以账户为范围的手填余额记录
+│   │   ├── PluginRepository.kt           # 插件清单校验、目录和安装包双源下载
+│   │   ├── InstalledPlugins.kt           # 本机插件安装状态与能力查询
 │   │   ├── ShowerEvents.kt                # 服务 → 界面的进程内事件（无 replay，App 不在就丢）
 │   │   ├── BalanceEstimator.kt            # 余额口径（真实值优先，拿不到才本地估算，三处共用）
 │   │   ├── SettlementEngine.kt            # 结算查询引擎（结算结果回退、订单补写、金额换算）
@@ -145,11 +157,12 @@ app/src/main/
 │   │
 │   ├── service/                           # 前台服务
 │   │   ├── ShowerWatchService.kt           # 用水监控（超时自动关停 / 订单轮询，脱离界面）
-│   │   └── WidgetBleService.kt             # 小组件蓝牙关阀（App 被杀也能关）
+│   │   └── WidgetBleService.kt             # 小组件蓝牙操作
 │   │
 │   ├── ui/                                # UI 层
 │   │   ├── LoginScreen.kt                 # 登录页面（密码 / 短信双模式）
 │   │   ├── LoginViewModel.kt              # 登录 ViewModel（网络异常友好提示）
+│   │   ├── LoginSmsRequests.kt            # 验证码请求与各手机号的发送状态
 │   │   ├── MainScreen.kt                  # 主页（设备列表、扫码、寝室筛选、余额显示）
 │   │   ├── MainViewModel.kt               # 主 ViewModel（蓝牙、MQTT、洗澡控制、开阀/
 │   │   │                                  # 关阀确认、消费结算、挤号检测）
@@ -157,14 +170,14 @@ app/src/main/
 │   │   ├── WalletScreen.kt                # 钱包页面（真实余额、账单列表、请求代扣、下拉刷新）
 │   │   ├── UserScreen.kt                  # 我的页面（可排序卡片 + 进程级缓存）
 │   │   ├── UseCodeSection.kt              # 使用码卡片 + 兑换弹窗
-│   │   ├── UserSettingsCards.kt           # 设置卡片（通知 / 背景 / 应用信息 / 关于）
+│   │   ├── UserSettingsCards.kt           # 设置卡片（开关、插件、背景、日志、关于与应用信息）
 │   │   ├── FloatingPillNavBar.kt          # 悬浮胶囊导航栏（弹簧滑块，点击无波纹）
 │   │   ├── AppBackgroundLayer.kt          # 自定义背景渲染层（透明度/模糊/亮度）
 │   │   ├── CustomBackgroundScreen.kt      # 背景装扮设置页（主页 / 使用页切换）
 │   │   ├── LogViewerDialog.kt             # 内置日志查看器
 │   │   ├── TailEllipsisText.kt            # 单行文本，放不下先缩字号、再省**开头**（保留结尾，设备名辨识度在房号）
 │   │   ├── DeviceDetailDialog.kt          # 设备详情弹窗（SN、MAC、预扣金额、状态）
-│   │   ├── LinYuToast.kt                  # 自定义 Toast 组件（应用图标 + 深色背景）
+│   │   ├── LinYuToast.kt                  # 自定义纯文字 Toast 组件
 │   │   └── theme/
 │   │       ├── Theme.kt                   # 深浅主题配色方案（液态玻璃卡片）
 │   │       └── CircularRevealTheme.kt     # 圆形揭示主题切换容器
@@ -181,7 +194,7 @@ app/src/main/
 │       ├── BluetoothScanner.kt            # BLE 蓝牙扫描（过滤 KLCXKJ-Water 设备）
 │       ├── MD5Utils.kt                    # 密码加密（MD5 取后 10 位）
 │       ├── SignUtils.kt                   # 短信验证码 secret 计算（按手机号推导）
-│       ├── Notifier.kt                    # 系统通知（三条渠道：用水状态 / 静默 / 事件）
+│       ├── Notifier.kt                    # 系统通知与五个兼容渠道
 │       ├── AppLogger.kt                   # 运行日志（脱敏 / 滚动 / 崩溃捕获）
 │       ├── BackgroundManager.kt           # 背景图存取（主页 / 使用页两套配置）
 │       ├── BackgroundState.kt             # 背景配置状态（Compose State）
@@ -193,7 +206,6 @@ app/src/main/
 │
 └── res/
     ├── drawable/
-    │   ├── app_logo.png                   # 应用 logo（Toast 图标）
     │   ├── ic_flashlight.xml              # 扫码手电筒图标
     │   ├── widget_glass.xml              # 小组件玻璃卡底（深色中性玻璃 + 高光 + 轮廓）
     │   ├── widget_inset.xml              # 内嵌玻璃槽（上次消费 / 计时）
@@ -241,7 +253,7 @@ app/src/main/
 │  LoginScreen / MainScreen / ShowerScreen│
 │  WalletScreen / UserScreen              │
 │  FloatingPillNavBar / AppBackgroundLayer│
-│  （+ QrScanActivity，扫码页，非 Compose）│
+│  QrScanActivity（扫码页）               │
 ├─────────────────────────────────────────┤
 │  主题层                                 │
 │  Theme (AppColors 组合局部)             │
@@ -271,11 +283,16 @@ app/src/main/
 │  AccountInfo / CampusUserInfo / Project │
 │  ActiveOrder / MqttOrderMsg / 缓存快照  │
 └─────────────────────────────────────────┘
-
-> 架构图只列主要的。UI 层还有 `QrScanActivity`（唯一非 Compose 的页面——扫码）、
-> `DeviceGlyph`（设备图标，emoji 与图标的渲染层映射）、`DeductConfirmDialog`（代扣确认，
-> 两处入口共用一份文案）、`TailEllipsisText`、`LogViewerDialog` 等。
 ```
+
+UI 层还包括 `DeviceGlyph`、两处入口共用的 `DeductConfirmDialog`、`TailEllipsisText` 和 `LogViewerDialog`。通知权限、开关布局迁移和插件生命周期见 [安卓功能管理](docs/ANDROID_FEATURE_MANAGEMENT.md)。
+
+### 订单控制与恢复
+
+- App、通知和小组件的用水动作以登录用户、设备、订单号和开始时间核对本地目标。涉及服务端的操作使用设备所属项目和账户。旧操作与当前订单不匹配时提示刷新或保留待确认状态
+- 云端开阀先查是否已有本账户订单，显式恢复只继续原单。关阀受理后查询原订单是否仍在运行，设备空闲或已有明确的替换订单时只清理原单对应状态
+- 蓝牙费率包写入前保存 `PendingBleOpen`，收到确认后转为活跃订单。未确认时，下次操作核对同一设备和服务端订单再决定是否恢复。关阀后将服务端记账和设备清理分别确认
+- 结算优先按原订单号查询，必要时查所属项目的账单，未确认记录留待后续复核。详见 [接口与判据](API-qzxy.md) 和 [设备控制流程](开发者指南.md)
 
 ### 主题与背景实现要点
 
@@ -301,7 +318,7 @@ app/src/main/
     v2.2.1 曾按宽高比切成「按钮在右侧」的横向版，但横向版里卡片固定 96dp、圆球固定 58dp，
     都不跟尺寸缩放，拉大只会多出空白；判据 `minWidth > minHeight` 又过于灵敏，
     稍微一拉就跳过去，v2.2.2 已整体移除
-  - `2x4` 带侧边导航，三个页面
+  - `2x4` 带侧边导航，包含设备控制、附近设备和账单。附近设备入口随插件安装状态显示
 - **1x1 的两处特殊处理**：
   - 「空闲」那块是三种情况共用的（真·空闲 / 未登录 / 没选过设备），只有顶部那行小字不同
   - 布局根节点加了内边距对齐应用图标的视觉大小。`minWidth/minHeight` 不是「组件多大」
@@ -314,8 +331,7 @@ app/src/main/
   **每加一个尺寸都要在 `forEachWidget` 的登记表里加一项**，否则那个尺寸收不到重绘
 - 设备类型**在小组件里仍是 emoji**（账单行 / 附近设备行的圆头像）。App 界面用的是图标，
   两边的取舍见 `design/device-icons/README.md`
-- 通知：横幅类走 `linyu_alert` 渠道（`IMPORTANCE_HIGH`）。⚠️ 渠道 importance 创建后改不了，
-  所以「关掉横幅」是另建一条 DEFAULT 渠道二选一，不是改原来那条
+- 通知继续使用已有渠道 ID，横幅提醒走 `linyu_alert`。通知系统权限和渠道偏好可以分别管理，详见 [安卓功能管理](docs/ANDROID_FEATURE_MANAGEMENT.md)
 - 开阀与关阀共用 `data/ShowerController.kt`。云端关水受理后由 `CloudCloseConfirmation` 复核状态，未确认时保留用水状态与重试入口
 - 状态推送：App 内进入 / 退出洗澡、自动关停时调用 `LinYuWidget.refreshAll(context)`
 
@@ -323,7 +339,7 @@ app/src/main/
 
 | 依赖 | 版本 | 用途 |
 |---|---|---|
-| Jetpack Compose BOM | 2024.02.01 | 声明式 UI 框架 |
+| Jetpack Compose BOM | 2025.06.01 | 声明式 UI 框架 |
 | Material 3 | BOM 管理 | Material Design 3 组件 |
 | Material | BOM 管理 | pullRefresh 下拉刷新组件 |
 | Retrofit | 2.9.0 | HTTP 客户端 |
@@ -332,9 +348,15 @@ app/src/main/
 | Eclipse Paho MQTT | 1.2.5 / 1.1.1 | MQTT 客户端 |
 | Jetpack Security Crypto | 1.1.0-alpha06 | EncryptedSharedPreferences 加密存储 |
 | CameraX | 1.4.2 | 相机预览（扫码） |
-| ML Kit Barcode | 17.3.0 | 二维码识别 |
+| ZXing Core | 3.5.3 | 相机及相册二维码识别 |
 | AndroidX Core | — | FileProvider（日志导出）、WindowCompat（边到边） |
 | AppWidget / RemoteViews | 平台内置 | 桌面小组件（无额外依赖） |
+
+### 插件与应用内更新
+
+- 插件声明由客户端匹配到已有功能。目录首选 Gitee，网络或校验失败时回退 GitHub。安装包先尝试目录来源，并核对哈希与清单。详见 [插件系统 v2](docs/插件系统-v2.md)
+- APK 的版本与下载信息来自 GitHub Release，默认从 Gitee 下载。安装前复核包名和签名证书。发布资产提供 SHA-256 时也核对文件哈希
+- 构建会把 [简版更新日志](docs/APP_CHANGELOG.md) 放入应用。联网校验通过后，以新文档完整替换本地缓存，刷新失败则保留已有内容
 
 ### R8 混淆兼容方案
 
@@ -382,6 +404,8 @@ KEY_ALIAS=你的别名
 KEY_PASSWORD=你的密钥密码
 ```
 
+`KEYSTORE_FILE` 的相对路径以 `app` 模块为基准。签名字段缺失或密钥库文件不可用时，Release 构建产出未签名包，Debug 与测试任务仍可运行。
+
 ### 构建命令
 
 ```bash
@@ -400,9 +424,9 @@ KEY_PASSWORD=你的密钥密码
 ```
 app/build/outputs/apk/
 ├── debug/
-│   └── app-debug.apk          # Debug 版本（未签名，未混淆）
+│   └── app-debug.apk          # Debug 版本（调试签名，未混淆）
 └── release/
-    └── app-release.apk        # Release 版本（已签名，已混淆，已压缩）
+    └── app-release.apk        # 配置签名时的 Release 产物名，已混淆、压缩
 ```
 
 ### Release 构建配置
@@ -418,10 +442,14 @@ buildTypes {
             getDefaultProguardFile("proguard-android-optimize.txt"),
             "proguard-rules.pro"
         )
-        signingConfig = signingConfigs.getByName("release")
+        signingConfig = releaseSigningConfig
     }
 }
 ```
+
+### 本地验证
+
+Windows 可运行 `./gradlew.bat testReleaseUnitTest lintRelease`，在其他系统使用 `./gradlew testReleaseUnitTest lintRelease`。回归覆盖插件清单、下载回退、余额账户隔离、短信回调归属和订单身份。通知权限、快捷关水、二维码识别率和启动器交互仍需真机验证。
 
 ---
 
@@ -436,17 +464,17 @@ buildTypes {
 | 小组件不显示实时消费 | 小组件不连 MQTT，使用中只显示预扣金额 |
 | Android 12 以下仍需定位权限 | 系统对蓝牙发现的硬性规定，无法绕过 |
 | 自动填充依赖厂商 ROM | 不同厂商密码管理器行为差异较大，未在多机型验证 |
-| 实时扣费 | MQTT 仅在订单结束时推送消费金额，洗澡中无实时扣费（官方 App 也是如此） |
+| 实时扣费 | 本项目从 MQTT 接收订单结束后的消费金额。用水期间显示计时和预扣金额 |
 | 结算延迟 | 优先按订单号查询结算结果，必要时查看所属项目的账单。未能确认金额时留待对账 |
-| 一卡通余额需已签约 | `/settlement/campus/userInfo` 提供已签约校园卡余额。账单页可切换查看趣智校园钱包，两种余额均不可用时可手填初始余额估算 |
+| 一卡通余额需已签约 | `/settlement/campus/userInfo` 提供已签约校园卡余额。账单页可切换查看趣智校园钱包，两种余额均不可用时可手填初始余额估算。没有账户归属的旧手填记录不参与估算 |
 | MQTT 明文 | 趣智校园 MQTT 服务器不支持 TLS，通信内容未加密 |
 | 密码安全 | 趣智校园使用 MD5 取后 10 位作为密码，安全性较低（官方协议限制） |
 | 学校适配 | 多数学校装发行版即可（projectId 自动下发）。部署方式特殊的才要改 **BLE 过滤名 / MQTT 地址**，见下方「不同学校的适配」 |
-| 深色模式 | 登录页和洗澡页为硬编码颜色切换，非完全跟随系统；扫码页固定深色（相机画面上深浅模式没有意义）|
+| 深色模式 | 扫码页保持深色布局 |
 | 1x1 图标对齐 | 占用仍是**一格**（和应用图标一样），只是靠内边距让视觉大小接近。各家桌面的格子尺寸和图标内边距都不同，做不到像素级一致，6dp 是折中值 |
 | 小组件仍是 emoji | 账单行 / 附近设备行的设备头像用的是 emoji，和 App 内的图标不一致（那两个列表里可能有饮水机，换了会图标与 emoji 混排）|
 | 多语言 | 仅支持中文 |
-| 关阀结果无法完全确认 | 断网时只能知道「请求没发出去」，无法知道服务端**在断网前有没有收到**。这时按未确认处理并把本地状态放回去（显示为仍在用水）——宁可多显示一次使用中，也不谎报「已结束」|
+| 关阀结果无法完全确认 | 断网或超时时只确认当前查询结果未知。若无法复核原订单已结束，保留本地使用状态与重试入口 |
 | 「占用中」徽章可能提前消失 | 徽章的是非对错取决于「对方什么时候用完」，而那个时间客户端拿不到。目前用 **3 分钟** TTL 兜底，所以对方洗得久时徽章会先消失——点一下仍会正常提示被占用。理论上界应该是设备的 `autoDisConTime`，但那个字段的实测样本还没拿到 |
 
 ### 历史问题的修复记录
